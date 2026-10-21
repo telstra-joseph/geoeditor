@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Shapefile export tests</title>
+</head>
+<body>
+  <h1>Shapefile export tests</h1>
+  <pre id="results"></pre>
+  <script src="../js/qgis-style.js"></script>
+  <script src="../js/shapefile-writer.js"></script>
+  <script>
+    'use strict';
+    const results = [];
+    function assert(condition, message) {
+      if (!condition) throw new Error(message);
+    }
+    function test(name, run) {
+      try {
+        run();
+        results.push({ name, passed: true });
+      } catch (error) {
+        results.push({ name, passed: false, error: error.message });
+      }
+    }
+    const point = (properties) => ({ properties, geometry: { type: 'Point', coordinates: [149, -35] } });
+    const decode = (data) => new TextDecoder().decode(data);
+    function qml(out, name) {
+      const file = out.files.find((f) => f.name === name);
+      assert(file, `Missing ${name}`);
+      const doc = new DOMParser().parseFromString(decode(file.data), 'application/xml');
+      assert(!doc.querySelector('parsererror'), 'Invalid QML XML');
+      const cats = [...doc.querySelectorAll('category')];
+      cats.forEach((cat) => {
+        assert(cat.getAttribute('render') === 'true', 'Category should be enabled');
+        assert(doc.querySelector(`symbols > symbol[name="${cat.getAttribute('symbol')}"]`), 'Missing category symbol');
+      });
+      return { doc, cats };
+    }
+    function dbf(out, name) {
+      const data = out.files.find((f) => f.name === name).data;
+      const view = new DataView(data.buffer);
+      const header = view.getUint16(8, true);
+      const columns = [];
+      for (let p = 32; p < header - 1; p += 32) {
+        columns.push({
+          name: decode(data.subarray(p, p + 11)).replace(/\0.*$/, ''),
+          type: String.fromCharCode(data[p + 11]),
+        });
+      }
+      return { columns, count: view.getUint32(4, true) };
+    }
+    test('Default export remains SHP/SHX/DBF/PRJ/CPG without a style', () => {
+      const out = ShapefileWriter.writeShapefiles('default', [point({ name: 'NSW', extra: 9 })], ['name', 'extra'], { name: 'string', extra: 'number' });
+      assert(out.files.length === 5 && !out.files.some((f) => f.name.endsWith('.qml')), 'Default files changed');
+      assert(dbf(out, 'default.dbf').columns.length === 2, 'Default columns changed');
+    });
+    test('Selected fields only, renamed DBF category field, escaped values and deduplicated categories', () => {
+      const field = 'a long field name';
+      const other = 'a long field neighbour';
+      const value = 'NSW & ACT <"test">\nline';
+      const features = [point({ [field]: 'first', [other]: value, excluded: 1 }), point({ [other]: value })];
+      const out = ShapefileWriter.writeShapefiles('selected', features, [field, other], {}, { categoryField: other });
+      const { doc, cats } = qml(out, 'selected.qml');
+      const cols = dbf(out, 'selected.dbf').columns;
+      assert(cols.length === 2 && cols[1].name === 'a_long_f_1', 'DBF field collision mapping incorrect');
+      assert(doc.querySelector('renderer-v2').getAttribute('attr') === cols[1].name, 'QML uses wrong field name');
+      assert(cats.length === 1 && cats[0].getAttribute('value') === value, 'Categories not escaped/deduplicated');
+      assert(doc.querySelector('symbol').getAttribute('type') === 'marker', 'Wrong point symbol');
+      assert(features[0].properties.excluded === 1, 'Source properties modified');
+    });
+    test('Numeric values and nulls retain their DBF types', () => {
+      const out = ShapefileWriter.writeShapefiles('numbers', [0, 1.25, null].map((n) => point({ n })), ['n'], { n: 'number' }, { categoryField: 'n' });
+      const { cats } = qml(out, 'numbers.qml');
+      assert(cats.map((c) => c.getAttribute('type')).join() === 'double,double,NULL', 'Numeric category types incorrect');
+      assert(cats[0].getAttribute('value') === '0' && cats[1].getAttribute('value') === '1.25', 'Numeric category values incorrect');
+    });
+    test('Logical values handle modern boolean and older T/F DBF readers', () => {
+      const out = ShapefileWriter.writeShapefiles('logical', [true, false, null].map((flag) => point({ flag })), ['flag'], { flag: 'boolean' }, { categoryField: 'flag' });
+      const { doc, cats } = qml(out, 'logical.qml');
+      const attr = doc.querySelector('renderer-v2').getAttribute('attr');
+      assert(attr.includes('to_string("flag")') && attr.includes("'t'") && attr.includes("'f'"), 'Missing logical normalization');
+      assert(cats.map((c) => c.getAttribute('value')).join() === 'true,false,NULL', 'Logical categories incorrect');
+    });
+    test('Empty text and missing values share an empty category, literal NULL and ? stay text', () => {
+      const out = ShapefileWriter.writeShapefiles('empty', [null, '', undefined, 'NULL', '?'].map((s) => point({ s })), ['s'], { s: 'string' }, { categoryField: 's' });
+      const { cats } = qml(out, 'empty.qml');
+      assert(cats.length === 3 && cats[0].getAttribute('type') === 'NULL', 'Empty category incorrect');
+      assert(cats[1].getAttribute('type') === 'string' && cats[2].getAttribute('value') === '?', 'Literal values changed');
+    });
+    test('QML categories use truncated stored DBF values', () => {
+      const prefix = 'x'.repeat(254);
+      const out = ShapefileWriter.writeShapefiles('long', [point({ s: prefix + 'a' }), point({ s: prefix + 'b' })], ['s'], {}, { categoryField: 's' });
+      const { cats } = qml(out, 'long.qml');
+      assert(cats.length === 1 && cats[0].getAttribute('value') === prefix, 'Text truncation creates unmatched categories');
+    });
+    test('Unicode category values survive XML and DBF encoding', () => {
+      const value = '\u00e9\u4eac';
+      const out = ShapefileWriter.writeShapefiles('unicode', [point({ s: value })], ['s'], {}, { categoryField: 's' });
+      assert(qml(out, 'unicode.qml').cats[0].getAttribute('value') === value, 'Unicode category changed');
+    });
+    test('Mixed geometries get correctly named per-family styles and category subsets', () => {
+      const features = [
+        point({ category: 'point' }),
+        { properties: { category: 'line' }, geometry: { type: 'LineString', coordinates: [[149, -35], [150, -35]] } },
+        { properties: { category: 'polygon' }, geometry: { type: 'Polygon', coordinates: [[[149, -35], [150, -35], [150, -34], [149, -35]]] } },
+        { properties: { category: 'invalid' }, geometry: null },
+      ];
+      const out = ShapefileWriter.writeShapefiles('mixed', features, ['category'], {}, { categoryField: 'category' });
+      [['points', 'marker', 'point'], ['lines', 'line', 'line'], ['polygons', 'fill', 'polygon']].forEach(([suffix, type, value]) => {
+        const { doc, cats } = qml(out, `mixed_${suffix}.qml`);
+        assert(cats.length === 1 && cats[0].getAttribute('value') === value, 'Wrong family categories');
+        assert(doc.querySelector('symbol').getAttribute('type') === type, 'Wrong family symbol');
+        assert(dbf(out, `mixed_${suffix}.dbf`).count === 1, 'DBF records changed');
+      });
+      assert(out.warnings.length === 1, 'Skipped geometry warning lost');
+    });
+    test('No attributes still generates an ID and excluded category fields are rejected', () => {
+      const out = ShapefileWriter.writeShapefiles('id', [point({})], [], {});
+      assert(dbf(out, 'id.dbf').columns[0].name === 'ID', 'Generated ID missing');
+      let rejected = false;
+      try { ShapefileWriter.writeShapefiles('bad', [point({ a: 'x' })], [], {}, { categoryField: 'a' }); }
+      catch (error) { rejected = error.message.includes('category column'); }
+      assert(rejected, 'Missing category column accepted');
+    });
+    const xml = (out, name) => decode(out.files.find((file) => file.name === name).data);
+    const symbolProperty = (model, key, entry = 0) => {
+      const layer = model.entries[entry].symbol.querySelector('layer');
+      const option = [...layer.querySelectorAll('Option')].find((node) => node.getAttribute('name') === key);
+      const legacy = [...layer.children].find((node) => node.tagName === 'prop' && node.getAttribute('k') === key);
+      return option ? option.getAttribute('value') : legacy && legacy.getAttribute('v');
+    };
+    function editControl(host, label, value) {
+      const node = [...host.querySelectorAll('label')].find((item) => item.firstChild.textContent === label);
+      assert(node, `Missing control ${label}`);
+      const input = node.querySelector('input, select');
+      input.value = value;
+      input.dispatchEvent(new Event('input'));
+      return input;
+    }
+    test('Optional single-symbol styles work for each geometry family', () => {
+      ['point', 'line', 'polygon'].forEach((family) => {
+        const model = QgisStyle.read(QgisStyle.singleStyle(family));
+        assert(model.family === family && model.kind === 'singleSymbol', 'Wrong single-symbol style');
+        assert(model.entries.length === 1, 'Wrong symbol count');
+      });
+      const out = ShapefileWriter.writeShapefiles('single', [point({})], [], {}, { includeStyle: true });
+      assert(QgisStyle.read(xml(out, 'single.qml')).kind === 'singleSymbol', 'Single-symbol QML was not written');
+    });
+    test('Style previews match final QML without generating shapefile geometry buffers', () => {
+      const features = [point({ s: 'NSW' }), point({ s: 'ACT' })];
+      const options = { categoryField: 's', includeStyle: true };
+      const preview = ShapefileWriter.writeShapefiles('preview', features, ['s'], {}, { ...options, styleOnly: true });
+      const final = ShapefileWriter.writeShapefiles('preview', features, ['s'], {}, options);
+      assert(preview.files.length === 1 && preview.files[0].name === 'preview.qml', 'Preview generated binary files');
+      assert(xml(preview, 'preview.qml') === xml(final, 'preview.qml'), 'Preview differs from final QML');
+    });
+    test('Visual point controls change shape, colour, size, opacity and downloaded XML', () => {
+      const model = QgisStyle.read(QgisStyle.singleStyle('point'));
+      model.fileName = 'point.qml';
+      const host = document.createElement('div');
+      let downloaded = null;
+      QgisStyle.renderEditor(host, [model], (m) => { downloaded = QgisStyle.serialize(m); });
+      editControl(host, 'Point shape', 'star');
+      editControl(host, 'Point size (mm)', '7.5');
+      editControl(host, 'Fill colour', '#ff0000');
+      editControl(host, 'Outline width (mm)', '0');
+      editControl(host, 'Symbol opacity (%)', '35');
+      assert(symbolProperty(model, 'name') === 'star' && symbolProperty(model, 'size') === '7.5', 'Point edits lost');
+      assert(symbolProperty(model, 'color') === '255,0,0,255', 'Colour edit lost');
+      assert(model.entries[0].symbol.getAttribute('alpha') === '0.35', 'Opacity edit lost');
+      assert(host.querySelector('svg polygon'), 'Star preview did not update');
+      const invalid = editControl(host, 'Point size (mm)', '-1');
+      assert(!invalid.checkValidity() && symbolProperty(model, 'size') === '7.5', 'Invalid size applied');
+      invalid.value = '7.5';
+      host.querySelector('button').click();
+      assert(QgisStyle.read(downloaded).entries[0].symbol.getAttribute('alpha') === '0.35', 'Standalone download lost edits');
+    });
+    test('Line and polygon controls update their QGIS symbol properties', () => {
+      [['line', 'Line style', 'dash dot', 'line_style'], ['polygon', 'Fill pattern', 'cross', 'style']].forEach(([family, label, value, key]) => {
+        const model = QgisStyle.read(QgisStyle.singleStyle(family));
+        const host = document.createElement('div');
+        QgisStyle.renderEditor(host, [model], () => {});
+        editControl(host, label, value);
+        assert(symbolProperty(model, key) === value, 'Style property not updated');
+        assert(host.querySelector('svg'), 'Missing symbol preview');
+      });
+    });
+    test('Each category has independent appearance, labels and initial visibility', () => {
+      const out = ShapefileWriter.writeShapefiles('category', ['NSW', 'ACT'].map((state) => point({ state })), ['state'], {}, { categoryField: 'state' });
+      const model = QgisStyle.read(xml(out, 'category.qml'));
+      const host = document.createElement('div');
+      QgisStyle.renderEditor(host, [model], () => {});
+      editControl(host, 'Point shape', 'triangle');
+      editControl(host, 'Category label', 'New South Wales');
+      host.querySelector('input[type=checkbox]').click();
+      host.querySelector('input[type=checkbox]').dispatchEvent(new Event('change'));
+      const select = host.querySelector('select');
+      select.value = '1';
+      select.dispatchEvent(new Event('change'));
+      editControl(host, 'Point shape', 'square');
+      assert(symbolProperty(model, 'name', 0) === 'triangle' && symbolProperty(model, 'name', 1) === 'square', 'Category edits are not independent');
+      const styled = ShapefileWriter.writeShapefiles('category', ['NSW', 'ACT'].map((state) => point({ state })), ['state'], {}, {
+        categoryField: 'state', styles: { point: QgisStyle.serialize(model) },
+      });
+      const final = QgisStyle.read(xml(styled, 'category.qml'));
+      assert(final.entries[0].category.getAttribute('render') === 'false' && final.entries[0].label === 'New South Wales', 'Category label/visibility lost');
+      assert(symbolProperty(final, 'name', 0) === 'triangle' && symbolProperty(final, 'name', 1) === 'square', 'Writer lost symbol edits');
+    });
+    test('Imported single symbols apply to every category, preserving legacy QML properties', () => {
+      const source = '<qgis><renderer-v2 type="singleSymbol"><symbols><symbol name="0" type="marker" alpha="0.8"><layer class="SimpleMarker"><prop k="name" v="diamond"/><prop k="size" v="6"/><prop k="color" v="1,2,3,120"/><prop k="offset" v="1,2"/></layer></symbol></symbols></renderer-v2></qgis>';
+      const out = ShapefileWriter.writeShapefiles('legacy', ['NSW', 'ACT'].map((state) => point({ state })), ['state'], {}, { categoryField: 'state' });
+      const imported = QgisStyle.read(QgisStyle.merge(xml(out, 'legacy.qml'), source));
+      assert(imported.entries.every((e) => e.symbol.getAttribute('alpha') === '0.8'), 'Imported opacity lost');
+      assert(symbolProperty(imported, 'name') === 'diamond' && symbolProperty(imported, 'offset') === '1,2', 'Imported symbol settings lost');
+      const host = document.createElement('div');
+      QgisStyle.renderEditor(host, [imported], () => {});
+      editControl(host, 'Fill colour', '#ffffff');
+      assert(symbolProperty(imported, 'color') === '255,255,255,120', 'Imported colour alpha was not preserved');
+    });
+    test('Category import matches numeric values across QGIS numeric types', () => {
+      const out = ShapefileWriter.writeShapefiles('n', [point({ n: 1 })], ['n'], {}, { categoryField: 'n' });
+      const original = xml(out, 'n.qml');
+      const imported = QgisStyle.merge(original, original.replace('type="double"', 'type="long"'));
+      assert(QgisStyle.read(imported).entries[0].category.getAttribute('type') === 'double', 'Target category type changed');
+    });
+    test('Unsupported and mismatched imported styles fail without changing the target', () => {
+      const target = QgisStyle.singleStyle('point');
+      const unsupported = [
+        '<not-qgis/>', target.replace('singleSymbol', 'RuleRenderer'),
+        target.replace('SimpleMarker', 'SvgMarker'),
+        target.replace('value="MM"', 'value="MapUnit"'),
+        target.replace('</symbol>', '<layer class="SimpleMarker"/></symbol>'),
+        target.replace('value="circle"', 'value="unknown-marker"'),
+        QgisStyle.singleStyle('line'),
+      ];
+      unsupported.forEach((source) => {
+        let failed = false;
+        try { QgisStyle.merge(target, source); } catch (error) { failed = !!error.message; }
+        assert(failed, 'Unsupported import accepted');
+      });
+      const out = ShapefileWriter.writeShapefiles('cat', [point({ state: 'NSW' })], ['state'], {}, { categoryField: 'state' });
+      const original = xml(out, 'cat.qml');
+      [original.replace('value="NSW"', 'value="ACT"'), original.replace('attr="state"', 'attr="other"')].forEach((source) => {
+        let failed = false;
+        try { QgisStyle.merge(original, source); } catch (error) { failed = !!error.message; }
+        assert(failed, 'Mismatched category/field import accepted');
+      });
+      assert(QgisStyle.read(original).entries[0].category.getAttribute('value') === 'NSW', 'Rejected import mutated source');
+    });
+    test('Legend names sort ascending/descending naturally, with empty values last and unchanged shapefile records', () => {
+      const features = ['Zulu', 'Area 10', 'alpha', 'Area 2', null].map((name) => point({ SA2_NAME21: name }));
+      const write = (direction) => ShapefileWriter.writeShapefiles('names', features, ['SA2_NAME21'], {}, {
+        categoryField: 'SA2_NAME21', legendSort: direction ? { field: 'SA2_NAME21', direction } : null,
+      });
+      const original = write(null);
+      const ascending = write('asc');
+      const descending = write('desc');
+      const values = (out) => QgisStyle.read(xml(out, 'names.qml')).entries.map((entry) => entry.category.getAttribute('value')).join();
+      assert(values(original) === 'Zulu,Area 10,alpha,Area 2,NULL', 'Default legend order changed');
+      assert(values(ascending) === 'alpha,Area 2,Area 10,Zulu,NULL', 'Ascending text order incorrect');
+      assert(values(descending) === 'Zulu,Area 10,Area 2,alpha,NULL', 'Descending text order incorrect');
+      original.files.filter((file) => !file.name.endsWith('.qml')).forEach((file) => {
+        const sorted = ascending.files.find((item) => item.name === file.name).data;
+        assert(file.data.length === sorted.length && file.data.every((byte, i) => byte === sorted[i]), 'Legend sorting changed shapefile data');
+      });
+    });
+    test('Legend numeric and boolean sort columns can be excluded from exported attributes', () => {
+      const cases = [
+        { values: [10, 2, 0, -1, null], asc: '3,2,1,0,4', desc: '0,1,2,3,4' },
+        { values: [true, false, null], asc: '1,0,2', desc: '0,1,2' },
+      ];
+      cases.forEach(({ values, asc, desc }) => {
+        const features = values.map((rank, i) => point({ category: String(i), rank }));
+        ['asc', 'desc'].forEach((direction) => {
+          const out = ShapefileWriter.writeShapefiles('rank', features, ['category'], {}, { categoryField: 'category', legendSort: { field: 'rank', direction } });
+          const order = QgisStyle.read(xml(out, 'rank.qml')).entries.map((entry) => entry.category.getAttribute('value')).join();
+          assert(order === (direction === 'asc' ? asc : desc), 'Numeric/boolean legend order incorrect');
+          assert(dbf(out, 'rank.dbf').columns.length === 1, 'Sort column was unexpectedly exported');
+        });
+      });
+    });
+    test('Grouped categories use their smallest non-empty sort value and stable ties in either direction', () => {
+      const rows = [['A', 20], ['B', 3], ['C', null], ['D', 3], ['A', 1], ['E', '']];
+      const features = rows.map(([category, rank]) => point({ category, rank }));
+      const snapshot = JSON.stringify(features);
+      ['asc', 'desc'].forEach((direction) => {
+        const out = ShapefileWriter.writeShapefiles('groups', features, ['category'], {}, { categoryField: 'category', legendSort: { field: 'rank', direction } });
+        const order = QgisStyle.read(xml(out, 'groups.qml')).entries.map((entry) => entry.label).join();
+        assert(order === (direction === 'asc' ? 'A,B,D,C,E' : 'B,D,A,C,E'), 'Grouped representative, null order or tie handling incorrect');
+      });
+      assert(JSON.stringify(features) === snapshot, 'Sorting mutated source features');
+    });
+    test('Mixed values in a text column use a consistent natural-text comparison', () => {
+      const features = [-2, '-1', -10].map((rank, i) => point({ category: String(i), rank }));
+      const out = ShapefileWriter.writeShapefiles('mixed-text', features, ['category'], { rank: 'string' }, {
+        categoryField: 'category', legendSort: { field: 'rank', direction: 'asc' },
+      });
+      assert(QgisStyle.read(xml(out, 'mixed-text.qml')).entries.map((entry) => entry.label).join() === '1,0,2', 'Text column comparison depends on runtime value types');
+    });
+    test('Reordered categories keep colours, shapes, labels, opacity and visibility attached to their values', () => {
+      const features = ['B', 'A'].map((category) => point({ category }));
+      const baseline = ShapefileWriter.writeShapefiles('styled', features, ['category'], {}, { categoryField: 'category' });
+      const model = QgisStyle.read(xml(baseline, 'styled.qml'));
+      model.entries[0].symbol.querySelector('Option[name="name"]').setAttribute('value', 'star');
+      model.entries[0].symbol.querySelector('Option[name="color"]').setAttribute('value', '255,0,0,255');
+      model.entries[0].symbol.setAttribute('alpha', '0.4');
+      model.entries[0].category.setAttribute('label', 'Edited B');
+      model.entries[0].category.setAttribute('render', 'false');
+      const out = ShapefileWriter.writeShapefiles('styled', features, ['category'], {}, {
+        categoryField: 'category', legendSort: { field: 'category', direction: 'asc' }, styles: { point: QgisStyle.serialize(model) },
+      });
+      const sorted = QgisStyle.read(xml(out, 'styled.qml'));
+      assert(sorted.entries.map((entry) => entry.category.getAttribute('value')).join() === 'A,B', 'Sorted order lost during style merge');
+      assert(symbolProperty(sorted, 'name', 1) === 'star' && symbolProperty(sorted, 'color', 1) === '255,0,0,255', 'Appearance moved to the wrong category');
+      assert(sorted.entries[1].label === 'Edited B' && sorted.entries[1].symbol.getAttribute('alpha') === '0.4' && sorted.entries[1].category.getAttribute('render') === 'false', 'Edited category settings lost');
+      assert(symbolProperty(sorted, 'color', 0) === symbolProperty(QgisStyle.read(xml(baseline, 'styled.qml')), 'color', 1), 'Unedited category colour changed');
+    });
+    test('Mixed-geometry legend sorting matches previews and stays local to each shapefile', () => {
+      const features = [
+        point({ category: 'P2', rank: 2 }), point({ category: 'P1', rank: 1 }),
+        { properties: { category: 'L2', rank: 2 }, geometry: { type: 'LineString', coordinates: [[149, -35], [150, -35]] } },
+        { properties: { category: 'L1', rank: 1 }, geometry: { type: 'LineString', coordinates: [[149, -35], [150, -35]] } },
+      ];
+      const options = { categoryField: 'category', legendSort: { field: 'rank', direction: 'asc' } };
+      const out = ShapefileWriter.writeShapefiles('mix', features, ['category'], {}, options);
+      const preview = ShapefileWriter.writeShapefiles('mix', features, ['category'], {}, { ...options, styleOnly: true });
+      [['points', 'P1,P2'], ['lines', 'L1,L2']].forEach(([family, order]) => {
+        assert(QgisStyle.read(xml(out, `mix_${family}.qml`)).entries.map((entry) => entry.label).join() === order, 'Wrong per-family legend order');
+        assert(xml(out, `mix_${family}.qml`) === xml(preview, `mix_${family}.qml`), 'Sorted preview differs from exported QML');
+      });
+    });
+    test('Legend sorting groups categories by their actual truncated DBF values', () => {
+      const prefix = 'x'.repeat(254);
+      const features = [point({ category: prefix + 'A', rank: 9 }), point({ category: 'Other', rank: 3 }), point({ category: prefix + 'B', rank: 1 })];
+      const out = ShapefileWriter.writeShapefiles('truncated', features, ['category'], {}, {
+        categoryField: 'category', legendSort: { field: 'rank', direction: 'asc' },
+      });
+      const entries = QgisStyle.read(xml(out, 'truncated.qml')).entries;
+      assert(entries.length === 2 && entries[0].label === prefix && entries[1].label === 'Other', 'DBF grouping was not respected when sorting');
+    });
+    test('Invalid legend sorting requests are reported explicitly', () => {
+      const features = [point({ category: 'A', rank: 1 })];
+      [
+        { legendSort: { field: 'rank', direction: 'asc' } },
+        { categoryField: 'category', legendSort: { field: 'rank', direction: 'invalid' } },
+        { categoryField: 'category', legendSort: { field: 'missing', direction: 'asc' } },
+      ].forEach((options) => {
+        let rejected = false;
+        try { ShapefileWriter.writeShapefiles('invalid', features, ['category'], {}, options); }
+        catch (error) { rejected = !!error.message; }
+        assert(rejected, 'Invalid sort options accepted');
+      });
+    });
+    window.testResults = results;
+    document.getElementById('results').textContent = results.map((r) => `${r.passed ? 'PASS' : 'FAIL'} ${r.name}${r.error ? ': ' + r.error : ''}`).join('\n');
+  </script>
+</body>
+</html>

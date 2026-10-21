@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>Sydney sample</name>
+<Style id="s1"><LineStyle><color>ff0000ff</color><width>4</width></LineStyle></Style>
+<Placemark><name>Opera House</name><description>Iconic</description><ExtendedData><Data name="year"><value>1973</value></Data></ExtendedData><Point><coordinates>151.2153,-33.8568,0</coordinates></Point></Placemark>
+<Placemark><name>Walk</name><styleUrl>#s1</styleUrl><LineString><coordinates>151.20,-33.85,0 151.21,-33.86,0 151.22,-33.86,0</coordinates></LineString></Placemark>
+</Document></kml>
