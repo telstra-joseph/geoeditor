@@ -1,5 +1,6 @@
 (() => {
   'use strict';
+  lucide.createIcons();
 
   /* ---------- constants & state ---------- */
   const KML_STYLE_KEYS = new Set([
@@ -10,6 +11,8 @@
   ]);
   const PALETTE = ['#2563eb', '#dc2626', '#16a34a', '#d97706', '#9333ea', '#0891b2', '#db2777', '#65a30d'];
   const PAGE_SIZE = 200;
+  const columnWidths = new WeakMap();
+  const MIN_COLUMN_WIDTH = 120;
   const GEOM_LABEL = { Mixed: 'Mixed', Point: 'Points', Line: 'Lines', Polygon: 'Polygons' };
 
   const state = {
@@ -25,6 +28,23 @@
   };
 
   const $ = (id) => document.getElementById(id);
+
+  function applyTheme(theme) {
+    document.documentElement.dataset.theme = theme;
+    const dark = theme === 'dark';
+    const button = $('btnTheme');
+    button.replaceChildren(actionIcon(dark ? 'Sun' : 'Moon'));
+    button.title = dark ? 'Switch to light mode' : 'Switch to dark mode';
+    button.setAttribute('aria-label', button.title);
+    button.setAttribute('aria-pressed', String(dark));
+  }
+
+  applyTheme(document.documentElement.dataset.theme);
+  $('btnTheme').addEventListener('click', () => {
+    const theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    applyTheme(theme);
+    try { localStorage.setItem('geoeditor-theme', theme); } catch {}
+  });
 
   /* ---------- helpers ---------- */
   function toast(msg, kind = '', ms = 5000) {
@@ -135,7 +155,11 @@
   const imagery = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
     maxZoom: 19, attribution: 'Tiles &copy; Esri',
   });
-  L.control.layers({ OpenStreetMap: osm, Satellite: imagery, Blank: L.layerGroup() }, null, { position: 'topright' }).addTo(map);
+  const basemapControl = L.control.layers({ OpenStreetMap: osm, Satellite: imagery, Blank: L.layerGroup() }, null, { position: 'topright' }).addTo(map);
+  const basemapToggle = basemapControl.getContainer().querySelector('.leaflet-control-layers-toggle');
+  basemapToggle.replaceChildren(actionIcon('Layers'));
+  basemapToggle.title = 'Choose basemap';
+  basemapToggle.setAttribute('aria-label', 'Choose basemap');
   L.control.scale().addTo(map);
 
   map.pm.addControls({
@@ -155,6 +179,20 @@
   });
   map.pm.setGlobalOptions({ snappable: true, allowSelfIntersection: true });
   map.pm.setLang('en');
+
+  const mapIcons = {
+    polyline: 'Route', rectangle: 'RectangleHorizontal', polygon: 'Pentagon',
+    'circle-marker': 'Circle', edit: 'SquarePen', drag: 'Move', cut: 'Scissors', delete: 'Trash2'
+  };
+  Object.entries(mapIcons).forEach(([tool, icon]) => {
+    const container = map.getContainer().querySelector(`.leaflet-pm-icon-${tool}`);
+    if (!container) return;
+    container.replaceChildren(actionIcon(icon));
+    const button = container.closest('a');
+    button.setAttribute('aria-label', button.parentElement.title);
+  });
+  map.getContainer().querySelector('.leaflet-control-zoom-in').replaceChildren(actionIcon('Plus'));
+  map.getContainer().querySelector('.leaflet-control-zoom-out').replaceChildren(actionIcon('Minus'));
 
   const pmBusy = () => ['globalEditModeEnabled', 'globalDragModeEnabled', 'globalRemovalModeEnabled', 'globalDrawModeEnabled', 'globalCutModeEnabled']
     .some((fn) => typeof map.pm[fn] === 'function' && map.pm[fn]());
@@ -634,29 +672,23 @@
     $('layerHint').style.display = state.layers.length ? 'none' : '';
   }
 
-  function iconButton(text, title, onClick) {
+  function iconButton(icon, title, onClick) {
     const b = document.createElement('button');
-    b.textContent = text;
+    b.appendChild(actionIcon(icon));
     b.title = title;
     b.setAttribute('aria-label', title);
     b.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
     return b;
   }
 
-  function fileActionIcon(direction) {
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.setAttribute('class', 'action-icon');
-    svg.setAttribute('viewBox', '0 0 24 24');
-    svg.setAttribute('aria-hidden', 'true');
-    const paths = direction === 'upload'
-      ? ['M12 16V4', 'm7 9 5-5 5 5', 'M5 20h14']
-      : ['M12 4v12', 'm7 11 5 5 5-5', 'M5 20h14'];
-    paths.forEach((d) => {
-      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      path.setAttribute('d', d);
-      svg.appendChild(path);
-    });
-    return svg;
+  function actionIcon(name) {
+    const icon = lucide.createElement(lucide.icons[name]);
+    icon.setAttribute('class', 'action-icon');
+    icon.setAttribute('width', '14');
+    icon.setAttribute('height', '14');
+    icon.setAttribute('aria-hidden', 'true');
+    icon.setAttribute('focusable', 'false');
+    return icon;
   }
 
   function geometryPreview(leaf) {
@@ -779,17 +811,16 @@
       info.textContent = `${leavesOf(lyr).length} features · ${GEOM_LABEL[lyr.geomType]}`;
       const sp = document.createElement('span');
       sp.className = 'spacer';
-      const downloadButton = iconButton('', 'Download this layer', () => downloadLayers([lyr]));
-      downloadButton.appendChild(fileActionIcon('download'));
+      const downloadButton = iconButton('Download', 'Download this layer', () => downloadLayers([lyr]));
       meta.append(
         info, sp,
-        iconButton('✎', 'Rename layer', async () => {
+        iconButton('Pencil', 'Rename layer', async () => {
           const r = await askForm('Rename layer', [{ key: 'name', label: 'Layer name', value: lyr.name, required: true }], { okLabel: 'Rename' });
           if (r && r.name.trim()) { lyr.name = r.name.trim(); renderLayers(); renderTable(); }
         }),
-        iconButton('⌖', 'Zoom to layer', () => zoomToLayer(lyr)),
+        iconButton('Search', 'Zoom to layer', () => zoomToLayer(lyr)),
         downloadButton,
-        iconButton('🗑', 'Delete layer', () => deleteLayer(lyr))
+        iconButton('Trash2', 'Delete layer', () => deleteLayer(lyr))
       );
       li.append(vis, color, name, meta);
       ul.appendChild(li);
@@ -860,24 +891,40 @@
 
     const table = document.createElement('table');
     table.className = 'attrs';
+    const savedWidths = columnWidths.get(lyr) || new Map();
+    columnWidths.set(lyr, savedWidths);
+    const colgroup = document.createElement('colgroup');
+    const columns = Array.from({ length: lyr.fields.length + 1 }, () => document.createElement('col'));
+    colgroup.append(...columns);
+    table.appendChild(colgroup);
+    let sizes;
+    const resizeColumn = (index, width) => {
+      sizes[index] = Math.max(MIN_COLUMN_WIDTH, Math.round(width));
+      columns[index].style.width = `${sizes[index]}px`;
+      table.style.width = `${sizes.reduce((total, size) => total + size, 0)}px`;
+      savedWidths.set(lyr.fields[index - 1], sizes[index]);
+      table.tHead.rows[0].cells[index].querySelector('.column-resizer').setAttribute('aria-valuenow', sizes[index]);
+    };
     const thead = table.createTHead().insertRow();
     const th0 = document.createElement('th');
     th0.className = 'rn';
     th0.textContent = '#';
     thead.appendChild(th0);
-    lyr.fields.forEach((f) => {
+    lyr.fields.forEach((f, fieldIndex) => {
       const th = document.createElement('th');
       const box = document.createElement('div');
       box.className = 'th';
       const nameBtn = document.createElement('button');
       nameBtn.className = 'fname';
-      nameBtn.textContent = f;
+      const label = document.createElement('span');
+      label.textContent = f;
+      nameBtn.appendChild(label);
       nameBtn.title = 'Rename field / change type';
       nameBtn.addEventListener('click', () => editField(lyr, f));
       const sortBtn = document.createElement('button');
       sortBtn.className = 'sort';
       const isSorted = state.sort && state.sort.field === f;
-      sortBtn.textContent = isSorted ? (state.sort.direction === 'asc' ? '↑' : '↓') : '↕';
+      sortBtn.appendChild(actionIcon(isSorted ? (state.sort.direction === 'asc' ? 'ArrowUp' : 'ArrowDown') : 'ArrowUpDown'));
       sortBtn.title = isSorted ? `Sorted ${state.sort.direction === 'asc' ? 'ascending' : 'descending'}; click to reverse` : `Sort by ${f} ascending`;
       sortBtn.setAttribute('aria-label', sortBtn.title);
       sortBtn.addEventListener('click', () => {
@@ -885,16 +932,75 @@
         state.page = 0;
         renderTable();
       });
-      const type = document.createElement('span');
-      type.className = 'ftype';
-      type.textContent = { string: 'abc', number: '123', boolean: 'T/F' }[lyr.types[f] || 'string'];
       const x = document.createElement('button');
       x.className = 'x';
-      x.textContent = '✕';
+      x.appendChild(actionIcon('X'));
       x.title = 'Delete field';
+      x.setAttribute('aria-label', `Delete field ${f}`);
       x.addEventListener('click', () => deleteField(lyr, f));
-      box.append(nameBtn, sortBtn, type, x);
-      th.appendChild(box);
+      box.append(nameBtn, sortBtn, x);
+      const resizer = document.createElement('span');
+      resizer.className = 'column-resizer';
+      resizer.tabIndex = 0;
+      resizer.title = `Resize column ${f}`;
+      resizer.setAttribute('role', 'separator');
+      resizer.setAttribute('aria-label', resizer.title);
+      resizer.setAttribute('aria-orientation', 'vertical');
+      resizer.setAttribute('aria-valuemin', MIN_COLUMN_WIDTH);
+      resizer.title = `Resize column ${f}; double-click to fit`;
+      const fitColumn = async () => {
+        await document.fonts.ready;
+        if (!table.isConnected) return;
+        const context = document.createElement('canvas').getContext('2d');
+        if (!context) return;
+        const nameStyle = getComputedStyle(nameBtn);
+        context.font = nameStyle.font;
+        let width = context.measureText(f).width + box.getBoundingClientRect().width - nameBtn.getBoundingClientRect().width
+          + parseFloat(nameStyle.paddingLeft) + parseFloat(nameStyle.paddingRight) + resizer.offsetWidth;
+        const input = table.querySelector('tbody input');
+        const valueStyle = getComputedStyle(input || table);
+        context.font = valueStyle.font;
+        const padding = input ? parseFloat(valueStyle.paddingLeft) + parseFloat(valueStyle.paddingRight) : 16;
+        leavesOf(lyr).forEach(leaf => {
+          width = Math.max(width, context.measureText(display(leaf.feature.properties[f])).width + padding);
+        });
+        resizeColumn(fieldIndex + 1, Math.ceil(width + parseFloat(getComputedStyle(th).borderRightWidth) + 2));
+      };
+      resizer.addEventListener('dblclick', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        fitColumn();
+      });
+      let drag;
+      resizer.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        event.stopPropagation();
+        drag = { startX: event.clientX, width: sizes[fieldIndex + 1] };
+        resizer.setPointerCapture(event.pointerId);
+        table.classList.add('resizing');
+        [...table.rows].forEach(row => row.cells[fieldIndex + 1].classList.add('resizing-column'));
+      });
+      resizer.addEventListener('pointermove', (event) => {
+        if (drag) resizeColumn(fieldIndex + 1, drag.width + event.clientX - drag.startX);
+      });
+      resizer.addEventListener('lostpointercapture', () => {
+        drag = null;
+        table.classList.remove('resizing');
+        table.querySelectorAll('.resizing-column').forEach(cell => cell.classList.remove('resizing-column'));
+      });
+      resizer.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          fitColumn();
+          return;
+        }
+        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+        event.preventDefault();
+        const step = event.shiftKey ? 50 : 10;
+        resizeColumn(fieldIndex + 1, sizes[fieldIndex + 1] + (event.key === 'ArrowRight' ? step : -step));
+      });
+      th.append(box, resizer);
       thead.appendChild(th);
     });
 
@@ -913,8 +1019,9 @@
       const rowActions = document.createElement('span');
       rowActions.className = 'rn-actions';
       rowActions.append(
-        iconButton('⌖', 'Zoom to feature', () => selectLeaf(leaf, { fromTable: true, pan: true })),
-        iconButton('🗑', 'Delete feature', () => deleteFeature(lyr, leaf))
+        iconButton('Search', 'Zoom to feature', () => selectLeaf(leaf, { fromTable: true, pan: true })),
+        iconButton('Download', 'Download this feature', () => downloadFeature(lyr, leaf)),
+        iconButton('Trash2', 'Delete feature', () => deleteFeature(lyr, leaf))
       );
       rnContent.append(rowNumber, geometryPreview(leaf), rowActions);
       rn.appendChild(rnContent);
@@ -934,6 +1041,17 @@
       });
     });
     wrap.appendChild(table);
+    sizes = [...thead.cells].map((cell, index) => index === 0
+      ? savedWidths.get(null) || cell.getBoundingClientRect().width
+      : savedWidths.get(lyr.fields[index - 1]) || Math.max(MIN_COLUMN_WIDTH, cell.getBoundingClientRect().width));
+    savedWidths.set(null, sizes[0]);
+    columns.forEach((column, index) => { column.style.width = `${sizes[index]}px`; });
+    table.style.tableLayout = 'fixed';
+    table.style.width = `${sizes.reduce((total, size) => total + size, 0)}px`;
+    lyr.fields.forEach((field, index) => {
+      savedWidths.set(field, sizes[index + 1]);
+      thead.cells[index + 1].querySelector('.column-resizer').setAttribute('aria-valuenow', sizes[index + 1]);
+    });
   }
 
   function markSelectedRow() {
@@ -1039,10 +1157,12 @@
   }
 
   /* ---------- export ---------- */
-  function askShapefileOptions(lyr, exportBase) {
+  function askShapefileOptions(lyr, exportBase, featureOnly = false) {
     return new Promise((resolve) => {
       const dlg = $('shapefileExportDlg');
-      $('shapefileExportLayer').textContent = `Layer: "${lyr.name}". All features are exported, regardless of the table search filter.`;
+      $('shapefileExportLayer').textContent = featureOnly
+        ? `Layer: "${lyr.name}". Only this feature will be exported.`
+        : `Layer: "${lyr.name}". All features are exported, regardless of the table search filter.`;
       const category = $('shapefileCategoryField');
       category.replaceChildren();
       const none = document.createElement('option');
@@ -1322,9 +1442,9 @@
     return { files: [{ name: base + '.geojson', data: JSON.stringify(fc, null, 2) }], warnings };
   }
 
-  async function exportBaseName(lyr) {
+  async function exportBaseName(lyr, feature = null) {
     const base = safeName(lyr.name);
-    const selected = state.selected && state.selected._glayer === lyr ? state.selected : null;
+    const selected = feature || (state.selected && state.selected._glayer === lyr ? state.selected : null);
     if (!selected || !lyr.fields.length) return base;
     const options = [['', 'Use layer name'], ...lyr.fields.map((field) => {
       const value = display(selected.feature.properties[field]).replace(/\s+/g, ' ').trim();
@@ -1343,13 +1463,18 @@
     return safeName(value);
   }
 
-  async function downloadLayers(layers) {
+  function downloadFeature(lyr, leaf) {
+    const featureLayer = { ...lyr, group: { getLayers: () => [leaf] } };
+    return downloadLayers([featureLayer], leaf);
+  }
+
+  async function downloadLayers(layers, feature = null) {
     if (!layers.length) return toast('There is nothing to download yet.', 'warn');
     const fmt = $('fmt').value;
     const used = new Set();
     const exports = [];
     for (const lyr of layers) {
-      let base = await exportBaseName(lyr);
+      let base = await exportBaseName(lyr, feature);
       if (base === null) return;
       let n = 2;
       const root = base;
@@ -1361,7 +1486,7 @@
     if (fmt === 'shp') {
       for (const { lyr, base } of exports) {
         if (!leavesOf(lyr).length) continue;
-        const options = await askShapefileOptions(lyr, base);
+        const options = await askShapefileOptions(lyr, base, !!feature);
         if (!options) return;
         shapefileOptions.set(lyr, options);
       }
@@ -1430,13 +1555,23 @@
   });
 
   // Resizable table panel
+  const panelObserver = new ResizeObserver(() => {
+    const main = $('main').getBoundingClientRect();
+    const sidebar = $('sidebar').getBoundingClientRect();
+    const table = $('tablePanel').getBoundingClientRect();
+    const stacked = sidebar.width >= main.width - 1;
+    $('main').style.setProperty('--panel-left', `${stacked ? 0 : sidebar.width}px`);
+    $('main').style.setProperty('--panel-top', `${stacked ? sidebar.height : 0}px`);
+    $('main').style.setProperty('--panel-bottom', `${main.bottom - table.top + 6}px`);
+  });
+  [$('main'), $('sidebar'), $('tablePanel')].forEach(panel => panelObserver.observe(panel));
+
   $('splitter').addEventListener('mousedown', (e) => {
     e.preventDefault();
     const total = $('workspace').getBoundingClientRect();
     const move = (ev) => {
       const h = Math.min(total.height - 140, Math.max(80, total.bottom - ev.clientY));
       $('tablePanel').style.flexBasis = h + 'px';
-      map.invalidateSize();
     };
     const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); };
     window.addEventListener('mousemove', move);

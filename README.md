@@ -24,7 +24,7 @@ See [FLOWCHART.md](./FLOWCHART.md) for diagrams of how the app works.
 ### Attribute table
 - Edit cells directly; edits are validated against each column's type (text, number, true/false).
 - Click a column name to rename it or change its type; use the adjacent sort button to sort ascending or descending; add or delete columns. **Undo** reverses recent cell edits and field changes.
-- Filter rows, page through large layers (200 rows per page), and zoom to or delete individual features.
+- Filter rows, page through large layers (200 rows per page), and zoom to, download or delete individual features.
 - Selecting a row highlights the feature on the map, and clicking a feature selects its row.
 
 ### Bulk delete
@@ -46,6 +46,7 @@ Notes:
 ### Export
 Choose a format with **Download as**, then download the active layer or all layers.
 When a feature is selected in the active layer, choose one of its attribute columns to use its value as the export filename.
+To export just one feature, use its row's download icon. It uses the chosen format and the clicked feature's filename values, with the usual column and style options for shapefiles. Other features and the current selection are unchanged.
 
 | Format | Output |
 | --- | --- |

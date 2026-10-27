@@ -4,6 +4,17 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Geo Editor – shapefile, KML &amp; KMZ</title>
+  <link rel="preload" href="lib/geist.woff2" as="font" type="font/woff2" crossorigin>
+  <script>
+    (() => {
+      let theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      try {
+        const saved = localStorage.getItem('geoeditor-theme');
+        if (saved === 'dark' || saved === 'light') theme = saved;
+      } catch {}
+      document.documentElement.dataset.theme = theme;
+    })();
+  </script>
   <link rel="stylesheet" href="lib/leaflet.css">
   <link rel="stylesheet" href="lib/geoman.css">
   <link rel="stylesheet" href="css/style.css">
@@ -11,10 +22,10 @@
 <body>
   <header id="topbar">
     <h1>🌍 Geo Editor</h1>
-    <button id="btnUpload" class="primary" title="Upload shapefile (.zip), KML, KMZ or GeoJSON"><svg class="action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4"></path><path d="m7 9 5-5 5 5"></path><path d="M5 20h14"></path></svg> Upload</button>
+    <button id="btnUpload" class="primary" title="Upload shapefile (.zip), KML, KMZ or GeoJSON"><i data-lucide="upload" class="action-icon" aria-hidden="true"></i> Upload</button>
     <input id="fileInput" type="file" multiple hidden
            accept=".zip,.kml,.kmz,.geojson,.json,.shp,.shx,.dbf,.prj,.cpg">
-    <button id="btnNewLayer" title="Create an empty layer to draw on">＋ New layer</button>
+    <button id="btnNewLayer" title="Create an empty layer to draw on"><i data-lucide="plus" class="action-icon" aria-hidden="true"></i> New layer</button>
     <span class="spacer"></span>
     <label class="fmt">Download as
       <select id="fmt">
@@ -25,8 +36,9 @@
         <option value="csv">CSV</option>
       </select>
     </label>
-    <button id="btnDlLayer" title="Download the active layer"><svg class="action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12"></path><path d="m7 11 5 5 5-5"></path><path d="M5 20h14"></path></svg> Active layer</button>
-    <button id="btnDlAll" class="primary" title="Download every layer"><svg class="action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12"></path><path d="m7 11 5 5 5-5"></path><path d="M5 20h14"></path></svg> All layers</button>
+    <button id="btnDlLayer" title="Download the active layer"><i data-lucide="download" class="action-icon" aria-hidden="true"></i> Active layer</button>
+    <button id="btnDlAll" class="primary" title="Download every layer"><i data-lucide="download" class="action-icon" aria-hidden="true"></i> All layers</button>
+    <button id="btnTheme" type="button" title="Switch theme" aria-label="Switch theme" aria-pressed="false"><i data-lucide="moon" class="action-icon" aria-hidden="true"></i></button>
   </header>
 
   <main id="main">
@@ -68,14 +80,14 @@
           <strong id="tableTitle">Attribute table</strong>
           <span id="tableCount" class="muted"></span>
           <input id="filter" type="search" placeholder="Filter rows…">
-          <button id="btnUndo" title="Undo last table edit" disabled>↶ Undo</button>
-          <button id="btnAddField" title="Add an attribute column">＋ Field</button>
-          <button id="btnBulkDelete" title="Delete features by an attribute condition" disabled>Bulk delete</button>
+          <button id="btnUndo" title="Undo last table edit" disabled><i data-lucide="undo-2" class="action-icon" aria-hidden="true"></i> Undo</button>
+          <button id="btnAddField" title="Add an attribute column"><i data-lucide="plus" class="action-icon" aria-hidden="true"></i> Field</button>
+          <button id="btnBulkDelete" title="Delete features by an attribute condition" disabled><i data-lucide="trash-2" class="action-icon" aria-hidden="true"></i> Bulk delete</button>
           <span class="spacer"></span>
           <span id="pager" class="pager">
-            <button id="pgPrev" title="Previous page">‹</button>
+            <button id="pgPrev" title="Previous page" aria-label="Previous page"><i data-lucide="chevron-left" class="action-icon" aria-hidden="true"></i></button>
             <span id="pgInfo"></span>
-            <button id="pgNext" title="Next page">›</button>
+            <button id="pgNext" title="Next page" aria-label="Next page"><i data-lucide="chevron-right" class="action-icon" aria-hidden="true"></i></button>
           </span>
         </div>
         <div id="tableWrap"></div>
@@ -190,6 +202,7 @@
   <script src="lib/togeojson.js"></script>
   <script src="js/qgis-style.js"></script>
   <script src="js/shapefile-writer.js"></script>
+  <script src="lib/lucide.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>
