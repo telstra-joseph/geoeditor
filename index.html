@@ -60,17 +60,15 @@
       <details class="help">
         <summary>How to edit</summary>
         <ul>
-          <li><b>Draw</b> with the toolbar on the map (points, lines, polygons) — new shapes go into the active layer.</li>
-          <li><b>Edit shape</b>: use the edit, drag and cut tools. Remove with the bin tool.</li>
-          <li><b>Edit data</b>: click a cell in the table, or click a feature on the map. Use Undo for recent cell and field edits, and the arrows in a column header to sort.</li>
-          <li><b>Export filenames</b>: select a feature, then choose a column value for the filename when downloading its layer.</li>
-          <li><b>Add attributes</b> with “＋ Field” above the table. Click a column name to rename or change its type.</li>
-          <li><b>Bulk delete</b>: choose a column and condition, enter one allowed or matching value per line, then review the count and confirm. This affects the whole active layer, not just filtered rows. Download a backup first; deletions cannot be undone.</li>
-          <li><b>Shapefile export</b>: choose the attribute columns to include and optionally a QGIS category column. Extract the ZIP and keep the matching .qml beside the .shp. In QGIS, expand the layer to toggle categories; if the style is not loaded automatically, use Layer Properties → Symbology → Style → Load Style and select the .qml.</li>
-          <li><b>Symbol styles</b>: edit each category's point shape/size, line style/width, polygon fill/outline, colours and opacity in the export dialog. Import an existing .qml to reuse its simple symbols, or download the edited .qml on its own. Imports copy symbol appearance and category labels/visibility only, not labeling or other layer settings. Sizes use millimetres. Advanced renderers, multi-layer symbols and data-defined styles require QGIS.</li>
-          <li><b>Bulk style edits</b>: with a category column selected, open “Bulk edit categories” in the style editor. Filter and tick the categories, tick the properties to change (shape, size, colour, pattern, outline, opacity, initial visibility), then Apply. Colours can be one colour, distinct colours, or a gradient across the selected categories. You can also copy one category's whole symbol to the others, and undo bulk changes.</li>
-          <li><b>Legend order</b>: select a category column, then choose a legend sort column and ascending or descending order. This orders the QGIS legend, not the map's drawing order or shapefile records. Symbol edits are preserved.</li>
-          <li>Shapefile downloads are always WGS84 (EPSG:4326). Mixed layers are split per geometry type.</li>
+          <li><b>Start:</b> choose New layer to create a blank layer or upload files. You can also drop files onto the page.</li>
+          <li><b>Draw:</b> select a layer, then use the map tools. On mobile, hold a tool to see more choices.</li>
+          <li><b>Edit shapes:</b> use the edit, drag, cut or remove tools.</li>
+          <li><b>Edit data:</b> change table cells or use Field to add a column. Click a column name to rename it or change its type. Undo reverses recent cell and field edits.</li>
+          <li><b>Find rows:</b> filter or sort the table. On mobile, use the filter button; Clear filter restores all rows. Drag column edges to resize them.</li>
+          <li><b>Download:</b> choose the active layer or all layers, then a format. A row's download icon exports just that feature. Selected-feature values can be used as filenames.</li>
+          <li><b>QGIS styles:</b> shapefile export includes column, category, symbol and legend options. Keep each .qml beside its matching .shp. Exports use WGS84; mixed layers split by geometry type.</li>
+          <li><b>Delete carefully:</b> bulk deletion affects the whole active layer, including hidden rows. Deletions cannot be undone.</li>
+          <li><b>Save your work:</b> download before refreshing or closing the tab. Layers are not saved automatically.</li>
         </ul>
       </details>
       </div>

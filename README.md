@@ -1,8 +1,10 @@
 # Geo Editor
 
+**Version 1.0 | October 2026**
+
 A browser-based editor for geospatial files. Load shapefiles, KML, KMZ or GeoJSON, edit shapes and attribute data on a map, then export the result — including QGIS-ready shapefiles with customisable, toggleable symbol styles.
 
-Everything runs locally in your browser. No data is uploaded to a server, and there is no build step.
+Imported files and edits are processed locally in your browser, not uploaded to a server. There is no build step. Basemap tiles and the Doto heading font are fetched from external services.
 
 See [FLOWCHART.md](./FLOWCHART.md) for diagrams of how the app works.
 
@@ -10,21 +12,28 @@ See [FLOWCHART.md](./FLOWCHART.md) for diagrams of how the app works.
 
 ### Import
 - Zipped shapefiles (`.zip`), loose `.shp` / `.shx` / `.dbf` / `.prj` / `.cpg` files, `.kml`, `.kmz`, `.geojson` and `.json`.
-- Upload with the **Upload** button or drag and drop files anywhere on the page.
+- Choose **New layer → Upload layer**, click or tap the empty map's import prompt, or drag and drop files anywhere on the page.
 - Multiple files and multiple layers per file are supported.
 - Multi-part geometry collections are split into separate features; features without geometry are skipped, with a notice.
 - Coordinates must be longitude/latitude (WGS84). A shapefile in a projected CRS needs its `.prj` file included.
 
 ### Map and layers
 - Leaflet map with OpenStreetMap, satellite and blank basemaps.
+- The initial view frames Australia in the uncovered map area. Layer, feature and import zooms account for the sidebar and table panel too.
 - Layer list with show/hide, colour, rename, zoom-to-layer, per-layer download and delete.
+- Collapse or expand the Layers panel to make more room for the map. Resize the attribute table with the divider above it.
 - Draw points, lines, rectangles and polygons, and edit, drag, cut or remove shapes with the toolbar.
-- New shapes go into the active layer. Create empty layers with **New layer**.
+- New shapes go into the active layer. Choose **New layer → Blank layer** to set a name, geometry type and starting fields.
+- On mobile, hold the current drawing or editing tool to reveal the other tools in its group. Pinch to zoom; the desktop zoom buttons are hidden.
+- The map scale moves to suit the uncovered area and stays readable over either theme.
 
 ### Attribute table
 - Edit cells directly; edits are validated against each column's type (text, number, true/false).
 - Click a column name to rename it or change its type; use the adjacent sort button to sort ascending or descending; add or delete columns. **Undo** reverses recent cell edits and field changes.
-- Filter rows, page through large layers (200 rows per page), and zoom to, download or delete individual features.
+- Drag a column edge to resize it, double-click it to fit its contents, or focus the resize handle and use the arrow keys. Widths are remembered per layer for the current session.
+- Filter rows with the desktop search field. On mobile, open the filter dialog; **Apply** updates the search, **Cancel** preserves it, and **Clear filter** immediately restores all rows. Clear filter appears only when there is something to clear.
+- Page through large layers (200 rows per page), with feature counts showing the filtered and total number of rows.
+- Each row includes a geometry thumbnail and controls to zoom to, download or delete that feature.
 - Selecting a row highlights the feature on the map, and clicking a feature selects its row.
 
 ### Bulk delete
@@ -44,9 +53,9 @@ Notes:
 - Deletions **cannot be undone** — download a backup first.
 
 ### Export
-Choose a format with **Download as**, then download the active layer or all layers.
+Choose **Download**, select **Active layer** or **All layers**, then choose a format. Download is unavailable until a layer exists.
 When a feature is selected in the active layer, choose one of its attribute columns to use its value as the export filename.
-To export just one feature, use its row's download icon. It uses the chosen format and the clicked feature's filename values, with the usual column and style options for shapefiles. Other features and the current selection are unchanged.
+To export just one feature, use its row's download icon. It uses the current format and the clicked feature's filename values, with the usual column and style options for shapefiles. Other features and the current selection are unchanged. The layer-list download icon also reuses the current format.
 
 | Format | Output |
 | --- | --- |
@@ -86,9 +95,18 @@ Legend ordering changes only the legend. It does not change the map's drawing or
 4. If it does not, open **Layer Properties → Symbology → Style → Load Style** and select the `.qml`.
 5. Expand the layer in the Layers panel and tick or untick categories.
 
+### Interface, help and feedback
+- Light and dark themes with a remembered preference, compact tooltips, and responsive icon-only controls when space is limited.
+- Animated panel changes, radio selection and notifications respect reduced-motion preferences. Radio buttons and layer checkboxes retain native controls in forced-colors mode.
+- Delete actions use red states; the help button uses a yellow hover state. Enabled header, Layers and table-bar buttons have a subtle shadow in light mode or glow in dark mode.
+- Open **How to edit** with the Layers panel's question-mark button for a short guide to the main tasks.
+- Click **Geo Editor** in the header to open About: Australia-facing globe, "Imagined by Joseph Malicdem", Version 1.0, and October 2026. Close with the top-right button or Escape.
+- **Send feedback** opens an email draft to `joseph.malicdem@team.telstra.com` with subject **Geo Editor Feedback**; it does not send automatically.
+- The browser tab uses the title **Geo Editor** and the same Australia-facing globe as its favicon.
+
 ## Running the app
 
-The app is static HTML, CSS and JavaScript, and all libraries are bundled in `lib/`. Serve the folder with any static web server and open it in a browser. For example, with Python installed:
+The app is static HTML, CSS and JavaScript, with its JavaScript libraries bundled in `lib/`. Open [index.html](./index.html) directly in a modern browser, or serve the folder with any static web server. For example, with Python installed:
 
 ```powershell
 python -m http.server 8765
@@ -96,7 +114,7 @@ python -m http.server 8765
 
 Then open <http://localhost:8765/index.html>.
 
-An internet connection is only needed for the basemap tiles (OpenStreetMap and Esri imagery).
+An internet connection is needed for basemap tiles (OpenStreetMap and Esri imagery) and the Doto heading font from Google Fonts. The app uses a bundled fallback font if Doto is unavailable. The blank basemap does not request map tiles.
 
 **Important:** layers exist only in the open browser tab. Refreshing or closing the page loses them, so download your work first. The page warns before you leave while layers are loaded.
 
@@ -126,9 +144,12 @@ Open `tests/shapefile-writer.test.html` through the local server. It runs in the
 - [shp.js](https://github.com/calvinmetcalf/shapefile-js) — shapefile reading
 - [toGeoJSON](https://github.com/mapbox/togeojson) — KML conversion
 - [JSZip](https://stuk.github.io/jszip/) — zip reading and writing
+- [Lucide](https://lucide.dev/) - interface icons
+- [Doto](https://fonts.google.com/specimen/Doto) - heading font served by Google Fonts; Geist is bundled locally for the interface
 
 ## Limitations
-- No undo, and no saved projects; work lives only in the open tab.
+- Undo covers table cell and field changes, not drawing, geometry changes or feature/layer deletions. Bulk deletion cannot be undone.
+- No saved projects or automatic persistence; work lives only in the open tab.
 - Shapefile export is always WGS84 (EPSG:4326).
 - Very large files are limited by browser memory.
 - The QGIS style output has been checked by the app's tests but not against every QGIS version; if QGIS rejects a style, load it manually or recreate the styling in QGIS.

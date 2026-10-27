@@ -1,27 +1,30 @@
 # Geo Editor flowcharts
 
+**Version 1.0 | October 2026**
+
 Diagrams of how Geo Editor works. They use [Mermaid](https://mermaid.js.org/), which GitHub and VS Code (with a Mermaid extension) render automatically.
 
 See [README.md](./README.md) for the feature descriptions.
 
 ## 1. Overall architecture
 
-All processing happens in the browser; nothing is sent to a server.
+Imported files and edits are processed in the browser. External requests fetch basemap tiles and the heading font, not uploaded file contents.
 
 ```mermaid
 flowchart LR
     User(["User"])
 
     subgraph Browser["Browser tab"]
-        UI["index.html and style.css<br/>toolbar, sidebar, map, table, dialogs"]
-        App["app.js<br/>layers, import, table, bulk delete, export"]
+        UI["index.html and style.css<br/>responsive toolbar, collapsible sidebar,<br/>map, table, help and About dialogs"]
+        App["app.js<br/>layers, import, table, undo,<br/>filtering, bulk delete, export"]
         Writer["shapefile-writer.js<br/>SHP, SHX, DBF, PRJ, CPG, category QML"]
         Style["qgis-style.js<br/>read, validate, merge, edit QML"]
-        State[("In-memory layers<br/>lost on refresh")]
+        State[("In-memory layers, selection,<br/>table state and undo history<br/>lost on refresh")]
     end
 
-    Libs["lib/<br/>Leaflet, Geoman, shp.js, toGeoJSON, JSZip"]
+    Libs["lib/<br/>Leaflet, Geoman, shp.js,<br/>toGeoJSON, JSZip, Lucide"]
     Tiles["Basemap tile servers<br/>OpenStreetMap, Esri"]
+    Fonts["Google Fonts<br/>Doto heading font"]
     Files[("Local files")]
 
     User --> UI
@@ -32,6 +35,7 @@ flowchart LR
     Writer --> Style
     App --> Libs
     Libs -.-> Tiles
+    UI -.-> Fonts
     Files -->|"upload or drag and drop"| App
     App -->|"download"| Files
 ```
@@ -40,7 +44,12 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    A(["Upload button or drag and drop"]) --> B{"File type?"}
+    Start(["New layer"]) --> Source{"Blank or upload?"}
+    Source -->|"blank"| Blank["Choose name, geometry type<br/>and starting fields"]
+    Blank --> Active["Create and activate an empty layer"]
+    Source -->|"upload"| Picker["Choose local files"]
+    Import(["Empty-map import prompt<br/>or drag and drop"]) --> Picker
+    Picker --> B{"File type?"}
 
     B -->|".geojson or .json"| C["Parse JSON into features"]
     B -->|".kml"| D["Parse XML and convert with toGeoJSON"]
@@ -66,7 +75,7 @@ flowchart TD
     L --> M{"Coordinates look like<br/>longitude and latitude?"}
     M -->|"no"| X4["Show projected CRS error<br/>include the .prj file"]
     M -->|"yes"| N["Create layer, add to map,<br/>assign colour"]
-    N --> O["Make it active, fit the map,<br/>show attribute table"]
+    N --> O["Make it active, fit all loaded layers<br/>inside the uncovered map area,<br/>show attribute table"]
 ```
 
 ## 3. Editing
@@ -76,6 +85,7 @@ flowchart TD
     Layer[("Active layer")]
 
     subgraph Map["Map tools"]
+        Hold["Mobile: hold the current tool<br/>to reveal its group"]
         Draw["Draw point, line,<br/>rectangle, polygon"]
         Edit["Edit, drag, cut,<br/>remove shapes"]
         Click["Click a feature"]
@@ -84,9 +94,13 @@ flowchart TD
     subgraph Table["Attribute table"]
         Cell["Edit a cell"]
         Cols["Add, rename, retype,<br/>delete columns"]
-        Rows["Filter, page, zoom to,<br/>delete a row"]
+        Rows["Filter, sort, page, resize columns,<br/>zoom to or select a row"]
+        Delete["Delete a feature"]
+        Undo["Undo recent cell<br/>and field changes"]
     end
 
+    Hold --> Draw
+    Hold --> Edit
     Draw --> Layer
     Edit --> Layer
     Click -->|"selects row and opens popup"| Table
@@ -94,7 +108,13 @@ flowchart TD
     V -->|"yes"| Layer
     V -->|"no"| E["Show error and restore the old value"]
     Cols --> Layer
-    Rows --> Layer
+    V -->|"yes"| History["Record table undo action"]
+    Cols --> History
+    History --> Undo
+    Undo --> Layer
+    Rows --> R
+    Rows -->|"select or zoom"| Focus["Highlight map feature<br/>fit into uncovered map area"]
+    Delete -->|"cannot undo"| Layer
     Layer --> R["Refresh layer list,<br/>map and table"]
 ```
 
@@ -104,7 +124,9 @@ flowchart TD
 flowchart TD
     A(["Click Bulk delete"]) --> B["Choose a column"]
     B --> C["Choose a condition<br/>not in, in, contains,<br/>not contains, empty, not empty"]
-    C --> D["Enter values, one per line"]
+    C --> NeedsValues{"Condition needs values?"}
+    NeedsValues -->|"yes"| D["Enter values, one per line"]
+    NeedsValues -->|"empty or not empty"| G
     D --> E{"Values valid for<br/>the column type?"}
     E -->|"no"| F["Show message and<br/>disable Review"]
     F --> D
@@ -122,7 +144,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A(["Download as Shapefile<br/>then Active layer or All layers"]) --> B["For each layer with features,<br/>open the options dialog"]
+    A(["Choose Shapefile in Download,<br/>or use a layer/feature download icon<br/>with Shapefile as the current format"]) --> B["For each exported layer with features,<br/>open the options dialog"]
     B --> C["Choose columns to export"]
     C --> D{"Category column<br/>selected?"}
 
@@ -176,18 +198,64 @@ flowchart LR
     F --> G(["Tick or untick categories<br/>to show or hide features"])
 ```
 
-## 7. Other export formats
+## 7. Download workflow and other formats
 
 ```mermaid
 flowchart TD
-    A(["Choose a format and download"]) --> B{"Format?"}
-    B -->|"Shapefile"| C["Options dialog, see Shapefile export"]
+    A(["Download button<br/>enabled when layers exist"]) --> Scope["Choose Active layer or All layers"]
+    Scope --> Format["Choose export format"]
+    Format --> Name{"Selected feature<br/>has attributes?"}
+    Row(["Feature download icon"]) --> Single["Export only the clicked feature<br/>use the current format"]
+    Single --> Name
+    Layer(["Layer download icon"]) --> Current["Export that layer<br/>use the current format"]
+    Current --> Name
+    Name -->|"yes"| Filename["Choose an attribute value<br/>or layer name as filename"]
+    Filename --> B{"Format?"}
+    Name -->|"no"| B
+    B -->|"Shapefile"| C["Options dialog and ZIP export<br/>see Shapefile export"]
     B -->|"KML"| D["Build one KML document<br/>with layer colours"]
     B -->|"KMZ"| E["Build KML and compress as doc.kml"]
     B -->|"GeoJSON"| F["Write a FeatureCollection<br/>with all attributes"]
+    B -->|"CSV"| CSV["Write attribute columns<br/>and one row per feature"]
     D --> G{"One file or several?"}
     E --> G
     F --> G
+    CSV --> G
     G -->|"one"| H(["Download the file"])
     G -->|"several"| I["Bundle in a ZIP"] --> J(["Download the ZIP"])
 ```
+
+Cancelling any export dialog stops the download without changing layers or the current selection. Per-feature exports use the clicked feature for filename values; all other features remain untouched.
+
+## 8. Filtering rows
+
+```mermaid
+flowchart TD
+    Desktop(["Desktop search field"]) --> Apply["Update filter and reset page"]
+    Mobile(["Mobile filter button"]) --> Dialog["Filter rows dialog<br/>current filter prefilled"]
+    Dialog --> Draft["Edit search text<br/>show Clear filter only when needed"]
+    Draft --> Action{"Action?"}
+    Action -->|"Apply"| Apply
+    Action -->|"Clear filter"| Clear["Clear and apply immediately<br/>close the dialog"]
+    Action -->|"Cancel"| Keep(["Keep the existing filter"])
+    Apply --> Render["Refresh rows and filtered/total counts<br/>update active-filter indicator"]
+    Clear --> Render
+    Render --> Note["Filtering does not delete features<br/>bulk deletion still uses the whole layer"]
+```
+
+## 9. Responsive interface, help and About
+
+```mermaid
+flowchart TD
+    Start(["Open Geo Editor"]) --> Map["Frame Australia in the uncovered map area<br/>adjust scale placement to available space"]
+    Start --> Layout{"Available space?"}
+    Layout -->|"wide"| Wide["Labelled header/table actions<br/>full map toolbars and zoom buttons"]
+    Layout -->|"compact or mobile"| Compact["Icon-only actions where needed<br/>mobile tools open with a hold<br/>mobile filter dialog and pinch zoom"]
+    Sidebar(["Layers toggle"]) --> Panels["Animate collapse or expansion<br/>keep help accessible"]
+    Help(["Question-mark button"]) --> Guide["Short editing guide<br/>warn about deletions and unsaved work"]
+    Title(["Geo Editor heading"]) --> About["About dialog<br/>Australia-facing globe and app heading<br/>Imagined by Joseph Malicdem<br/>Version 1.0 / October 2026"]
+    About --> Feedback["Send feedback<br/>open email draft to<br/>joseph.malicdem@team.telstra.com<br/>subject: Geo Editor Feedback"]
+    About --> Close["Close button or Escape<br/>return focus to heading"]
+```
+
+Theme preference is remembered. Tooltips, radio selection, filter-clear reveals and notifications use the current theme and respect reduced-motion preferences where motion is used. Work remains in memory until downloaded; the About dialog does not send email automatically.
