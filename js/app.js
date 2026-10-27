@@ -29,6 +29,63 @@
 
   const $ = (id) => document.getElementById(id);
 
+  const tooltip = document.createElement('div');
+  tooltip.id = 'appTooltip';
+  tooltip.setAttribute('role', 'tooltip');
+  tooltip.setAttribute('popover', 'manual');
+  if (!tooltip.showPopover) tooltip.hidden = true;
+  document.body.appendChild(tooltip);
+  let tooltipTarget = null;
+  let tooltipTimer;
+  let tooltipDescription = null;
+  function hideTooltip() {
+    clearTimeout(tooltipTimer);
+    if (tooltipTarget) {
+      if (!tooltipTarget.hasAttribute('title')) tooltipTarget.title = tooltipTarget.dataset.tooltipTitle;
+      delete tooltipTarget.dataset.tooltipTitle;
+      if (tooltipDescription === null) tooltipTarget.removeAttribute('aria-describedby');
+      else tooltipTarget.setAttribute('aria-describedby', tooltipDescription);
+      tooltipTarget = null;
+    }
+    if (tooltip.hidePopover) {
+      if (tooltip.matches(':popover-open')) tooltip.hidePopover();
+    } else tooltip.hidden = true;
+  }
+  function prepareTooltip(event) {
+    if (event.pointerType === 'touch') return;
+    const target = event.target.closest('[title], [data-tooltip-title]');
+    if (target === tooltipTarget) return;
+    hideTooltip();
+    if (!target || !target.getAttribute('title')) return;
+    tooltipTarget = target;
+    tooltipDescription = target.getAttribute('aria-describedby');
+    target.dataset.tooltipTitle = target.title;
+    target.removeAttribute('title');
+    tooltipTimer = setTimeout(() => {
+      if (!target.isConnected) { hideTooltip(); return; }
+      tooltip.textContent = target.dataset.tooltipTitle;
+      target.setAttribute('aria-describedby', [tooltipDescription, tooltip.id].filter(Boolean).join(' '));
+      if (tooltip.showPopover) tooltip.showPopover();
+      else tooltip.hidden = false;
+      const rect = target.getBoundingClientRect();
+      const size = tooltip.getBoundingClientRect();
+      const left = Math.max(8, Math.min(innerWidth - size.width - 8, rect.left + (rect.width - size.width) / 2));
+      const top = rect.top >= size.height + 16 ? rect.top - size.height - 8 : rect.bottom + 8;
+      tooltip.style.left = `${left}px`;
+      tooltip.style.top = `${Math.max(8, Math.min(innerHeight - size.height - 8, top))}px`;
+    }, event.type === 'focusin' ? 0 : 200);
+  }
+  document.addEventListener('pointerover', prepareTooltip);
+  document.addEventListener('focusin', prepareTooltip);
+  ['pointerout', 'focusout'].forEach(type => document.addEventListener(type, (event) => {
+    if (tooltipTarget && !tooltipTarget.contains(event.relatedTarget)) hideTooltip();
+  }));
+  document.addEventListener('pointerdown', hideTooltip, true);
+  document.addEventListener('click', hideTooltip, true);
+  document.addEventListener('scroll', hideTooltip, true);
+  document.addEventListener('keydown', (event) => { if (event.key === 'Escape') hideTooltip(); });
+  window.addEventListener('resize', hideTooltip);
+
   function applyTheme(theme) {
     document.documentElement.dataset.theme = theme;
     const dark = theme === 'dark';
@@ -52,7 +109,10 @@
     el.className = 'toast ' + kind;
     el.textContent = msg;
     $('toasts').appendChild(el);
-    setTimeout(() => el.remove(), ms);
+    setTimeout(() => {
+      el.classList.add('leaving');
+      Promise.allSettled(el.getAnimations().map(animation => animation.finished)).then(() => el.remove());
+    }, ms);
   }
 
   function safeName(s) {
@@ -92,19 +152,39 @@
     button.title = state.undo.length ? `Undo ${state.undo[state.undo.length - 1].label}` : 'Undo last table edit';
   }
 
-  function askForm(title, fields, { message = '', okLabel = 'OK' } = {}) {
+  function askForm(title, fields, { message = '', okLabel = 'OK', destructive = false, compact = false } = {}) {
     return new Promise((resolve) => {
       const dlg = $('dlg');
+      dlg.classList.toggle('compact', compact);
       $('dlgTitle').textContent = title;
       $('dlgMsg').textContent = message;
       $('dlgMsg').style.display = message ? '' : 'none';
       $('dlgOk').textContent = okLabel;
+      $('dlgOk').classList.toggle('destructive', destructive);
       const body = $('dlgBody');
       body.replaceChildren();
       const inputs = {};
       fields.forEach((f) => {
+        if (f.type === 'radio') {
+          const group = document.createElement('fieldset');
+          group.className = 'radio-options';
+          group.setAttribute('aria-label', f.label);
+          f.options.forEach(([value, text]) => {
+            const choice = document.createElement('label');
+            const radio = document.createElement('input');
+            radio.type = 'radio';
+            radio.name = f.key;
+            radio.value = value;
+            radio.checked = value === f.value;
+            choice.append(radio, text);
+            group.appendChild(choice);
+          });
+          body.appendChild(group);
+          inputs[f.key] = group;
+          return;
+        }
         const label = document.createElement('label');
-        label.append(f.label);
+        if (!f.hideLabel) label.append(f.label);
         let input;
         if (f.type === 'select') {
           input = document.createElement('select');
@@ -122,6 +202,7 @@
           if (f.required) input.required = true;
           if (f.placeholder) input.placeholder = f.placeholder;
         }
+        if (f.hideLabel) input.setAttribute('aria-label', f.label);
         label.appendChild(input);
         if (f.hint) {
           const small = document.createElement('small');
@@ -130,25 +211,45 @@
         }
         body.appendChild(label);
         inputs[f.key] = input;
+        if (f.clearable) {
+          const clear = document.createElement('button');
+          clear.type = 'button';
+          clear.className = 'clear-filter';
+          clear.append(actionIcon('X'), 'Clear filter');
+          const updateClear = () => {
+            clear.disabled = !input.value && !f.value;
+            clear.hidden = clear.disabled;
+          };
+          input.addEventListener('input', updateClear);
+          updateClear();
+          clear.addEventListener('click', () => {
+            input.value = '';
+            dlg.close('ok');
+          });
+          body.appendChild(clear);
+        }
       });
       dlg.addEventListener('close', function onClose() {
         dlg.removeEventListener('close', onClose);
         if (dlg.returnValue !== 'ok') return resolve(null);
         const out = {};
-        Object.keys(inputs).forEach((k) => { out[k] = inputs[k].value; });
+        Object.keys(inputs).forEach((k) => {
+          out[k] = inputs[k] instanceof HTMLFieldSetElement ? inputs[k].querySelector('input:checked').value : inputs[k].value;
+        });
         resolve(out);
       });
       dlg.returnValue = 'cancel';
       dlg.showModal();
-      const first = Object.values(inputs)[0];
+      const field = Object.values(inputs)[0];
+      const first = field?.querySelector('input:checked') || field;
       if (first) { first.focus(); if (first.select) first.select(); }
     });
   }
 
-  const confirmBox = async (title, message, okLabel = 'Delete') => !!(await askForm(title, [], { message, okLabel }));
+  const confirmBox = async (title, message, okLabel = 'Delete', destructive = false) => !!(await askForm(title, [], { message, okLabel, destructive }));
 
   /* ---------- map ---------- */
-  const map = L.map('map', { zoomSnap: 0.5 }).setView([20, 0], 2);
+  const map = L.map('map', { zoomSnap: 0.5 }).setView([-25, 134], 4);
   const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19, attribution: '&copy; OpenStreetMap contributors',
   }).addTo(map);
@@ -160,7 +261,7 @@
   basemapToggle.replaceChildren(actionIcon('Layers'));
   basemapToggle.title = 'Choose basemap';
   basemapToggle.setAttribute('aria-label', 'Choose basemap');
-  L.control.scale().addTo(map);
+  const scaleControl = L.control.scale().addTo(map);
 
   map.pm.addControls({
     position: 'topleft',
@@ -193,6 +294,93 @@
   });
   map.getContainer().querySelector('.leaflet-control-zoom-in').replaceChildren(actionIcon('Plus'));
   map.getContainer().querySelector('.leaflet-control-zoom-out').replaceChildren(actionIcon('Minus'));
+
+  const mobileControls = window.matchMedia('(max-width: 760px)');
+  map.getContainer().querySelectorAll('.leaflet-pm-toolbar').forEach((toolbar) => {
+    const tools = [...toolbar.children];
+    let current = tools[0];
+    let holdTimer;
+    let pointerStart;
+    let heldButton;
+    let suppressUntil = 0;
+    current.classList.add('mobile-tool-current');
+    const closeTools = () => {
+      heldButton = null;
+      suppressUntil = 0;
+      toolbar.classList.remove('mobile-tools-open');
+      tools.forEach(tool => tool.querySelector('.leaflet-buttons-control-button').removeAttribute('aria-expanded'));
+      if (mobileControls.matches) current.querySelector('.leaflet-buttons-control-button').setAttribute('aria-expanded', 'false');
+    };
+    const cancelHold = () => {
+      clearTimeout(holdTimer);
+      pointerStart = null;
+    };
+    const openTools = () => {
+      toolbar.classList.add('mobile-tools-open');
+      current.querySelector('.leaflet-buttons-control-button').setAttribute('aria-expanded', 'true');
+    };
+    toolbar.addEventListener('pointerdown', (event) => {
+      if (!mobileControls.matches || event.button !== 0) return;
+      const button = event.target.closest('.leaflet-buttons-control-button');
+      if (!button || !current.contains(button)) return;
+      cancelHold();
+      pointerStart = { x: event.clientX, y: event.clientY };
+      holdTimer = setTimeout(() => {
+        openTools();
+        heldButton = button;
+        suppressUntil = Infinity;
+      }, 450);
+    });
+    toolbar.addEventListener('pointermove', (event) => {
+      if (pointerStart && Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) > 10) cancelHold();
+    });
+    toolbar.addEventListener('pointerup', () => {
+      if (heldButton) suppressUntil = performance.now() + 700;
+      cancelHold();
+    });
+    toolbar.addEventListener('pointerleave', cancelHold);
+    toolbar.addEventListener('pointercancel', () => { cancelHold(); closeTools(); });
+    toolbar.addEventListener('contextmenu', (event) => {
+      if (mobileControls.matches) event.preventDefault();
+    });
+    toolbar.addEventListener('click', (event) => {
+      if (!mobileControls.matches) return;
+      const button = event.target.closest('.leaflet-buttons-control-button');
+      if (!button) return;
+      if (button === heldButton && performance.now() < suppressUntil) {
+        heldButton = null;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
+      heldButton = null;
+      current.classList.remove('mobile-tool-current');
+      current = button.closest('.button-container');
+      current.classList.add('mobile-tool-current');
+      closeTools();
+    }, true);
+    toolbar.addEventListener('keydown', (event) => {
+      if (!mobileControls.matches) return;
+      const button = event.target.closest('.leaflet-buttons-control-button');
+      if (!button) return;
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        openTools();
+        tools.find(tool => tool !== current)?.querySelector('.leaflet-buttons-control-button').focus();
+      } else if (event.key === 'Escape') {
+        closeTools();
+        current.querySelector('.leaflet-buttons-control-button').focus();
+      } else if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        button.click();
+      }
+    });
+    document.addEventListener('pointerdown', (event) => {
+      if (!toolbar.contains(event.target)) { cancelHold(); closeTools(); }
+    }, true);
+    mobileControls.addEventListener('change', () => { cancelHold(); closeTools(); });
+    closeTools();
+  });
 
   const pmBusy = () => ['globalEditModeEnabled', 'globalDragModeEnabled', 'globalRemovalModeEnabled', 'globalDrawModeEnabled', 'globalCutModeEnabled']
     .some((fn) => typeof map.pm[fn] === 'function' && map.pm[fn]());
@@ -331,7 +519,7 @@
   }
 
   async function deleteLayer(lyr) {
-    if (!(await confirmBox('Delete layer', `Delete “${lyr.name}” and its ${leavesOf(lyr).length} feature(s)? Download it first if you need it.`))) return;
+    if (!(await confirmBox('Delete layer', `Delete “${lyr.name}” and its ${leavesOf(lyr).length} feature(s)? Download it first if you need it.`, 'Delete', true))) return;
     map.removeLayer(lyr.group);
     state.layers = state.layers.filter((l) => l !== lyr);
     if (state.selected && state.selected._glayer === lyr) state.selected = null;
@@ -340,8 +528,20 @@
   }
 
   function zoomToLayer(lyr) {
-    const b = lyr.group.getBounds();
-    if (b.isValid()) map.fitBounds(b.pad(0.1), { maxZoom: 17 });
+    fitVisibleBounds(lyr.group.getBounds());
+  }
+
+  function fitVisibleBounds(bounds, maxZoom = 17) {
+    if (!bounds.isValid()) return;
+    map.invalidateSize({ pan: false });
+    const mapRect = map.getContainer().getBoundingClientRect();
+    const workspace = $('workspace').getBoundingClientRect();
+    const splitter = $('splitter').getBoundingClientRect();
+    map.fitBounds(bounds, {
+      maxZoom,
+      paddingTopLeft: [Math.max(0, workspace.left - mapRect.left) + 20, Math.max(0, workspace.top - mapRect.top) + 20],
+      paddingBottomRight: [Math.max(0, mapRect.right - workspace.right) + 20, Math.max(0, mapRect.bottom - splitter.top) + 20],
+    });
   }
 
   /* ---------- values ---------- */
@@ -389,10 +589,6 @@
     if (prev && prev !== leaf) restyle(prev);
     restyle(leaf);
     if (leaf.bringToFront) leaf.bringToFront();
-    if (pan) {
-      if (isPointLeaf(leaf)) map.setView(leaf.getLatLng(), Math.max(map.getZoom(), 14));
-      else if (leaf.getBounds) map.fitBounds(leaf.getBounds().pad(0.3), { maxZoom: 17 });
-    }
     if (leaf._glayer !== state.active) {
       state.active = leaf._glayer;
       $('fmt').value = state.active.format;
@@ -408,6 +604,10 @@
       renderTable();
     } else if (fromTable) {
       markSelectedRow();
+    }
+    if (pan) {
+      if (isPointLeaf(leaf)) fitVisibleBounds(L.latLngBounds([leaf.getLatLng()]), Math.max(map.getZoom(), 14));
+      else if (leaf.getBounds) fitVisibleBounds(leaf.getBounds());
     }
     if (fromMap || pan) scrollToSelectedRow();
   }
@@ -543,7 +743,7 @@
     form.removeEventListener('input', updatePreview);
     form.removeEventListener('change', updatePreview);
     if (!review || !matches.length) return;
-    if (!(await confirmBox('Confirm bulk deletion', `Delete ${matches.length} features from "${lyr.name}"? ${leavesOf(lyr).length - matches.length} will remain. This cannot be undone.`, `Delete ${matches.length} features`))) return;
+    if (!(await confirmBox('Confirm bulk deletion', `Delete ${matches.length} features from "${lyr.name}"? ${leavesOf(lyr).length - matches.length} will remain. This cannot be undone.`, `Delete ${matches.length} features`, true))) return;
     matches.forEach((leaf) => {
       if (state.selected === leaf) {
         state.selected = null;
@@ -668,6 +868,7 @@
   function renderAll() {
     renderLayers();
     renderTable();
+    $('btnDownload').disabled = state.layers.length === 0;
     $('emptyState').classList.toggle('hidden', state.layers.length > 0);
     $('layerHint').style.display = state.layers.length ? 'none' : '';
   }
@@ -808,7 +1009,8 @@
       const meta = document.createElement('div');
       meta.className = 'lmeta';
       const info = document.createElement('span');
-      info.textContent = `${leavesOf(lyr).length} features · ${GEOM_LABEL[lyr.geomType]}`;
+      const featureCount = leavesOf(lyr).length;
+      info.textContent = `${featureCount} ${featureCount === 1 ? 'feature' : 'features'} · ${GEOM_LABEL[lyr.geomType]}`;
       const sp = document.createElement('span');
       sp.className = 'spacer';
       const downloadButton = iconButton('Download', 'Download this layer', () => downloadLayers([lyr]));
@@ -861,10 +1063,13 @@
     $('btnAddField').disabled = !lyr;
     $('btnBulkDelete').disabled = !lyr || !lyr.fields.length || !leavesOf(lyr).length;
     $('filter').disabled = !lyr;
+    $('btnFilter').disabled = !lyr;
+    $('btnFilter').setAttribute('aria-pressed', String(Boolean(state.filter)));
+    $('btnFilter').title = state.filter ? `Filter rows: ${state.filter}` : 'Filter rows';
     if (!lyr) {
       $('tableTitle').textContent = 'Attribute table';
       $('tableCount').textContent = '';
-      $('pager').style.visibility = 'hidden';
+      $('pager').style.display = 'none';
       const d = document.createElement('div');
       d.className = 'empty';
       d.textContent = 'Select a layer to view and edit its attributes.';
@@ -875,8 +1080,8 @@
     const pages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
     state.page = Math.min(state.page, pages - 1);
     $('tableTitle').textContent = lyr.name;
-    $('tableCount').textContent = `${items.length}${items.length !== leavesOf(lyr).length ? ' of ' + leavesOf(lyr).length : ''} features`;
-    $('pager').style.visibility = pages > 1 ? 'visible' : 'hidden';
+    $('tableCount').textContent = `${items.length}${items.length !== leavesOf(lyr).length ? ' of ' + leavesOf(lyr).length : ''} ${leavesOf(lyr).length === 1 ? 'feature' : 'features'}`;
+    $('pager').style.display = pages > 1 ? '' : 'none';
     $('pgInfo').textContent = `Page ${state.page + 1} / ${pages}`;
     $('pgPrev').disabled = state.page === 0;
     $('pgNext').disabled = state.page >= pages - 1;
@@ -1152,7 +1357,7 @@
     if (lastLayer) {
       setActive(lastLayer);
       const b = L.featureGroup(state.layers.map((l) => l.group)).getBounds();
-      if (b.isValid()) map.fitBounds(b.pad(0.1), { maxZoom: 17 });
+      fitVisibleBounds(b);
     }
   }
 
@@ -1513,12 +1718,24 @@
   }
 
   /* ---------- UI wiring ---------- */
+  $('btnAbout').addEventListener('click', () => $('aboutDlg').showModal());
+  $('aboutDlg').addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      $('aboutDlg').close();
+    }
+  });
   const openFilePicker = () => $('fileInput').click();
   $('btnUpload').addEventListener('click', openFilePicker);
   $('emptyUpload').addEventListener('click', openFilePicker);
   $('fileInput').addEventListener('change', (e) => { handleFiles(e.target.files); e.target.value = ''; });
 
   $('btnNewLayer').addEventListener('click', async () => {
+    const source = await askForm('New layer', [
+      { key: 'source', label: 'New layer', hideLabel: true, type: 'radio', value: 'blank', options: [['blank', 'Blank layer'], ['upload', 'Upload layer']] },
+    ], { okLabel: 'Continue', compact: true });
+    if (!source) return;
+    if (source.source === 'upload') { openFilePicker(); return; }
     const r = await askForm('New layer', [
       { key: 'name', label: 'Layer name', value: 'New layer', required: true },
       { key: 'geom', label: 'Geometry type', type: 'select', value: 'Polygon', options: [['Point', 'Points'], ['Line', 'Lines'], ['Polygon', 'Polygons'], ['Mixed', 'Mixed (KML / GeoJSON style)']] },
@@ -1534,10 +1751,60 @@
   });
 
   $('btnUndo').addEventListener('click', undoLastTableEdit);
+  $('btnToggleLayers').addEventListener('click', () => {
+    const sidebar = $('sidebar');
+    const previousHeight = sidebar.getBoundingClientRect().height;
+    if (mobileControls.matches) sidebar.getAnimations().forEach(animation => animation.cancel());
+    const collapsed = sidebar.classList.toggle('collapsed');
+    $('sidebarContent').hidden = collapsed;
+    const button = $('btnToggleLayers');
+    const label = `${collapsed ? 'Expand' : 'Collapse'} Layers panel`;
+    button.title = label;
+    button.setAttribute('aria-label', label);
+    button.setAttribute('aria-expanded', String(!collapsed));
+    button.replaceChildren(actionIcon(collapsed ? 'PanelLeftOpen' : 'PanelLeftClose'));
+    if (mobileControls.matches && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      const height = sidebar.getBoundingClientRect().height;
+      if (height !== previousHeight) sidebar.animate([
+        { height: `${previousHeight}px`, overflow: 'hidden' },
+        { height: `${height}px`, overflow: 'hidden' },
+      ], { duration: 320, easing: 'cubic-bezier(.22, 1, .36, 1)' });
+    }
+  });
   $('btnAddField').addEventListener('click', addField);
+  $('btnFilter').addEventListener('click', async () => {
+    const layer = state.active;
+    if (!layer) return;
+    const result = await askForm('Filter rows', [{ key: 'filter', label: 'Filter rows', hideLabel: true, value: state.filter, clearable: true }], { okLabel: 'Apply' });
+    if (!result || state.active !== layer) return;
+    state.filter = result.filter;
+    state.page = 0;
+    $('filter').value = state.filter;
+    renderTable();
+  });
+  const editHelp = document.querySelector('#sidebar details.help');
+  $('btnEditHelp').addEventListener('click', () => {
+    $('editHelpContent').replaceChildren(editHelp.querySelector('ul').cloneNode(true));
+    $('editHelpDlg').showModal();
+  });
   $('btnBulkDelete').addEventListener('click', bulkDeleteRows);
   $('btnDlLayer').addEventListener('click', () => (state.active ? downloadLayers([state.active]) : toast('Select a layer first.', 'warn')));
   $('btnDlAll').addEventListener('click', () => downloadLayers(state.layers));
+  $('btnDownload').addEventListener('click', async () => {
+    if (!state.layers.length) { toast('No layers to download.', 'warn'); return; }
+    const scope = await askForm('Download', [
+      { key: 'scope', label: 'Download', hideLabel: true, type: 'radio', value: state.active ? 'active' : 'all', options: [['active', 'Active layer'], ['all', 'All layers']] },
+    ], { okLabel: 'Continue', compact: true });
+    if (!scope) return;
+    const layers = scope.scope === 'all' ? [...state.layers] : state.active ? [state.active] : [];
+    if (!layers.length) { toast('Select a layer first.', 'warn'); return; }
+    const format = await askForm('Download format', [
+      { key: 'format', label: 'File type', type: 'select', value: $('fmt').value, options: [...$('fmt').options].map(option => [option.value, option.textContent]) },
+    ], { okLabel: 'Continue', compact: true });
+    if (!format) return;
+    $('fmt').value = format.format;
+    await downloadLayers(layers);
+  });
   $('filter').addEventListener('input', (e) => { state.filter = e.target.value; state.page = 0; renderTable(); });
   $('pgPrev').addEventListener('click', () => { state.page--; renderTable(); });
   $('pgNext').addEventListener('click', () => { state.page++; renderTable(); });
@@ -1563,6 +1830,10 @@
     $('main').style.setProperty('--panel-left', `${stacked ? 0 : sidebar.width}px`);
     $('main').style.setProperty('--panel-top', `${stacked ? sidebar.height : 0}px`);
     $('main').style.setProperty('--panel-bottom', `${main.bottom - table.top + 6}px`);
+    const visibleWidth = main.width - (stacked ? 0 : sidebar.width);
+    const visibleHeight = table.top - main.top - (stacked ? sidebar.height : 0) - 6;
+    const scalePosition = visibleWidth < 800 || visibleHeight < 440 ? 'bottomright' : 'bottomleft';
+    if (scaleControl.getPosition() !== scalePosition) scaleControl.setPosition(scalePosition);
   });
   [$('main'), $('sidebar'), $('tablePanel')].forEach(panel => panelObserver.observe(panel));
 
@@ -1583,6 +1854,9 @@
   });
 
   renderAll();
+  requestAnimationFrame(() => {
+    if (!state.layers.length) fitVisibleBounds(L.latLngBounds([[-44, 112], [-10, 154]]));
+  });
 
   // Exposed for debugging / automated tests.
   window.__geoEditor = { state, map, handleFiles, createLayer, downloadLayers };
