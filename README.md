@@ -23,7 +23,7 @@ See [FLOWCHART.md](./FLOWCHART.md) for diagrams of how the app works.
 
 ### Attribute table
 - Edit cells directly; edits are validated against each column's type (text, number, true/false).
-- Click a column name to rename it or change its type; add or delete columns.
+- Click a column name to rename it or change its type; use the adjacent sort button to sort ascending or descending; add or delete columns. **Undo** reverses recent cell edits and field changes.
 - Filter rows, page through large layers (200 rows per page), and zoom to or delete individual features.
 - Selecting a row highlights the feature on the map, and clicking a feature selects its row.
 
@@ -45,6 +45,7 @@ Notes:
 
 ### Export
 Choose a format with **Download as**, then download the active layer or all layers.
+When a feature is selected in the active layer, choose one of its attribute columns to use its value as the export filename.
 
 | Format | Output |
 | --- | --- |
@@ -52,6 +53,7 @@ Choose a format with **Download as**, then download the active layer or all laye
 | KML | `.kml` with layer colours |
 | KMZ | `.kmz` |
 | GeoJSON | `.geojson` |
+| CSV | `.csv` with attribute columns and one row per feature |
 
 Shapefile limits: mixed layers are split into one shapefile per geometry type (`_points`, `_lines`, `_polygons`); column names are limited to 10 ASCII characters; text values to 254 bytes.
 
@@ -61,6 +63,14 @@ Choosing **Shapefile (.zip)** opens an options dialog for each exported layer:
 - **Columns to export** — tick the attribute columns to include. With none selected, a generated `ID` column is written.
 - **QGIS toggle categories by column** — pick a column (such as `STE_NAME21`) and the export includes a QGIS `.qml` style with one category per unique value. In QGIS, expand the layer in the Layers panel to switch each category on or off.
 - **Symbol styles** — edit each category's symbol: point shape and size, line style and width, polygon fill pattern, outline, colours, opacity, plus its legend label and whether it is shown initially. Previews are schematic and sizes are in millimetres.
+- **Bulk style editing** — change many categories at once from the **Bulk edit categories** panel (shown when a category column is selected and there is more than one category):
+  1. Filter the list (for example `Canberra`) and tick categories, or use **Select shown** / **Clear selection**.
+  2. Tick the properties to change. Only ticked properties are applied. Changing a control ticks its property automatically.
+  3. Press **Apply to selected**.
+
+  Editable in bulk: point shape and size, fill colour, fill pattern, outline colour, width and style, line colour, width and style, symbol opacity, and whether the category is shown initially. Fill/line colour can be **one colour**, **distinct colours** (a palette cycled across the selected categories) or a **gradient** between two colours. Gradients and distinct colours follow the selected categories' order in the list, which is the legend order, so sort the legend first if you want an ordered gradient. Existing colour transparency is kept.
+
+  **Copy the whole symbol from** a chosen category copies its full appearance to the selected categories, without changing their labels or visibility. **Undo last bulk change** reverses the most recent bulk change; it can be pressed repeatedly. All values are checked before anything changes, so an invalid value changes nothing and shows a message.
 - **Import a `.qml` style** — reuse the symbols from an existing QGIS style, or download the edited style on its own.
 - **Legend order** — sort the categories in the QGIS legend ascending or descending by any column, for example `SA2_NAME21`. The sort column does not need to be exported.
 

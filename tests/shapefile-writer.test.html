@@ -352,6 +352,163 @@
         assert(rejected, 'Invalid sort options accepted');
       });
     });
+    const bulkModel = (values, family = 'point') => {
+      const features = values.map((state) => point({ state }));
+      const out = ShapefileWriter.writeShapefiles('bulk', features, ['state'], {}, { categoryField: 'state' });
+      return QgisStyle.read(xml(out, 'bulk.qml'));
+    };
+    const snapshotOf = (model) => model.entries.map((entry) => entry.symbol.outerHTML + entry.category.outerHTML).join('|');
+    test('Bulk edit changes only the selected categories and leaves labels and visibility alone', () => {
+      const model = bulkModel(['A', 'B', 'C', 'D']);
+      const before = model.entries.map((entry) => entry.symbol.outerHTML);
+      const result = QgisStyle.applyBulk(model, [3, 1], { props: { name: 'star', size: '7.5', outline_style: 'dash' } });
+      assert(result.count === 2, 'Wrong category count');
+      [1, 3].forEach((i) => assert(symbolProperty(model, 'name', i) === 'star' && symbolProperty(model, 'size', i) === '7.5' && symbolProperty(model, 'outline_style', i) === 'dash', 'Selected category not changed'));
+      [0, 2].forEach((i) => assert(model.entries[i].symbol.outerHTML === before[i], 'Unselected category changed'));
+      assert(model.entries.every((entry) => entry.category.getAttribute('render') === 'true'), 'Visibility changed');
+      assert(model.entries.map((entry) => entry.label).join() === 'A,B,C,D', 'Labels changed');
+    });
+    test('Bulk colour modes: one colour, distinct colours and gradient keep existing transparency', () => {
+      const model = bulkModel(['A', 'B', 'C']);
+      model.entries.forEach((entry) => entry.symbol.querySelector('Option[name="color"]').setAttribute('value', '1,2,3,120'));
+      QgisStyle.applyBulk(model, [0, 1, 2], { colour: { key: 'color', mode: 'single', value: '#ff0000' } });
+      assert(model.entries.every((_, i) => symbolProperty(model, 'color', i) === '255,0,0,120'), 'Single colour or alpha incorrect');
+      QgisStyle.applyBulk(model, [0, 1, 2], { colour: { key: 'color', mode: 'palette' } });
+      const colours = model.entries.map((_, i) => symbolProperty(model, 'color', i));
+      assert(new Set(colours).size === 3 && colours.every((c) => c.endsWith(',120')), 'Palette colours not distinct or alpha lost');
+      QgisStyle.applyBulk(model, [0, 1, 2], { colour: { key: 'color', mode: 'gradient', from: '#000000', to: '#ff0000' } });
+      assert(symbolProperty(model, 'color', 0) === '0,0,0,120' && symbolProperty(model, 'color', 1) === '128,0,0,120' && symbolProperty(model, 'color', 2) === '255,0,0,120', 'Gradient incorrect');
+      QgisStyle.applyBulk(model, [1], { colour: { key: 'color', mode: 'gradient', from: '#00ff00', to: '#0000ff' } });
+      assert(symbolProperty(model, 'color', 1) === '0,255,0,120', 'Single-category gradient should use the start colour');
+    });
+    test('Bulk opacity and initial visibility apply to selected categories only', () => {
+      const model = bulkModel(['A', 'B']);
+      QgisStyle.applyBulk(model, [1], { alpha: 0.25, render: false });
+      assert(model.entries[1].symbol.getAttribute('alpha') === '0.25' && model.entries[1].category.getAttribute('render') === 'false', 'Opacity/visibility not applied');
+      assert(model.entries[0].symbol.getAttribute('alpha') === '1' && model.entries[0].category.getAttribute('render') === 'true', 'Unselected category changed');
+    });
+    test('Bulk edit is validated up front, so a bad value changes nothing', () => {
+      const model = bulkModel(['A', 'B']);
+      const before = snapshotOf(model);
+      [
+        [[], { props: { size: '3' } }],
+        [[0], {}],
+        [[0], { props: { size: '-1' } }],
+        [[0], { props: { size: '' } }],
+        [[0], { props: { name: 'unknown' } }],
+        [[0], { props: { color: 'red' } }],
+        [[0], { props: { size: '3', line_width: '1' } }],
+        [[0, 5], { props: { size: '3' } }],
+        [[0], { alpha: 2 }],
+        [[0], { alpha: NaN }],
+        [[0], { colour: { key: 'color', mode: 'gradient', from: '#000000', to: 'nope' } }],
+      ].forEach(([indices, spec]) => {
+        let failed = false;
+        try { QgisStyle.applyBulk(model, indices, spec); } catch (error) { failed = !!error.message; }
+        assert(failed, 'Invalid bulk edit accepted: ' + JSON.stringify(spec));
+        assert(snapshotOf(model) === before, 'Failed bulk edit changed the style');
+      });
+    });
+    test('Bulk undo restores symbols, opacity and visibility exactly, and editing still works afterwards', () => {
+      const model = bulkModel(['A', 'B', 'C']);
+      const before = snapshotOf(model);
+      const first = QgisStyle.applyBulk(model, [0, 1], { props: { name: 'square' }, alpha: 0.5, render: false });
+      const second = QgisStyle.applyBulk(model, [1, 2], { colour: { key: 'color', mode: 'palette' } });
+      second.undo();
+      assert(symbolProperty(model, 'name', 1) === 'square', 'Undid too much');
+      first.undo();
+      assert(snapshotOf(model) === before, 'Undo did not restore the original style');
+      const host = document.createElement('div');
+      QgisStyle.renderEditor(host, [model], () => {});
+      editControl(host, 'Point shape', 'cross');
+      assert(symbolProperty(model, 'name', 0) === 'cross', 'Single-category editing broke after undo');
+    });
+    test('Copy symbol copies appearance to the selected categories but keeps their labels and visibility', () => {
+      const model = bulkModel(['A', 'B', 'C']);
+      QgisStyle.applyBulk(model, [0], { props: { name: 'star', size: '9' }, alpha: 0.4 });
+      model.entries[1].category.setAttribute('label', 'Custom B');
+      model.entries[1].category.setAttribute('render', 'false');
+      const untouched = model.entries[2].symbol.outerHTML;
+      const result = QgisStyle.copySymbol(model, 0, [0, 1]);
+      assert(result.count === 1, 'The source category should be skipped');
+      assert(symbolProperty(model, 'name', 1) === 'star' && symbolProperty(model, 'size', 1) === '9' && model.entries[1].symbol.getAttribute('alpha') === '0.4', 'Symbol not copied');
+      assert(model.entries[1].symbol.getAttribute('name') === '1', 'Symbol name must stay unique');
+      assert(model.entries[1].category.getAttribute('label') === 'Custom B' && model.entries[1].category.getAttribute('render') === 'false', 'Label or visibility changed');
+      assert(model.entries[2].symbol.outerHTML === untouched, 'Unselected category changed');
+      assert(new Set(model.entries.map((entry) => entry.symbol.getAttribute('name'))).size === 3, 'Symbol names are not unique');
+      QgisStyle.read(QgisStyle.serialize(model));
+      result.undo();
+      assert(symbolProperty(model, 'name', 1) === 'circle', 'Copy not undone');
+      let failed = false;
+      try { QgisStyle.copySymbol(model, 0, [0]); } catch (error) { failed = true; }
+      assert(failed, 'Copying onto only the source should be rejected');
+    });
+    test('Bulk edits work for line and polygon categories', () => {
+      const line = { type: 'LineString', coordinates: [[149, -35], [150, -35]] };
+      const polygon = { type: 'Polygon', coordinates: [[[149, -35], [150, -35], [150, -34], [149, -35]]] };
+      const lineOut = ShapefileWriter.writeShapefiles('line', ['A', 'B'].map((state) => ({ properties: { state }, geometry: line })), ['state'], {}, { categoryField: 'state' });
+      const polyOut = ShapefileWriter.writeShapefiles('poly', ['A', 'B'].map((state) => ({ properties: { state }, geometry: polygon })), ['state'], {}, { categoryField: 'state' });
+      const lineModel = QgisStyle.read(xml(lineOut, 'line.qml'));
+      const polyModel = QgisStyle.read(xml(polyOut, 'poly.qml'));
+      QgisStyle.applyBulk(lineModel, [0, 1], { props: { line_width: '2', line_style: 'dot' }, colour: { key: 'line_color', mode: 'single', value: '#00ff00' } });
+      assert(symbolProperty(lineModel, 'line_width', 1) === '2' && symbolProperty(lineModel, 'line_style', 1) === 'dot' && symbolProperty(lineModel, 'line_color', 0).startsWith('0,255,0'), 'Line bulk edit failed');
+      QgisStyle.applyBulk(polyModel, [0, 1], { props: { style: 'cross', outline_width: '1' }, colour: { key: 'color', mode: 'palette' } });
+      assert(symbolProperty(polyModel, 'style', 1) === 'cross' && symbolProperty(polyModel, 'outline_width', 0) === '1', 'Polygon bulk edit failed');
+      let rejected = false;
+      try { QgisStyle.applyBulk(lineModel, [0], { props: { size: '3' } }); } catch (error) { rejected = true; }
+      assert(rejected, 'Point-only property accepted for lines');
+    });
+    test('Bulk editor UI: filter, select, apply, undo and keeping the export form safe', () => {
+      const model = bulkModel(['Alpha', 'Beta', 'Gamma', 'Delta']);
+      const host = document.createElement('div');
+      QgisStyle.renderEditor(host, [model], () => {});
+      const panel = host.querySelector('details.qml-bulk');
+      assert(panel && panel.querySelector('summary').textContent === 'Bulk edit categories (4)', 'Bulk panel missing');
+      const body = panel.querySelector('.qml-bulk-body');
+      const button = (text) => [...body.querySelectorAll('button')].find((b) => b.textContent === text);
+      const filter = body.querySelector('input[type=search]');
+      const rows = [...body.querySelectorAll('.qml-bulk-list label')];
+      assert(button('Apply to selected').disabled && button('Undo last bulk change').disabled && button('Copy style to selected').disabled, 'Buttons should start disabled');
+      filter.value = 'ta';
+      filter.dispatchEvent(new Event('input'));
+      assert(rows.filter((row) => !row.hidden).map((row) => row.textContent).join() === 'Beta,Delta', 'Filter incorrect');
+      button('Select shown').click();
+      assert(body.textContent.includes('2 of 4 selected'), 'Selection count incorrect');
+      const row = (label) => [...body.querySelectorAll('.qml-bulk-row')].find((r) => r.querySelector('label').firstChild.textContent === label);
+      assert(button('Apply to selected').disabled, 'Apply should need a ticked property');
+      const shape = row('Point shape').querySelector('select');
+      shape.value = 'star';
+      shape.dispatchEvent(new Event('change'));
+      assert(row('Point shape').querySelector('input[type=checkbox]').checked, 'Changing a control should tick its property');
+      assert(!button('Apply to selected').disabled, 'Apply should be enabled');
+      button('Apply to selected').click();
+      assert([0, 1, 2, 3].map((i) => symbolProperty(model, 'name', i)).join() === 'circle,star,circle,star', 'Wrong categories updated');
+      assert(body.querySelector('[role=status]').textContent === 'Updated 2 categories.', 'Missing success message');
+      assert(!button('Undo last bulk change').disabled, 'Undo should be available');
+      button('Undo last bulk change').click();
+      assert([0, 1, 2, 3].every((i) => symbolProperty(model, 'name', i) === 'circle'), 'UI undo failed');
+      const size = row('Point size (mm)').querySelector('input[type=number]');
+      size.value = '-3';
+      size.dispatchEvent(new Event('input'));
+      button('Apply to selected').click();
+      const status = body.querySelector('[role=status]');
+      assert(status.textContent.startsWith('Nothing changed') && status.className === 'error', 'Invalid value not reported');
+      assert([0, 1, 2, 3].every((i) => symbolProperty(model, 'size', i) === '2'), 'Invalid value changed styles');
+      const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+      filter.dispatchEvent(enter);
+      assert(enter.defaultPrevented, 'Enter in the bulk panel could submit the export form');
+      button('Clear selection').click();
+      assert(body.textContent.includes('0 of 4 selected') && button('Apply to selected').disabled, 'Clear selection failed');
+    });
+    test('Bulk editor is only offered for categorized styles with several categories', () => {
+      const single = QgisStyle.read(QgisStyle.singleStyle('point'));
+      const oneCategory = bulkModel(['Only']);
+      [single, oneCategory].forEach((model) => {
+        const host = document.createElement('div');
+        QgisStyle.renderEditor(host, [model], () => {});
+        assert(!host.querySelector('.qml-bulk'), 'Bulk panel should not be shown');
+      });
+    });
     window.testResults = results;
     document.getElementById('results').textContent = results.map((r) => `${r.passed ? 'PASS' : 'FAIL'} ${r.name}${r.error ? ': ' + r.error : ''}`).join('\n');
   </script>

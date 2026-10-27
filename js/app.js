@@ -18,6 +18,8 @@
     selected: null,
     page: 0,
     filter: '',
+    sort: null,
+    undo: [],
     nextId: 1,
     colorIdx: 0,
   };
@@ -49,6 +51,25 @@
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  }
+
+  function recordUndo(label, undo) {
+    state.undo.push({ label, undo });
+    if (state.undo.length > 100) state.undo.shift();
+    const button = $('btnUndo');
+    button.disabled = false;
+    button.title = `Undo ${label}`;
+  }
+
+  function undoLastTableEdit() {
+    const entry = state.undo.pop();
+    if (!entry) return;
+    entry.undo();
+    map.closePopup();
+    renderTable();
+    const button = $('btnUndo');
+    button.disabled = state.undo.length === 0;
+    button.title = state.undo.length ? `Undo ${state.undo[state.undo.length - 1].label}` : 'Undo last table edit';
   }
 
   function askForm(title, fields, { message = '', okLabel = 'OK' } = {}) {
@@ -265,6 +286,7 @@
     state.active = lyr;
     state.page = 0;
     state.filter = '';
+    state.sort = null;
     $('filter').value = '';
     if (lyr) $('fmt').value = lyr.format;
     renderAll();
@@ -308,7 +330,17 @@
       toast(`“${text}” is not a valid ${lyr.types[field]} for field “${field}”.`, 'error');
       return false;
     }
-    leaf.feature.properties[field] = r.v;
+    const properties = leaf.feature.properties;
+    const hadValue = Object.prototype.hasOwnProperty.call(properties, field);
+    const previousValue = properties[field];
+    if (!Object.is(previousValue, r.v)) {
+      recordUndo(`cell edit in ${field}`, () => {
+        const currentProperties = leaf.feature.properties;
+        if (hadValue) currentProperties[field] = previousValue;
+        else delete currentProperties[field];
+      });
+    }
+    properties[field] = r.v;
     return true;
   }
 
@@ -328,6 +360,7 @@
       $('fmt').value = state.active.format;
       state.page = 0;
       state.filter = '';
+      state.sort = null;
       $('filter').value = '';
       renderLayers();
       renderTable();
@@ -504,6 +537,11 @@
     lyr.fields.push(name);
     lyr.types[name] = r.type;
     leavesOf(lyr).forEach((leaf) => { leaf.feature.properties[name] = parsed.v; });
+    recordUndo(`add field ${name}`, () => {
+      lyr.fields = lyr.fields.filter((field) => field !== name);
+      delete lyr.types[name];
+      leavesOf(lyr).forEach((leaf) => { delete leaf.feature.properties[name]; });
+    });
     renderTable();
   }
 
@@ -528,6 +566,11 @@
         converted.push(p.v);
       }
     }
+    const previous = {
+      fields: [...lyr.fields],
+      types: { ...lyr.types },
+      properties: new Map(leaves.map((leaf) => [leaf, { ...leaf.feature.properties }])),
+    };
     leaves.forEach((leaf, i) => {
       const props = leaf.feature.properties;
       const value = converted ? converted[i] : props[field];
@@ -544,14 +587,42 @@
     lyr.fields[idx] = name;
     delete lyr.types[field];
     lyr.types[name] = r.type;
+    recordUndo(`edit field ${field}`, () => {
+      leavesOf(lyr).forEach((leaf) => {
+        const saved = previous.properties.get(leaf);
+        if (saved) {
+          leaf.feature.properties = { ...saved };
+          return;
+        }
+        const properties = {};
+        previous.fields.forEach((previousField) => {
+          const currentField = previousField === field ? name : previousField;
+          properties[previousField] = leaf.feature.properties[currentField] ?? null;
+        });
+        leaf.feature.properties = properties;
+      });
+      lyr.fields.splice(0, lyr.fields.length, ...previous.fields);
+      lyr.types = { ...previous.types };
+    });
     renderTable();
   }
 
   async function deleteField(lyr, field) {
     if (!(await confirmBox('Delete field', `Delete the field “${field}” from every feature in “${lyr.name}”?`))) return;
+    const index = lyr.fields.indexOf(field);
+    const fieldType = lyr.types[field];
+    const properties = new Map(leavesOf(lyr).map((leaf) => [leaf, { ...leaf.feature.properties }]));
     lyr.fields = lyr.fields.filter((f) => f !== field);
     delete lyr.types[field];
     leavesOf(lyr).forEach((leaf) => { delete leaf.feature.properties[field]; });
+    recordUndo(`delete field ${field}`, () => {
+      lyr.fields.splice(index, 0, field);
+      if (fieldType !== undefined) lyr.types[field] = fieldType;
+      leavesOf(lyr).forEach((leaf) => {
+        leaf.feature.properties = { ...(properties.get(leaf) || leaf.feature.properties) };
+        if (!Object.prototype.hasOwnProperty.call(leaf.feature.properties, field)) leaf.feature.properties[field] = null;
+      });
+    });
     renderTable();
   }
 
@@ -567,8 +638,103 @@
     const b = document.createElement('button');
     b.textContent = text;
     b.title = title;
+    b.setAttribute('aria-label', title);
     b.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
     return b;
+  }
+
+  function fileActionIcon(direction) {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'action-icon');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('aria-hidden', 'true');
+    const paths = direction === 'upload'
+      ? ['M12 16V4', 'm7 9 5-5 5 5', 'M5 20h14']
+      : ['M12 4v12', 'm7 11 5 5 5-5', 'M5 20h14'];
+    paths.forEach((d) => {
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', d);
+      svg.appendChild(path);
+    });
+    return svg;
+  }
+
+  function geometryPreview(leaf) {
+    const geometry = leaf.toGeoJSON(6).geometry;
+    const paths = [];
+    const points = [];
+    const addPath = (coordinates, closed = false) => {
+      if (!coordinates.length || paths.length >= 24) return;
+      const maxPoints = 40;
+      const sampled = coordinates.length <= maxPoints
+        ? coordinates
+        : Array.from({ length: maxPoints }, (_, i) => coordinates[Math.round(i * (coordinates.length - 1) / (maxPoints - 1))]);
+      paths.push({ coordinates: sampled, closed });
+    };
+    const collect = (shape) => {
+      if (!shape) return;
+      if (shape.type === 'GeometryCollection') return shape.geometries.forEach(collect);
+      const coordinates = shape.coordinates;
+      if (shape.type === 'Point') points.push(coordinates);
+      else if (shape.type === 'MultiPoint') points.push(...coordinates.slice(0, 40));
+      else if (shape.type === 'LineString') addPath(coordinates);
+      else if (shape.type === 'MultiLineString') coordinates.forEach((line) => addPath(line));
+      else if (shape.type === 'Polygon') coordinates.forEach((ring) => addPath(ring, true));
+      else if (shape.type === 'MultiPolygon') coordinates.forEach((polygon) => polygon.forEach((ring) => addPath(ring, true)));
+    };
+    collect(geometry);
+
+    const allCoordinates = [...points, ...paths.flatMap((path) => path.coordinates)];
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'geometry-preview');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('width', '18');
+    svg.setAttribute('height', '18');
+    svg.setAttribute('aria-hidden', 'true');
+    if (!allCoordinates.length) return svg;
+
+    const xs = allCoordinates.map((coordinate) => coordinate[0]);
+    const ys = allCoordinates.map((coordinate) => coordinate[1]);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const extent = Math.max(maxX - minX, maxY - minY) || 1;
+    const scale = 20 / extent;
+    const offsetX = (24 - (maxX - minX) * scale) / 2;
+    const offsetY = (24 - (maxY - minY) * scale) / 2;
+    const project = ([x, y]) => [offsetX + (x - minX) * scale, 24 - offsetY - (y - minY) * scale];
+    const style = leaf.options || {};
+    const stroke = style.color || '#2563eb';
+    const fill = style.fillColor || stroke;
+    const fillOpacity = style.fillOpacity === undefined ? 0.25 : style.fillOpacity;
+
+    paths.forEach(({ coordinates, closed }) => {
+      const projected = coordinates.map(project);
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', projected.map(([x, y], i) => `${i ? 'L' : 'M'}${x.toFixed(2)} ${y.toFixed(2)}`).join(' ') + (closed ? ' Z' : ''));
+      path.setAttribute('fill', closed ? fill : 'none');
+      path.setAttribute('fill-opacity', String(fillOpacity));
+      path.setAttribute('fill-rule', 'evenodd');
+      path.setAttribute('stroke', stroke);
+      path.setAttribute('stroke-width', '1.5');
+      path.setAttribute('stroke-linecap', 'round');
+      path.setAttribute('stroke-linejoin', 'round');
+      svg.appendChild(path);
+    });
+    points.slice(0, 40).forEach((coordinate) => {
+      const [cx, cy] = project(coordinate);
+      const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      circle.setAttribute('cx', cx.toFixed(2));
+      circle.setAttribute('cy', cy.toFixed(2));
+      circle.setAttribute('r', '2.5');
+      circle.setAttribute('fill', fill);
+      circle.setAttribute('fill-opacity', String(fillOpacity));
+      circle.setAttribute('stroke', stroke);
+      circle.setAttribute('stroke-width', '1');
+      svg.appendChild(circle);
+    });
+    return svg;
   }
 
   function renderLayers() {
@@ -613,6 +779,8 @@
       info.textContent = `${leavesOf(lyr).length} features · ${GEOM_LABEL[lyr.geomType]}`;
       const sp = document.createElement('span');
       sp.className = 'spacer';
+      const downloadButton = iconButton('', 'Download this layer', () => downloadLayers([lyr]));
+      downloadButton.appendChild(fileActionIcon('download'));
       meta.append(
         info, sp,
         iconButton('✎', 'Rename layer', async () => {
@@ -620,7 +788,7 @@
           if (r && r.name.trim()) { lyr.name = r.name.trim(); renderLayers(); renderTable(); }
         }),
         iconButton('⌖', 'Zoom to layer', () => zoomToLayer(lyr)),
-        iconButton('⬇', 'Download this layer', () => downloadLayers([lyr])),
+        downloadButton,
         iconButton('🗑', 'Delete layer', () => deleteLayer(lyr))
       );
       li.append(vis, color, name, meta);
@@ -633,6 +801,26 @@
     const q = state.filter.trim().toLowerCase();
     if (!q) return all;
     return all.filter((leaf) => lyr.fields.some((f) => display(leaf.feature.properties[f]).toLowerCase().includes(q)));
+  }
+
+  function sortedLeaves(lyr) {
+    const items = filteredLeaves(lyr);
+    if (!state.sort || !lyr.fields.includes(state.sort.field)) return items;
+    const { field, direction } = state.sort;
+    const type = lyr.types[field] || 'string';
+    return items.map((leaf, index) => ({ leaf, index })).sort((a, b) => {
+      const aValue = a.leaf.feature.properties[field];
+      const bValue = b.leaf.feature.properties[field];
+      const aEmpty = aValue === null || aValue === undefined || aValue === '';
+      const bEmpty = bValue === null || bValue === undefined || bValue === '';
+      if (aEmpty !== bEmpty) return aEmpty ? 1 : -1;
+      if (aEmpty) return a.index - b.index;
+      let result;
+      if (type === 'number') result = Number(aValue) - Number(bValue);
+      else if (type === 'boolean') result = Number(Boolean(aValue)) - Number(Boolean(bValue));
+      else result = String(aValue).localeCompare(String(bValue), undefined, { numeric: true, sensitivity: 'base' });
+      return result ? result * (direction === 'asc' ? 1 : -1) : a.index - b.index;
+    }).map(({ leaf }) => leaf);
   }
 
   function renderTable() {
@@ -652,7 +840,7 @@
       wrap.appendChild(d);
       return;
     }
-    const items = filteredLeaves(lyr);
+    const items = sortedLeaves(lyr);
     const pages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
     state.page = Math.min(state.page, pages - 1);
     $('tableTitle').textContent = lyr.name;
@@ -686,6 +874,17 @@
       nameBtn.textContent = f;
       nameBtn.title = 'Rename field / change type';
       nameBtn.addEventListener('click', () => editField(lyr, f));
+      const sortBtn = document.createElement('button');
+      sortBtn.className = 'sort';
+      const isSorted = state.sort && state.sort.field === f;
+      sortBtn.textContent = isSorted ? (state.sort.direction === 'asc' ? '↑' : '↓') : '↕';
+      sortBtn.title = isSorted ? `Sorted ${state.sort.direction === 'asc' ? 'ascending' : 'descending'}; click to reverse` : `Sort by ${f} ascending`;
+      sortBtn.setAttribute('aria-label', sortBtn.title);
+      sortBtn.addEventListener('click', () => {
+        state.sort = { field: f, direction: isSorted && state.sort.direction === 'asc' ? 'desc' : 'asc' };
+        state.page = 0;
+        renderTable();
+      });
       const type = document.createElement('span');
       type.className = 'ftype';
       type.textContent = { string: 'abc', number: '123', boolean: 'T/F' }[lyr.types[f] || 'string'];
@@ -694,7 +893,7 @@
       x.textContent = '✕';
       x.title = 'Delete field';
       x.addEventListener('click', () => deleteField(lyr, f));
-      box.append(nameBtn, type, x);
+      box.append(nameBtn, sortBtn, type, x);
       th.appendChild(box);
       thead.appendChild(th);
     });
@@ -707,11 +906,18 @@
       if (leaf === state.selected) tr.classList.add('sel');
       const rn = tr.insertCell();
       rn.className = 'rn';
-      rn.append(String(start + i + 1) + ' ');
-      rn.append(
+      const rnContent = document.createElement('div');
+      rnContent.className = 'rn-content';
+      const rowNumber = document.createElement('span');
+      rowNumber.textContent = String(start + i + 1);
+      const rowActions = document.createElement('span');
+      rowActions.className = 'rn-actions';
+      rowActions.append(
         iconButton('⌖', 'Zoom to feature', () => selectLeaf(leaf, { fromTable: true, pan: true })),
         iconButton('🗑', 'Delete feature', () => deleteFeature(lyr, leaf))
       );
+      rnContent.append(rowNumber, geometryPreview(leaf), rowActions);
+      rn.appendChild(rnContent);
       lyr.fields.forEach((f) => {
         const td = tr.insertCell();
         const input = document.createElement('input');
@@ -1026,6 +1232,18 @@
     });
   }
 
+  function layerToCsv(lyr) {
+    const cell = (value) => {
+      const text = value === null || value === undefined ? '' : String(value);
+      return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    };
+    const rows = [lyr.fields.map(cell).join(',')];
+    leavesOf(lyr).forEach((leaf) => {
+      rows.push(lyr.fields.map((field) => cell(leaf.feature.properties[field])).join(','));
+    });
+    return '\uFEFF' + rows.join('\r\n');
+  }
+
   const xmlEsc = (s) => String(s).replace(/[<>&"']/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' }[c]));
 
   // KML colours are aabbggrr.
@@ -1099,22 +1317,46 @@
       const data = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
       return { files: [{ name: base + '.kmz', data }], warnings };
     }
+    if (fmt === 'csv') return { files: [{ name: base + '.csv', data: layerToCsv(lyr) }], warnings };
     const fc = { type: 'FeatureCollection', features: cleanFeatures(lyr).map(({ type, properties, geometry }) => ({ type, properties, geometry })) };
     return { files: [{ name: base + '.geojson', data: JSON.stringify(fc, null, 2) }], warnings };
+  }
+
+  async function exportBaseName(lyr) {
+    const base = safeName(lyr.name);
+    const selected = state.selected && state.selected._glayer === lyr ? state.selected : null;
+    if (!selected || !lyr.fields.length) return base;
+    const options = [['', 'Use layer name'], ...lyr.fields.map((field) => {
+      const value = display(selected.feature.properties[field]).replace(/\s+/g, ' ').trim();
+      return [field, `${field}: ${value || '(empty)'}`];
+    })];
+    const choice = await askForm('Export filename', [
+      { key: 'field', label: 'Name from selected row', type: 'select', value: '', options },
+    ], { message: `Choose an attribute from the selected feature in “${lyr.name}”.` });
+    if (!choice) return null;
+    if (!choice.field) return base;
+    const value = display(selected.feature.properties[choice.field]).trim();
+    if (!value) {
+      toast(`The selected row has no value in “${choice.field}”; using the layer name.`, 'warn');
+      return base;
+    }
+    return safeName(value);
   }
 
   async function downloadLayers(layers) {
     if (!layers.length) return toast('There is nothing to download yet.', 'warn');
     const fmt = $('fmt').value;
     const used = new Set();
-    const exports = layers.map((lyr) => {
-      let base = safeName(lyr.name);
+    const exports = [];
+    for (const lyr of layers) {
+      let base = await exportBaseName(lyr);
+      if (base === null) return;
       let n = 2;
       const root = base;
       while (used.has(base.toLowerCase())) base = `${root}_${n++}`;
       used.add(base.toLowerCase());
-      return { lyr, base };
-    });
+      exports.push({ lyr, base });
+    }
     const shapefileOptions = new Map();
     if (fmt === 'shp') {
       for (const { lyr, base } of exports) {
@@ -1133,10 +1375,11 @@
     }
     warnings.forEach((w) => toast(w, 'warn', 9000));
     if (!files.length) return;
-    const stamp = layers.length === 1 ? safeName(layers[0].name) : 'geo-editor-export';
+    const stamp = layers.length === 1 ? exports[0].base : 'geo-editor-export';
     if (fmt !== 'shp' && files.length === 1) {
       const f = files[0];
-      return saveBlob(new Blob([f.data], { type: 'application/octet-stream' }), f.name);
+      const type = fmt === 'csv' ? 'text/csv;charset=utf-8' : 'application/octet-stream';
+      return saveBlob(new Blob([f.data], { type }), f.name);
     }
     const zip = new JSZip();
     files.forEach((f) => zip.file(f.name, f.data));
@@ -1145,7 +1388,9 @@
   }
 
   /* ---------- UI wiring ---------- */
-  $('btnUpload').addEventListener('click', () => $('fileInput').click());
+  const openFilePicker = () => $('fileInput').click();
+  $('btnUpload').addEventListener('click', openFilePicker);
+  $('emptyUpload').addEventListener('click', openFilePicker);
   $('fileInput').addEventListener('change', (e) => { handleFiles(e.target.files); e.target.value = ''; });
 
   $('btnNewLayer').addEventListener('click', async () => {
@@ -1163,6 +1408,7 @@
     toast('Layer created. Use the drawing tools on the map to add features.');
   });
 
+  $('btnUndo').addEventListener('click', undoLastTableEdit);
   $('btnAddField').addEventListener('click', addField);
   $('btnBulkDelete').addEventListener('click', bulkDeleteRows);
   $('btnDlLayer').addEventListener('click', () => (state.active ? downloadLayers([state.active]) : toast('Select a layer first.', 'warn')));

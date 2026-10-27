@@ -205,6 +205,334 @@
     return svg;
   }
 
+  const palette = ['#2563eb', '#dc2626', '#16a34a', '#d97706', '#9333ea', '#0891b2', '#db2777', '#65a30d', '#0d9488', '#7c3aed', '#ea580c', '#475569'];
+  const editableProps = {
+    point: { name: 'shape', size: 'number', color: 'colour', outline_color: 'colour', outline_width: 'number', outline_style: 'stroke' },
+    line: { line_color: 'colour', line_width: 'number', line_style: 'stroke' },
+    polygon: { color: 'colour', style: 'fill', outline_color: 'colour', outline_width: 'number', outline_style: 'stroke' },
+  };
+  const choiceLists = { shape: shapes, stroke: strokes, fill: fills };
+  const isHex = (value) => /^#[0-9a-f]{6}$/i.test(String(value));
+  const rgbaValue = (hex, alpha) => [1, 3, 5].map((start) => parseInt(hex.slice(start, start + 2), 16)).concat(alpha).join(',');
+
+  function mixColours(from, to, t) {
+    return '#' + [1, 3, 5].map((start) => {
+      const a = parseInt(from.slice(start, start + 2), 16);
+      const b = parseInt(to.slice(start, start + 2), 16);
+      return Math.round(a + (b - a) * t).toString(16).padStart(2, '0');
+    }).join('');
+  }
+
+  function checkBulkValue(kind, key, value) {
+    if (kind === 'colour') {
+      if (!isHex(value)) throw new Error(`Invalid colour for ${key}.`);
+    } else if (kind === 'number') {
+      if (String(value).trim() === '' || !Number.isFinite(Number(value)) || Number(value) < 0) throw new Error(`Invalid number for ${key}.`);
+    } else if (!choiceLists[kind].includes(value)) {
+      throw new Error(`Invalid value for ${key}.`);
+    }
+  }
+
+  function bulkTargets(model, indices) {
+    const unique = [...new Set(indices)].sort((a, b) => a - b);
+    if (!unique.length) throw new Error('Select at least one category.');
+    return unique.map((index) => {
+      if (!Number.isInteger(index) || !model.entries[index]) throw new Error('Unknown category.');
+      return model.entries[index];
+    });
+  }
+
+  function snapshot(entry) {
+    return {
+      entry,
+      alpha: entry.symbol.getAttribute('alpha'),
+      nodes: [...entry.symbol.childNodes].map((node) => node.cloneNode(true)),
+      render: entry.category ? entry.category.getAttribute('render') : null,
+    };
+  }
+
+  function restore(snap) {
+    const { entry } = snap;
+    if (snap.alpha === null) entry.symbol.removeAttribute('alpha'); else entry.symbol.setAttribute('alpha', snap.alpha);
+    entry.symbol.replaceChildren(...snap.nodes.map((node) => node.cloneNode(true)));
+    if (entry.category) {
+      if (snap.render === null) entry.category.removeAttribute('render'); else entry.category.setAttribute('render', snap.render);
+    }
+  }
+
+  const undoer = (snaps) => () => snaps.forEach(restore);
+
+  /**
+   * Applies the same edits to several categories at once. Everything is validated before
+   * anything changes. spec: { props: {key: value}, colour: {key, mode, value, from, to}, alpha, render }.
+   * Returns { count, undo }.
+   */
+  function applyBulk(model, indices, spec = {}) {
+    const targets = bulkTargets(model, indices);
+    const allowed = editableProps[model.family];
+    const props = Object.entries(spec.props || {});
+    props.forEach(([key, value]) => {
+      if (!allowed[key]) throw new Error(`"${key}" cannot be edited for ${model.family} symbols.`);
+      checkBulkValue(allowed[key], key, value);
+    });
+    const colour = spec.colour;
+    if (colour) {
+      if (allowed[colour.key] !== 'colour') throw new Error('Invalid colour property.');
+      if (!['single', 'palette', 'gradient'].includes(colour.mode)) throw new Error('Invalid colour mode.');
+      if (colour.mode === 'single') checkBulkValue('colour', colour.key, colour.value);
+      if (colour.mode === 'gradient') { checkBulkValue('colour', colour.key, colour.from); checkBulkValue('colour', colour.key, colour.to); }
+    }
+    if (spec.alpha !== undefined && !(Number.isFinite(spec.alpha) && spec.alpha >= 0 && spec.alpha <= 1)) throw new Error('Opacity must be between 0 and 100%.');
+    if (spec.render !== undefined && typeof spec.render !== 'boolean') throw new Error('Invalid visibility setting.');
+    if (!props.length && !colour && spec.alpha === undefined && spec.render === undefined) throw new Error('Choose at least one property to change.');
+
+    const snaps = targets.map(snapshot);
+    const setColour = (layer, key, hex) => {
+      const current = properties(layer)[key];
+      setProperty(layer, key, rgbaValue(hex, current ? colorParts(current).alpha : 255));
+    };
+    targets.forEach((entry, i) => {
+      const layer = entry.symbol.querySelector('layer');
+      props.forEach(([key, value]) => {
+        if (allowed[key] === 'colour') setColour(layer, key, value);
+        else setProperty(layer, key, allowed[key] === 'number' ? String(Number(value)) : value);
+      });
+      if (colour) {
+        const hex = colour.mode === 'single' ? colour.value
+          : colour.mode === 'palette' ? palette[i % palette.length]
+            : mixColours(colour.from, colour.to, targets.length > 1 ? i / (targets.length - 1) : 0);
+        setColour(layer, colour.key, hex);
+      }
+      if (spec.alpha !== undefined) entry.symbol.setAttribute('alpha', String(spec.alpha));
+      if (spec.render !== undefined && entry.category) entry.category.setAttribute('render', String(spec.render));
+    });
+    return { count: targets.length, undo: undoer(snaps) };
+  }
+
+  /** Copies one category's symbol appearance (not its label or visibility) to others. */
+  function copySymbol(model, fromIndex, toIndices) {
+    const source = bulkTargets(model, [fromIndex])[0];
+    const targets = bulkTargets(model, toIndices).filter((entry) => entry !== source);
+    if (!targets.length) throw new Error('Select at least one category other than the source.');
+    const nodes = [...source.symbol.childNodes].map((node) => node.cloneNode(true));
+    const alpha = source.symbol.getAttribute('alpha');
+    const snaps = targets.map(snapshot);
+    targets.forEach((entry) => {
+      entry.symbol.replaceChildren(...nodes.map((node) => node.cloneNode(true)));
+      if (alpha === null) entry.symbol.removeAttribute('alpha'); else entry.symbol.setAttribute('alpha', alpha);
+    });
+    return { count: targets.length, undo: undoer(snaps) };
+  }
+
+  function renderBulk(model, onChanged) {
+    const colourKey = model.family === 'line' ? 'line_color' : 'color';
+    const el = (tag, className, text) => {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text !== undefined) node.textContent = text;
+      return node;
+    };
+    const button = (text, onClick) => {
+      const node = el('button', '', text);
+      node.type = 'button';
+      node.onclick = onClick;
+      return node;
+    };
+    const details = el('details', 'qml-bulk');
+    details.appendChild(el('summary', '', `Bulk edit categories (${model.entries.length})`));
+    const body = el('div', 'qml-bulk-body');
+    // Enter must not submit the export form while typing here.
+    body.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && event.target.tagName === 'INPUT') event.preventDefault();
+    });
+    body.appendChild(el('p', 'muted', 'Tick the categories to change, tick the properties to apply, then press Apply. Properties left unticked are not changed.'));
+
+    const selected = new Set();
+    const filter = el('input');
+    filter.type = 'search';
+    filter.placeholder = 'Filter categories…';
+    filter.setAttribute('aria-label', 'Filter categories');
+    const count = el('span', 'muted');
+    const list = el('div', 'qml-bulk-list');
+    const items = model.entries.map((entry, index) => {
+      const label = el('label');
+      const box = el('input');
+      box.type = 'checkbox';
+      const text = document.createTextNode(entry.label);
+      box.onchange = () => { if (box.checked) selected.add(index); else selected.delete(index); updateState(); };
+      label.append(box, text);
+      list.appendChild(label);
+      return { entry, index, label, box, text };
+    });
+    filter.oninput = () => {
+      const query = filter.value.trim().toLowerCase();
+      items.forEach((item) => {
+        const names = [item.entry.label, item.entry.category && item.entry.category.getAttribute('value')];
+        item.label.hidden = !!query && !names.some((name) => String(name).toLowerCase().includes(query));
+      });
+    };
+    const setBoxes = (visibleOnly, checked) => {
+      items.forEach((item) => {
+        if (visibleOnly && item.label.hidden) return;
+        item.box.checked = checked;
+        if (checked) selected.add(item.index); else selected.delete(item.index);
+      });
+      updateState();
+    };
+    const picker = el('div', 'qml-bulk-actions');
+    picker.append(button('Select shown', () => setBoxes(true, true)), button('Deselect shown', () => setBoxes(true, false)), button('Clear selection', () => setBoxes(false, false)), count);
+    body.append(filter, picker, list);
+
+    const rows = el('div', 'qml-bulk-rows');
+    const applyRows = [];
+    const addRow = (text, controls, collect) => {
+      const row = el('div', 'qml-bulk-row');
+      const apply = el('input');
+      apply.type = 'checkbox';
+      apply.setAttribute('aria-label', `Apply ${text}`);
+      const label = el('label');
+      label.append(text, ...controls);
+      const touch = () => { apply.checked = true; updateState(); };
+      controls.forEach((control) => { control.addEventListener('input', touch); control.addEventListener('change', touch); });
+      apply.onchange = updateState;
+      row.append(apply, label);
+      rows.appendChild(row);
+      applyRows.push({ apply, collect });
+    };
+    const choice = (values, label) => {
+      const select = el('select');
+      select.setAttribute('aria-label', label);
+      values.forEach((value) => {
+        const option = el('option', '', value === 'no' ? 'None' : value.replace(/_/g, ' '));
+        option.value = value;
+        select.appendChild(option);
+      });
+      return select;
+    };
+    const numberInput = (label, value) => {
+      const input = el('input');
+      input.type = 'number';
+      input.step = 'any';
+      input.value = value;
+      input.setAttribute('aria-label', label);
+      return input;
+    };
+    const colourInput = (label, value) => {
+      const input = el('input');
+      input.type = 'color';
+      input.value = value;
+      input.setAttribute('aria-label', label);
+      return input;
+    };
+    const propRow = (text, key, input) => addRow(text, [input], (spec) => { spec.props = { ...spec.props, [key]: input.value }; });
+
+    if (model.family === 'point') {
+      propRow('Point shape', 'name', choice(shapes, 'Point shape'));
+      propRow('Point size (mm)', 'size', numberInput('Point size', '2'));
+    }
+    const mode = choice(['single', 'palette', 'gradient'], 'Colour mode');
+    [...mode.options].forEach((option) => { option.textContent = { single: 'One colour', palette: 'Distinct colours', gradient: 'Gradient' }[option.value]; });
+    const one = colourInput('Colour', '#2563eb');
+    const from = colourInput('Gradient start colour', '#2563eb');
+    const to = colourInput('Gradient end colour', '#dc2626');
+    const syncMode = () => { one.hidden = mode.value !== 'single'; from.hidden = to.hidden = mode.value !== 'gradient'; };
+    mode.addEventListener('change', syncMode);
+    syncMode();
+    addRow(model.family === 'line' ? 'Line colour' : 'Fill colour', [mode, one, from, to], (spec) => {
+      spec.colour = { key: colourKey, mode: mode.value, value: one.value, from: from.value, to: to.value };
+    });
+    if (model.family === 'polygon') propRow('Fill pattern', 'style', choice(fills, 'Fill pattern'));
+    if (model.family === 'line') {
+      propRow('Line width (mm)', 'line_width', numberInput('Line width', '0.5'));
+      propRow('Line style', 'line_style', choice(strokes, 'Line style'));
+    } else {
+      propRow('Outline colour', 'outline_color', colourInput('Outline colour', '#2563eb'));
+      propRow('Outline width (mm)', 'outline_width', numberInput('Outline width', '0.26'));
+      propRow('Outline style', 'outline_style', choice(strokes, 'Outline style'));
+    }
+    const opacity = numberInput('Symbol opacity', '100');
+    addRow('Symbol opacity (%)', [opacity], (spec) => { spec.alpha = opacity.value.trim() === '' ? NaN : Number(opacity.value) / 100; });
+    const visibility = choice(['show', 'hide'], 'Initial visibility');
+    [...visibility.options].forEach((option) => { option.textContent = { show: 'Shown', hide: 'Hidden' }[option.value]; });
+    addRow('Show category initially', [visibility], (spec) => { spec.render = visibility.value === 'show'; });
+    body.appendChild(rows);
+
+    const status = el('p', '');
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+    const undos = [];
+    const finish = (result, message) => {
+      undos.push(result.undo);
+      status.className = '';
+      status.textContent = message;
+      updateState();
+      onChanged();
+    };
+    const fail = (error) => {
+      status.className = 'error';
+      status.textContent = `Nothing changed: ${error.message || error}`;
+    };
+    const applyButton = button('Apply to selected', () => {
+      const spec = {};
+      applyRows.forEach((row) => { if (row.apply.checked) row.collect(spec); });
+      try {
+        const result = applyBulk(model, [...selected], spec);
+        finish(result, `Updated ${result.count} categories.`);
+      } catch (error) { fail(error); }
+    });
+    applyButton.className = 'primary';
+    const undoButton = button('Undo last bulk change', () => {
+      const undo = undos.pop();
+      if (!undo) return;
+      undo();
+      status.className = '';
+      status.textContent = 'Last bulk change undone.';
+      updateState();
+      onChanged();
+    });
+    body.appendChild(el('div', 'qml-bulk-actions')).append(applyButton, undoButton);
+    body.appendChild(el('p', 'muted', 'Gradients and distinct colours follow the order of the selected categories in the list above, which is the legend order. Existing colour transparency is kept.'));
+
+    const copyFrom = el('select');
+    copyFrom.setAttribute('aria-label', 'Copy style from category');
+    const copyButton = button('Copy style to selected', () => {
+      try {
+        const result = copySymbol(model, Number(copyFrom.value), [...selected]);
+        finish(result, `Copied the symbol to ${result.count} categories. Labels and visibility are unchanged.`);
+      } catch (error) { fail(error); }
+    });
+    const copyRow = el('div', 'qml-bulk-copy');
+    copyRow.append(el('span', '', 'Copy the whole symbol from'), copyFrom, copyButton);
+    body.append(copyRow, status);
+
+    function updateState() {
+      count.textContent = `${selected.size} of ${items.length} selected`;
+      applyButton.disabled = !selected.size || !applyRows.some((row) => row.apply.checked);
+      copyButton.disabled = !selected.size;
+      undoButton.disabled = !undos.length;
+    }
+    // Labels can be edited above, so refresh them whenever the panel opens.
+    details.addEventListener('toggle', () => {
+      if (!details.open) return;
+      items.forEach((item) => { item.text.nodeValue = item.entry.label; });
+      const previous = copyFrom.value;
+      copyFrom.replaceChildren(...model.entries.map((entry, index) => {
+        const option = el('option', '', entry.label);
+        option.value = String(index);
+        return option;
+      }));
+      if (previous) copyFrom.value = previous;
+    });
+    copyFrom.replaceChildren(...model.entries.map((entry, index) => {
+      const option = el('option', '', entry.label);
+      option.value = String(index);
+      return option;
+    }));
+    updateState();
+    details.appendChild(body);
+    return details;
+  }
+
   function renderEditor(container, models, onDownload) {
     container.replaceChildren();
     models.forEach((model) => {
@@ -307,11 +635,12 @@
         refresh();
       };
       select.onchange = show;
-      card.append(legend, selectLabel, picture, controls, download);
+      const bulk = model.kind === 'categorizedSymbol' && model.entries.length > 1 ? renderBulk(model, show) : null;
+      card.append(legend, selectLabel, picture, controls, ...(bulk ? [bulk] : []), download);
       container.appendChild(card);
       show();
     });
   }
 
-  global.QgisStyle = { symbolXml, singleStyle, read, merge, serialize, renderEditor };
+  global.QgisStyle = { symbolXml, singleStyle, read, merge, serialize, renderEditor, applyBulk, copySymbol };
 })(window);

@@ -137,7 +137,14 @@ flowchart TD
     H --> J
     I --> J
 
-    J --> K{"Import a .qml style?"}
+    J --> BK{"Change many categories at once?"}
+    BK -->|"yes"| BL["Bulk edit panel<br/>filter and tick categories,<br/>tick properties to apply"]
+    BL --> BM{"Apply, copy symbol,<br/>or undo?"}
+    BM -->|"values invalid"| BN["Show message<br/>nothing changes"]
+    BN --> BL
+    BM -->|"valid"| BO["Update only the selected categories<br/>one colour, distinct colours or gradient<br/>keeps transparency, labels and visibility"]
+    BO --> J
+    BK -->|"no"| K{"Import a .qml style?"}
     K -->|"yes"| L{"Supported and matching?"}
     L -->|"no"| M["Show reason<br/>keep current styles"]
     M --> J
