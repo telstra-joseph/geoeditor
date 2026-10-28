@@ -14,11 +14,20 @@ See [FLOWCHART.md](./FLOWCHART.md) for diagrams of how the app works.
 - Zipped shapefiles (`.zip`), loose `.shp` / `.shx` / `.dbf` / `.prj` / `.cpg` files, `.kml`, `.kmz`, `.geojson` and `.json`.
 - Choose **New layer → Upload layer**, click or tap the empty map's import prompt, or drag and drop files anywhere on the page.
 - Multiple files and multiple layers per file are supported.
+- Large files (at least 1 MB), or imports taking more than one second, show a dotted loading bar with a file count ("1 file" or "1 of 2 files") and the current filename. Features are added in batches so the browser can repaint progress. **Cancel** stops the remaining files in that import and removes layers from the unfinished file, while keeping existing layers and files already completed. Active file reads are aborted and background workers are terminated; fallback processing stops at its next cancellation checkpoint.
+- When served over HTTP/HTTPS, large files, ZIP/KMZ archives and loose shapefile components use one background Web Worker for reading, decompression, GeoJSON/shapefile parsing, coordinate projection and feature preparation. Transfers are limited to 1,000 features at a time. Geometry is built in 100-feature batches, yielding after roughly 8 milliseconds or each transferred batch. Full display sampling and editing-group setup wait until construction finishes, avoiding repeated scans of a growing layer. KML XML conversion, Leaflet geometry construction and editing remain on the main thread. Small plain files and browsers without worker support use the existing import path.
 - Multi-part geometry collections are split into separate features; features without geometry are skipped, with a notice.
 - Coordinates must be longitude/latitude (WGS84). A shapefile in a projected CRS needs its `.prj` file included.
+- KML/KMZ folders appear as nested, collapsible groups under their imported layer, with feature counts, visibility checkboxes and zoom controls. Nested, duplicate-name and empty folders are retained; hiding a folder does not delete its editable features.
+- Named KML point placemarks display permanent text labels, including letters and numbers over polygons. Single-character polygon names and polygons with an explicit label style also display labels. KML label colour, opacity and scale are honoured; zero-scale labels stay hidden. Single-character point labels and zero-scale icons use text rather than a replacement dot. Labels follow geometry edits.
+- Single-character letters and numbers appear only at zoom 10 or closer, when their polygon (or a nearby displayed polygon in the same layer) is at least 48 screen pixels across. Point labels must be inside or within 24 screen pixels of the polygon's bounds. These labels use regular-weight text capped at 12 pixels and 18% of the polygon's smaller dimension; unreadably small labels remain hidden.
+- Four-character site names use consistent 14-pixel regular text with a thin black outline on the letters and a transparent background. Labels try positions above, right, left and below their small site dot, avoiding other site names and the sidebar/table area. Unchanged label content is reused, and measurements are batched before placement updates to reduce layout work. Crowded names are temporarily suppressed rather than overlapped; selecting a site gives its label priority. All site features remain editable and exportable.
 
 ### Map and layers
 - Leaflet map with OpenStreetMap, satellite and blank basemaps.
+- Automatic WebGL rendering through PixiJS for layer points, lines and polygons, with retained geometry between updates. Canvas is used automatically if WebGL is unavailable; Leaflet's native SVG guides preserve drawing-tool interactions.
+- Large layers have per-layer display limits: 1,000 features at zoom 0-5, 2,000 at 6-8, 10,000 at 9-14, and 20,000 above 14. Layers exceeding the current limit show a deterministic sample within the map viewport, refreshed after panning or zooming. Selected and actively dragged features take priority within the same budget; remaining slots go to polygons before lines and points. KML labels follow their displayed features, and folder visibility is respected. All features remain in the attribute table and exports; these limits do not delete data.
+- Site-style KML/KMZ layers with four-character site-code folders preserve complete sector-polygon groups around isolated sites first, when those groups fit the remaining display budget. A site is isolated when no other visible site is within 96 screen pixels, so prioritisation adapts with zoom. Dense areas use the remaining slots; generic layers keep their usual sampling. Geometry and export data are unchanged.
 - The initial view frames Australia in the uncovered map area. Layer, feature and import zooms account for the sidebar and table panel too.
 - Layer list with show/hide, colour, rename, zoom-to-layer, per-layer download and delete.
 - Collapse or expand the Layers panel to make more room for the map. Resize the attribute table with the divider above it.
@@ -100,7 +109,7 @@ Legend ordering changes only the legend. It does not change the map's drawing or
 - Animated panel changes, radio selection and notifications respect reduced-motion preferences. Radio buttons and layer checkboxes retain native controls in forced-colors mode.
 - Delete actions use red states; the help button uses a yellow hover state. Enabled header, Layers and table-bar buttons have a subtle shadow in light mode or glow in dark mode.
 - Open **How to edit** with the Layers panel's question-mark button for a short guide to the main tasks.
-- Click **Geo Editor** in the header to open About: Australia-facing globe, "Imagined by Joseph Malicdem", Version 1.0, and October 2026. Close with the top-right button or Escape.
+- Click **Geo Editor** in the header to open About: Australia-facing globe, "Imagineered by Joseph Malicdem", Version 1.0, and October 2026. Close with the top-right button or Escape.
 - **Send feedback** opens an email draft to `joseph.malicdem@team.telstra.com` with subject **Geo Editor Feedback**; it does not send automatically.
 - The browser tab uses the title **Geo Editor** and the same Australia-facing globe as its favicon.
 
@@ -114,6 +123,8 @@ python -m http.server 8765
 
 Then open <http://localhost:8765/index.html>.
 
+Use the local server or an HTTP/HTTPS deployment to enable background import workers. Opening the HTML directly with `file://`, or a worker startup failure, automatically uses main-thread imports instead.
+
 An internet connection is needed for basemap tiles (OpenStreetMap and Esri imagery) and the Doto heading font from Google Fonts. The app uses a bundled fallback font if Doto is unavailable. The blank basemap does not request map tiles.
 
 **Important:** layers exist only in the open browser tab. Refreshing or closing the page loses them, so download your work first. The page warns before you leave while layers are loaded.
@@ -125,6 +136,10 @@ The [samples/](./samples) folder contains `sample.kml`, `sample.kmz` and `parks.
 
 Open `tests/shapefile-writer.test.html` through the local server. It runs in the browser and lists PASS or FAIL for each check of the shapefile writer, QGIS style generation and editing, style import validation, and legend ordering.
 
+Open [tests/gpu-renderer.test.html](./tests/gpu-renderer.test.html) for rendering checks: visible pixels, polygon holes, multi-polygons, geometry caching, style and coordinate updates, undisplayed-feature cleanup, draw order, batched additions, zoom/pan, Canvas fallback and drawing-tool click handling. GPU-only checks are marked SKIP when WebGL is unavailable.
+
+Open [tests/import-worker.test.html](./tests/import-worker.test.html) through the local server for import and display checks: preparation parity, bounded transfers and acknowledgment, GeoJSON, KML styles and text labels, nested folder controls and visibility, zoom-level display caps, viewport sampling, selection, full export counts, KMZ, zipped/loose shapefiles, multiple collections and invalid input.
+
 ## Project structure
 
 | Path | Purpose |
@@ -132,14 +147,20 @@ Open `tests/shapefile-writer.test.html` through the local server. It runs in the
 | [index.html](./index.html) | Page layout, dialogs and help text |
 | [css/style.css](./css/style.css) | Styling |
 | [js/app.js](./js/app.js) | Application logic: layers, map, table, import, bulk delete, export dialog |
+| [js/gpu-renderer.js](./js/gpu-renderer.js) | WebGL drawing backend with Leaflet interactions and automatic Canvas fallback |
+| [js/import-core.js](./js/import-core.js) | Shared feature normalization, field inference and coordinate validation |
+| [js/import-worker.js](./js/import-worker.js) | Background import processing with acknowledged feature batches |
 | [js/shapefile-writer.js](./js/shapefile-writer.js) | Writes SHP, SHX, DBF, PRJ and CPG files and builds the category `.qml` |
 | [js/qgis-style.js](./js/qgis-style.js) | Reads, validates, merges and edits QGIS `.qml` symbol styles |
 | [tests/shapefile-writer.test.html](./tests/shapefile-writer.test.html) | Browser-based tests |
+| [tests/gpu-renderer.test.html](./tests/gpu-renderer.test.html) | GPU rendering and fallback regression tests |
+| [tests/import-worker.test.html](./tests/import-worker.test.html) | Worker import and batching regression tests |
 | [samples/](./samples) | Example input files |
 | [lib/](./lib) | Bundled third-party libraries |
 
 ## Libraries
 - [Leaflet](https://leafletjs.com/) — map display
+- [PixiJS 7.4.3](https://pixijs.com/) - bundled WebGL geometry rendering
 - [Leaflet-Geoman](https://geoman.io/leaflet-geoman) — drawing and editing tools
 - [shp.js](https://github.com/calvinmetcalf/shapefile-js) — shapefile reading
 - [toGeoJSON](https://github.com/mapbox/togeojson) — KML conversion
@@ -151,5 +172,8 @@ Open `tests/shapefile-writer.test.html` through the local server. It runs in the
 - Undo covers table cell and field changes, not drawing, geometry changes or feature/layer deletions. Bulk deletion cannot be undone.
 - No saved projects or automatic persistence; work lives only in the open tab.
 - Shapefile export is always WGS84 (EPSG:4326).
-- Very large files are limited by browser memory.
+- Very large files are limited by browser memory. A worker still holds a parsed collection in memory, and every editable feature still needs a Leaflet object on the main thread. This is one background CPU worker, not a multi-core renderer or an unlimited-size streaming parser.
+- Zoom limits reduce displayed feature counts, not the vertex count of an individual complex geometry. Features outside the display sample cannot be clicked on the map; select them in the attribute table to reveal them.
+- KML text labels use Leaflet overlays rather than WebGL, so very dense label sets can still affect performance. Arbitrary KML image icons and advanced label placement are not reproduced.
+- WebGL accelerates drawing, not file parsing, coordinate projection or attribute processing. Hardware acceleration depends on browser settings and graphics-driver support; browsers may use software WebGL. Canvas fallback preserves functionality but not GPU rendering performance.
 - The QGIS style output has been checked by the app's tests but not against every QGIS version; if QGIS rejects a style, load it manually or recreate the styling in QGIS.

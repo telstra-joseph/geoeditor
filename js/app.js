@@ -3,12 +3,6 @@
   lucide.createIcons();
 
   /* ---------- constants & state ---------- */
-  const KML_STYLE_KEYS = new Set([
-    'stroke', 'stroke-width', 'stroke-opacity', 'fill', 'fill-opacity',
-    'marker-color', 'marker-size', 'marker-symbol', 'styleUrl', 'styleHash',
-    'styleMapHash', 'icon', 'visibility', 'drawOrder', 'description-html',
-    'icon-color', 'icon-opacity', 'icon-scale', 'icon-offset', 'icon-offset-units', 'label-color', 'label-opacity', 'label-scale',
-  ]);
   const PALETTE = ['#2563eb', '#dc2626', '#16a34a', '#d97706', '#9333ea', '#0891b2', '#db2777', '#65a30d'];
   const PAGE_SIZE = 200;
   const columnWidths = new WeakMap();
@@ -249,6 +243,7 @@
   const confirmBox = async (title, message, okLabel = 'Delete', destructive = false) => !!(await askForm(title, [], { message, okLabel, destructive }));
 
   /* ---------- map ---------- */
+  const vectorRenderer = new L.GpuCanvas({ padding: 0.2 });
   const map = L.map('map', { zoomSnap: 0.5 }).setView([-25, 134], 4);
   const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19, attribution: '&copy; OpenStreetMap contributors',
@@ -394,6 +389,330 @@
     return 'Line';
   }
 
+  function kmlLabelOnly(leaf) {
+    return Boolean(leaf.feature?.kml && isPointLeaf(leaf) &&
+      (/^[a-z0-9]$/i.test(String(leaf.feature.properties.name ?? '').trim()) || Number(leaf.feature.style?.['icon-scale']) === 0));
+  }
+
+  function pointRadius(leaf) {
+    const name = String(leaf.feature?.properties?.name ?? '').trim();
+    if (!leaf.feature?.kml || [...name].length !== 4) return 3;
+    return Math.max(1, Math.min(2, (map.getZoom() + 4) / 10));
+  }
+
+  function singleCharacterLabel(leaf) {
+    return Boolean(leaf.feature?.kml && (isPointLeaf(leaf) || leaf instanceof L.Polygon) &&
+      /^[a-z0-9]$/i.test(String(leaf.feature.properties.name ?? '').trim()));
+  }
+
+  function polygonLabelSize(leaf, nearby) {
+    if (map.getZoom() < 10) return 0;
+    const point = isPointLeaf(leaf) ? map.latLngToContainerPoint(leaf.getLatLng()) : null;
+    let best = null;
+    let bestDistance = Infinity;
+    const polygons = leaf instanceof L.Polygon ? [leaf] : nearby.get(`${Math.floor(point.x / 128)},${Math.floor(point.y / 128)}`) || [];
+    polygons.forEach(polygon => {
+      const bounds = polygon.getBounds();
+      const start = map.latLngToContainerPoint(bounds.getNorthWest());
+      const end = map.latLngToContainerPoint(bounds.getSouthEast());
+      const distance = point ? Math.hypot(Math.max(start.x - point.x, 0, point.x - end.x), Math.max(start.y - point.y, 0, point.y - end.y)) : 0;
+      const size = Math.min(end.x - start.x, end.y - start.y);
+      if (distance <= 24 && (distance < bestDistance || (distance === bestDistance && size < best))) {
+        best = size;
+        bestDistance = distance;
+      }
+    });
+    if (best < 48) return 0;
+    const scale = Number(leaf.feature.style?.['label-scale'] ?? 1);
+    const size = Math.min(12, 12 * (Number.isFinite(scale) ? scale : 1), best * .18);
+    return size >= 8 ? size : 0;
+  }
+
+  function polygonLabelIndex(polygons) {
+    const nearby = new Map();
+    if (map.getZoom() < 10) return nearby;
+    const viewport = map.getSize();
+    polygons.forEach(polygon => {
+      const bounds = polygon.getBounds();
+      const start = map.latLngToContainerPoint(bounds.getNorthWest());
+      const end = map.latLngToContainerPoint(bounds.getSouthEast());
+      const left = Math.floor(Math.max(-128, start.x - 24) / 128);
+      const right = Math.floor(Math.min(viewport.x + 128, end.x + 24) / 128);
+      const top = Math.floor(Math.max(-128, start.y - 24) / 128);
+      const bottom = Math.floor(Math.min(viewport.y + 128, end.y + 24) / 128);
+      for (let column = left; column <= right; column++) {
+        for (let row = top; row <= bottom; row++) {
+          const key = `${column},${row}`;
+          if (!nearby.has(key)) nearby.set(key, []);
+          nearby.get(key).push(polygon);
+        }
+      }
+    });
+    return nearby;
+  }
+
+  function updateKmlLabel(leaf) {
+    if (!leaf.feature?.kml) return;
+    const name = String(leaf.feature.properties.name ?? '').trim();
+    const style = leaf.feature.style || {};
+    if (!isPointLeaf(leaf) && (!(leaf instanceof L.Polygon) ||
+      (!/^[a-z0-9]$/i.test(name) && !['label-color', 'label-scale', 'label-opacity'].some(key => key in style)))) {
+      leaf.unbindTooltip();
+      return;
+    }
+    const scale = Number(style['label-scale'] ?? 1);
+    const opacity = Number(style['label-opacity'] ?? 1);
+    const single = singleCharacterLabel(leaf);
+    const site = isPointLeaf(leaf) && [...name].length === 4;
+    if (!name || scale <= 0 || opacity <= 0 || (single && !leaf._kmlLabelSize)) { leaf.unbindTooltip(); return; }
+    const fontSize = site ? 14 : single ? leaf._kmlLabelSize : Math.min(256, 16 * (Number.isFinite(scale) ? scale : 1));
+    const centered = !site && (!isPointLeaf(leaf) || kmlLabelOnly(leaf));
+    const alpha = Number.isFinite(opacity) ? Math.max(0, Math.min(1, opacity)) : 1;
+    const labelKey = JSON.stringify([name, style['label-color'] || '#ffffff', fontSize, centered, site, alpha]);
+    if (leaf._kmlLabelKey === labelKey && leaf.getTooltip()) return;
+    leaf._kmlLabelKey = labelKey;
+    const text = document.createElement('span');
+    text.textContent = name;
+    if ([...name].length === 4) text.className = 'kml-label-outlined';
+    text.style.color = style['label-color'] || '#ffffff';
+    text.style.fontSize = `${fontSize}px`;
+    const options = {
+      permanent: true, interactive: false, className: site ? 'kml-map-label kml-site-label' : 'kml-map-label',
+      direction: site ? 'top' : centered ? 'center' : 'right', offset: site ? L.point(0, -4) : L.point(centered ? 0 : 8, 0),
+      opacity: alpha,
+    };
+    if (!leaf.getTooltip()) leaf.bindTooltip(text, options);
+    else {
+      Object.assign(leaf.getTooltip().options, options);
+      leaf.getTooltip().getElement()?.classList.toggle('kml-site-label', site);
+      leaf.setTooltipContent(text);
+      leaf.getTooltip().setOpacity(options.opacity);
+    }
+  }
+
+  function placeSiteLabels(lyr) {
+    const mapRect = map.getContainer().getBoundingClientRect();
+    const workspace = $('workspace').getBoundingClientRect();
+    const area = {
+      left: Math.max(0, workspace.left - mapRect.left) + 8,
+      top: Math.max(0, workspace.top - mapRect.top) + 8,
+      right: mapRect.width - 8,
+      bottom: Math.min(mapRect.height, $('splitter').getBoundingClientRect().top - mapRect.top) - 8,
+    };
+    const occupied = new Map();
+    const cells = rectangle => {
+      const keys = [];
+      for (let column = Math.floor(rectangle.left / 64); column <= Math.floor(rectangle.right / 64); column++) {
+        for (let row = Math.floor(rectangle.top / 64); row <= Math.floor(rectangle.bottom / 64); row++) keys.push(`${column},${row}`);
+      }
+      return keys;
+    };
+    const sites = [...lyr.displayed].filter(leaf => isPointLeaf(leaf) && leaf.getTooltip()?.options.className.includes('kml-site-label'));
+    sites.sort((first, second) => Number(second === state.selected) - Number(first === state.selected));
+    const measured = sites.map(leaf => {
+      const tooltip = leaf.getTooltip();
+      const element = tooltip.getElement();
+      if (!element || !map.hasLayer(tooltip)) return null;
+      return { leaf, tooltip, element, point: map.latLngToContainerPoint(leaf.getLatLng()), width: element.offsetWidth, height: element.offsetHeight };
+    }).filter(Boolean);
+    measured.forEach(({ leaf, tooltip, element, point, width, height }) => {
+      const choices = [
+        { direction: 'top', offset: [0, -4], left: point.x - width / 2, top: point.y - height - 10 },
+        { direction: 'right', offset: [4, 0], left: point.x + 10, top: point.y - height / 2 },
+        { direction: 'left', offset: [-4, 0], left: point.x - width - 10, top: point.y - height / 2 },
+        { direction: 'bottom', offset: [0, 4], left: point.x - width / 2, top: point.y + 10 },
+      ];
+      const placement = choices.find(choice => {
+        const rectangle = { left: choice.left - 2, top: choice.top - 2, right: choice.left + width + 2, bottom: choice.top + height + 2 };
+        if (rectangle.left < area.left || rectangle.right > area.right || rectangle.top < area.top || rectangle.bottom > area.bottom) return false;
+        return cells(rectangle).every(key => (occupied.get(key) || []).every(other =>
+          rectangle.right <= other.left || rectangle.left >= other.right || rectangle.bottom <= other.top || rectangle.top >= other.bottom));
+      }) || (leaf === state.selected ? choices[0] : null);
+      const visibility = placement ? '' : 'hidden';
+      if (element.style.visibility !== visibility) element.style.visibility = visibility;
+      if (!placement) return;
+      const offset = L.point(placement.offset);
+      if (tooltip.options.direction !== placement.direction || !tooltip.options.offset.equals(offset)) {
+        tooltip.options.direction = placement.direction;
+        tooltip.options.offset = offset;
+        tooltip.update();
+      }
+      const rectangle = { left: placement.left - 2, top: placement.top - 2, right: placement.left + width + 2, bottom: placement.top + height + 2 };
+      cells(rectangle).forEach(key => {
+        if (!occupied.has(key)) occupied.set(key, []);
+        occupied.get(key).push(rectangle);
+      });
+    });
+  }
+
+  function kmlLeafVisible(lyr, leaf) {
+    return lyr.visible && String(leaf.feature?.style?.visibility ?? '1') !== '0' &&
+      (leaf.feature?.kml?.folderIds || []).every(id => lyr.kmlFolderMap.get(id)?.visible !== false);
+  }
+
+  function displayLimit() {
+    const zoom = map.getZoom();
+    return zoom <= 5 ? 1000 : zoom <= 8 ? 2000 : zoom <= 11 ? 10000 : zoom <= 14 ? 10000 : 20000;
+  }
+
+  function sitePolygonIndex(lyr) {
+    if (lyr.format !== 'kml' && lyr.format !== 'kmz') return null;
+    if (lyr.sitePolygons) return lyr.sitePolygons;
+    const sites = new Map();
+    const polygons = new Map();
+    const all = leavesOf(lyr);
+    all.forEach(leaf => {
+      if (!isPointLeaf(leaf)) return;
+      const name = String(leaf.feature?.properties?.name ?? '').trim();
+      if ([...name].length !== 4) return;
+      const id = (leaf.feature.kml?.folderIds || []).find(folderId => lyr.kmlFolderMap.get(folderId)?.name.trim() === name);
+      if (id && !sites.has(id)) sites.set(id, { leaf, id });
+    });
+    all.forEach(leaf => {
+      if (!(leaf instanceof L.Polygon)) return;
+      const id = (leaf.feature?.kml?.folderIds || []).find(folderId => sites.has(folderId));
+      if (id) polygons.set(leaf, sites.get(id));
+    });
+    lyr.sitePolygons = { sites, polygons };
+    return lyr.sitePolygons;
+  }
+
+  function isolatedSitePolygons(lyr, candidates, budget) {
+    const index = sitePolygonIndex(lyr);
+    if (!index?.sites.size) return [];
+    const groups = new Map();
+    candidates.forEach(polygon => {
+      const site = index.polygons.get(polygon);
+      if (!site) return;
+      if (!groups.has(site)) groups.set(site, { site, polygons: [], point: map.latLngToContainerPoint(site.leaf.getLatLng()) });
+      groups.get(site).polygons.push(polygon);
+    });
+    const cells = new Map();
+    index.sites.forEach(site => {
+      if (!groups.has(site) && !kmlLeafVisible(lyr, site.leaf)) return;
+      const point = groups.get(site)?.point || map.latLngToContainerPoint(site.leaf.getLatLng());
+      const key = `${Math.floor(point.x / 96)},${Math.floor(point.y / 96)}`;
+      if (!cells.has(key)) cells.set(key, []);
+      cells.get(key).push({ site, point });
+    });
+    const isolated = [...groups.values()].filter(group => {
+      const column = Math.floor(group.point.x / 96);
+      const row = Math.floor(group.point.y / 96);
+      for (let horizontal = column - 1; horizontal <= column + 1; horizontal++) {
+        for (let vertical = row - 1; vertical <= row + 1; vertical++) {
+          if ((cells.get(`${horizontal},${vertical}`) || []).some(other => other.site !== group.site && group.point.distanceTo(other.point) <= 96)) return false;
+        }
+      }
+      return true;
+    }).sort((first, second) => first.polygons.length - second.polygons.length);
+    const preferred = [];
+    isolated.forEach(group => {
+      if (group.polygons.length <= budget - preferred.length) preferred.push(...group.polygons);
+    });
+    return preferred;
+  }
+
+  function syncLayerDisplay(lyr) {
+    if (!map.hasLayer(lyr.group) || lyr.importing) return;
+    const all = leavesOf(lyr);
+    const limit = displayLimit();
+    const limited = all.length > limit;
+    const bounds = map.getBounds().pad(.1);
+    const pinned = [];
+    const candidates = [[], [], []];
+    all.forEach(leaf => {
+      if (!kmlLeafVisible(lyr, leaf)) return;
+      if (leaf === state.selected || leaf._displayEditing) { pinned.push(leaf); return; }
+      if (!limited || (leaf.getBounds ? bounds.intersects(leaf.getBounds()) : bounds.contains(leaf.getLatLng()))) {
+        candidates[leaf instanceof L.Polygon ? 0 : isPointLeaf(leaf) ? 2 : 1].push(leaf);
+      }
+    });
+    const desired = new Set(pinned.slice(0, limit));
+    if (candidates[0].length > limit - desired.size) {
+      isolatedSitePolygons(lyr, candidates[0], limit - desired.size).forEach(leaf => desired.add(leaf));
+    }
+    candidates.slice(0, 2).forEach(items => {
+      const remaining = items.filter(leaf => !desired.has(leaf));
+      const count = Math.min(limit - desired.size, remaining.length);
+      for (let index = 0; index < count; index++) desired.add(remaining[Math.floor(index * remaining.length / count)]);
+    });
+    const needsNearby = pinned.some(leaf => isPointLeaf(leaf) && singleCharacterLabel(leaf)) ||
+      (desired.size < limit && candidates[2].some(singleCharacterLabel));
+    const nearby = needsNearby ? polygonLabelIndex([...desired].filter(leaf => leaf instanceof L.Polygon)) : new Map();
+    const points = candidates[2].filter(leaf => {
+      if (!singleCharacterLabel(leaf)) return true;
+      leaf._kmlLabelSize = polygonLabelSize(leaf, nearby);
+      return leaf._kmlLabelSize > 0;
+    });
+    const pointCount = Math.min(limit - desired.size, points.length);
+    for (let index = 0; index < pointCount; index++) desired.add(points[Math.floor(index * points.length / pointCount)]);
+    desired.forEach(leaf => {
+      if (isPointLeaf(leaf) && leaf !== state.selected && leaf.options.radius !== pointRadius(leaf)) restyle(leaf);
+      if (singleCharacterLabel(leaf)) {
+        leaf._kmlLabelSize = polygonLabelSize(leaf, nearby);
+        updateKmlLabel(leaf);
+      }
+    });
+    lyr.displayed.forEach(leaf => {
+      if (!desired.has(leaf)) { map.removeLayer(leaf); lyr.displayed.delete(leaf); }
+    });
+    desired.forEach(leaf => {
+      if (!lyr.displayed.has(leaf)) { lyr.displayed.add(leaf); map.addLayer(leaf); }
+    });
+    placeSiteLabels(lyr);
+  }
+
+  let displayRefreshTimer = null;
+  function scheduleMapDisplay() {
+    if (displayRefreshTimer !== null) return;
+    displayRefreshTimer = setTimeout(() => {
+      displayRefreshTimer = null;
+      state.layers.forEach(syncLayerDisplay);
+    }, 32);
+  }
+  map.on('moveend zoomend resize', scheduleMapDisplay);
+
+  function configureLayerDisplay(lyr) {
+    const group = lyr.group;
+    group.onAdd = () => syncLayerDisplay(lyr);
+    group.onRemove = () => {
+      lyr.displayed.forEach(leaf => map.removeLayer(leaf));
+      lyr.displayed.clear();
+    };
+    group.addLayer = function(leaf) {
+      if (this.hasLayer(leaf)) return this;
+      lyr.sitePolygons = null;
+      leaf.addEventParent(this);
+      this._layers[L.stamp(leaf)] = leaf;
+      this.fire('layeradd', { layer: leaf });
+      if (this._map && lyr.displayed.size < displayLimit() && kmlLeafVisible(lyr, leaf) && !singleCharacterLabel(leaf)) {
+        lyr.displayed.add(leaf);
+        map.addLayer(leaf);
+      }
+      if (!lyr.importing) scheduleMapDisplay();
+      return this;
+    };
+    const removeLayer = group.removeLayer;
+    group.removeLayer = function(leaf) {
+      lyr.sitePolygons = null;
+      lyr.displayed.delete(typeof leaf === 'number' ? this.getLayer(leaf) : leaf);
+      const result = removeLayer.call(this, leaf);
+      scheduleMapDisplay();
+      return result;
+    };
+  }
+
+  function syncKmlVisibility(lyr) {
+    if (state.selected?._glayer === lyr && !kmlLeafVisible(lyr, state.selected)) {
+      const previous = state.selected;
+      state.selected = null;
+      restyle(previous);
+      map.closePopup();
+      renderTable();
+    }
+    syncLayerDisplay(lyr);
+  }
+
   function restyle(leaf) {
     const lyr = leaf._glayer;
     if (!lyr || !leaf.setStyle) return;
@@ -403,8 +722,9 @@
     const num = (v, d) => (v === undefined || v === null || v === '' || isNaN(Number(v)) ? d : Number(v));
     let style;
     if (point) {
+      const radius = pointRadius(leaf);
       style = {
-        radius: selected ? 9 : 6, color: selected ? '#facc15' : '#ffffff', weight: selected ? 3 : 1.5,
+        radius: selected ? 9 : radius, color: selected ? '#facc15' : '#ffffff', weight: selected ? 3 : radius / 4,
         fillColor: st['marker-color'] || st['icon-color'] || lyr.color, fillOpacity: 0.95, opacity: 1, fill: true,
       };
     } else if (leaf instanceof L.Polygon) {
@@ -419,7 +739,13 @@
         opacity: num(st['stroke-opacity'], 1), fill: false,
       };
     }
+    if (point && kmlLabelOnly(leaf)) {
+      style.fillOpacity = 0;
+      style.opacity = selected ? 1 : 0;
+      style.weight = selected ? 3 : 0;
+    }
     leaf.setStyle(style);
+    updateKmlLabel(leaf);
   }
 
   function wireLeaf(lyr, leaf) {
@@ -432,60 +758,14 @@
       if (!pmBusy()) openPopup(leaf, ev.latlng);
     });
     restyle(leaf);
-  }
-
-  function normalizeValue(v) {
-    if (v === undefined) return null;
-    if (v === null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return v;
-    return JSON.stringify(v);
-  }
-
-  function explodeGeometry(g, out) {
-    if (!g) return;
-    if (g.type === 'GeometryCollection') g.geometries.forEach((x) => explodeGeometry(x, out));
-    else if (g.type === 'MultiPoint') g.coordinates.forEach((c) => out.push({ type: 'Point', coordinates: c }));
-    else out.push(g);
-  }
-
-  function inferType(values) {
-    const present = values.filter((v) => v !== null && v !== '');
-    if (!present.length) return 'string';
-    if (present.every((v) => typeof v === 'number')) return 'number';
-    if (present.every((v) => typeof v === 'boolean')) return 'boolean';
-    return 'string';
-  }
-
-  function prepare(fc, format) {
-    const features = [];
-    const order = [];
-    const seen = new Set();
-    let skipped = 0;
-    let split = 0;
-    (fc.features || []).forEach((f) => {
-      if (!f || !f.geometry) { skipped++; return; }
-      const geoms = [];
-      explodeGeometry(f.geometry, geoms);
-      if (!geoms.length) { skipped++; return; }
-      if (geoms.length > 1) split++;
-      geoms.forEach((geometry) => {
-        const props = {};
-        const style = {};
-        Object.entries(f.properties || {}).forEach(([k, v]) => {
-          if ((format === 'kml' || format === 'kmz') && KML_STYLE_KEYS.has(k)) { style[k] = v; return; }
-          props[k] = normalizeValue(v);
-          if (!seen.has(k)) { seen.add(k); order.push(k); }
-        });
-        features.push({ type: 'Feature', properties: props, geometry, style });
-      });
+    leaf.on('pm:markerdragstart pm:dragstart', () => { leaf._displayEditing = true; });
+    leaf.on('pm:markerdragend pm:dragend', () => { leaf._displayEditing = false; scheduleMapDisplay(); });
+    if (leaf.feature.kml) leaf.on('add', () => {
+      if (!kmlLeafVisible(lyr, leaf)) map.removeLayer(leaf);
     });
-    const types = {};
-    order.forEach((k) => { types[k] = inferType(features.map((f) => f.properties[k])); });
-    const fams = new Set(features.map((f) => (/Point/.test(f.geometry.type) ? 'Point' : /Line/.test(f.geometry.type) ? 'Line' : 'Polygon')));
-    const geomType = format === 'shp' && fams.size === 1 ? [...fams][0] : 'Mixed';
-    return { features, fields: order, types, geomType, skipped, split };
   }
 
-  function createLayer({ name, features = [], fields = [], types = {}, geomType = 'Mixed', format = 'shp' }) {
+  function createLayer({ name, features = [], fields = [], types = {}, geomType = 'Mixed', format = 'shp', kmlFolders = [], importing = false }) {
     const lyr = {
       id: state.nextId++,
       name,
@@ -495,11 +775,18 @@
       types: { ...types },
       format,
       visible: true,
+      importing,
+      kmlFolders: kmlFolders.map(folder => ({ ...folder })),
+      displayed: new Set(),
       group: null,
     };
+    lyr.kmlFolderMap = new Map(lyr.kmlFolders.map(folder => [folder.id, folder]));
     lyr.group = L.geoJSON({ type: 'FeatureCollection', features }, {
-      pointToLayer: (f, latlng) => L.circleMarker(latlng, { radius: 6 }),
+      renderer: vectorRenderer,
+      pmIgnore: importing,
+      pointToLayer: (f, latlng) => L.circleMarker(latlng, { radius: 3, renderer: vectorRenderer }),
     });
+    configureLayerDisplay(lyr);
     lyr.group.eachLayer((leaf) => wireLeaf(lyr, leaf));
     lyr.group.addTo(map);
     state.layers.push(lyr);
@@ -576,9 +863,11 @@
         const currentProperties = leaf.feature.properties;
         if (hadValue) currentProperties[field] = previousValue;
         else delete currentProperties[field];
+        restyle(leaf);
       });
     }
     properties[field] = r.v;
+    restyle(leaf);
     return true;
   }
 
@@ -587,6 +876,8 @@
     const prev = state.selected;
     state.selected = leaf;
     if (prev && prev !== leaf) restyle(prev);
+    if (prev && prev._glayer !== leaf._glayer) syncLayerDisplay(prev._glayer);
+    syncLayerDisplay(leaf._glayer);
     restyle(leaf);
     if (leaf.bringToFront) leaf.bringToFront();
     if (leaf._glayer !== state.active) {
@@ -644,6 +935,7 @@
   map.on('pm:create', (e) => {
     const leaf = e.layer;
     map.removeLayer(leaf);
+    leaf.options.renderer = vectorRenderer;
     let lyr = state.active;
     if (!lyr) {
       lyr = createLayer({ name: 'New layer', fields: ['name'], types: { name: 'string' }, format: 'shp' });
@@ -655,7 +947,7 @@
       renderAll();
       return;
     }
-    if (leaf instanceof L.CircleMarker) leaf.options.radius = 6;
+    if (leaf instanceof L.CircleMarker) leaf.options.radius = 3;
     const props = {};
     lyr.fields.forEach((f) => { props[f] = null; });
     leaf.feature = { type: 'Feature', properties: props, geometry: null, style: {} };
@@ -974,6 +1266,7 @@
     const ul = $('layerList');
     ul.replaceChildren();
     state.layers.forEach((lyr) => {
+      syncLayerDisplay(lyr);
       const li = document.createElement('li');
       if (lyr === state.active) li.classList.add('active');
       li.addEventListener('click', () => setActive(lyr));
@@ -986,6 +1279,7 @@
       vis.addEventListener('change', () => {
         lyr.visible = vis.checked;
         if (lyr.visible) lyr.group.addTo(map); else map.removeLayer(lyr.group);
+        syncKmlVisibility(lyr);
       });
 
       const color = document.createElement('input');
@@ -1025,8 +1319,70 @@
         iconButton('Trash2', 'Delete layer', () => deleteLayer(lyr))
       );
       li.append(vis, color, name, meta);
+      if (lyr.kmlFolders.length) li.appendChild(renderKmlFolders(lyr));
       ul.appendChild(li);
     });
+  }
+
+  function renderKmlFolders(lyr) {
+    const tree = document.createElement('div');
+    tree.className = 'kml-folder-tree';
+    tree.setAttribute('role', 'group');
+    tree.setAttribute('aria-label', `${lyr.name} folders`);
+    tree.addEventListener('click', event => event.stopPropagation());
+    const members = new Map(lyr.kmlFolders.map(folder => [folder.id, []]));
+    leavesOf(lyr).forEach(leaf => (leaf.feature?.kml?.folderIds || []).forEach(id => members.get(id)?.push(leaf)));
+    function appendFolders(parent, parentId) {
+      lyr.kmlFolders.filter(folder => folder.parentId === parentId).forEach(folder => {
+        const branch = document.createElement('div');
+        branch.className = 'kml-folder-branch';
+        const row = document.createElement('div');
+        row.className = 'kml-folder-row';
+        const children = document.createElement('div');
+        children.className = 'kml-folder-children';
+        children.id = `kml-${lyr.id}-${folder.id}`;
+        children.hidden = !folder.expanded;
+        const disclosureTitle = () => `${folder.expanded ? 'Collapse' : 'Expand'} folder ${folder.name}`;
+        const disclosure = iconButton(folder.expanded ? 'ChevronDown' : 'ChevronRight', disclosureTitle(), () => {
+          folder.expanded = !folder.expanded;
+          children.hidden = !folder.expanded;
+          disclosure.replaceChildren(actionIcon(folder.expanded ? 'ChevronDown' : 'ChevronRight'));
+          disclosure.title = disclosureTitle();
+          disclosure.setAttribute('aria-label', disclosureTitle());
+          disclosure.setAttribute('aria-expanded', String(folder.expanded));
+        });
+        disclosure.setAttribute('aria-expanded', String(folder.expanded));
+        disclosure.setAttribute('aria-controls', children.id);
+        const visible = document.createElement('input');
+        visible.type = 'checkbox';
+        visible.checked = folder.visible;
+        visible.title = `Show / hide folder ${folder.name}`;
+        visible.setAttribute('aria-label', visible.title);
+        visible.addEventListener('change', () => {
+          folder.visible = visible.checked;
+          syncKmlVisibility(lyr);
+        });
+        const name = document.createElement('span');
+        name.className = 'kml-folder-name';
+        name.textContent = folder.name;
+        name.title = folder.name;
+        const count = document.createElement('span');
+        count.className = 'kml-folder-count';
+        count.textContent = members.get(folder.id).length;
+        const zoom = iconButton('Search', `Zoom to folder ${folder.name}`, () => {
+          const bounds = L.latLngBounds([]);
+          members.get(folder.id).forEach(leaf => bounds.extend(leaf.getBounds ? leaf.getBounds() : leaf.getLatLng()));
+          fitVisibleBounds(bounds);
+        });
+        zoom.disabled = !members.get(folder.id).length;
+        row.append(disclosure, visible, name, count, zoom);
+        appendFolders(children, folder.id);
+        branch.append(row, children);
+        parent.appendChild(branch);
+      });
+    }
+    appendFolders(tree, null);
+    return tree;
   }
 
   function filteredLeaves(lyr) {
@@ -1099,7 +1455,7 @@
     const savedWidths = columnWidths.get(lyr) || new Map();
     columnWidths.set(lyr, savedWidths);
     const colgroup = document.createElement('colgroup');
-    const columns = Array.from({ length: lyr.fields.length + 1 }, () => document.createElement('col'));
+    const columns = Array.from({ length: lyr.fields.length + 2 }, () => document.createElement('col'));
     colgroup.append(...columns);
     table.appendChild(colgroup);
     let sizes;
@@ -1107,10 +1463,15 @@
       sizes[index] = Math.max(MIN_COLUMN_WIDTH, Math.round(width));
       columns[index].style.width = `${sizes[index]}px`;
       table.style.width = `${sizes.reduce((total, size) => total + size, 0)}px`;
-      savedWidths.set(lyr.fields[index - 1], sizes[index]);
+      savedWidths.set(lyr.fields[index - 2], sizes[index]);
       table.tHead.rows[0].cells[index].querySelector('.column-resizer').setAttribute('aria-valuenow', sizes[index]);
     };
     const thead = table.createTHead().insertRow();
+    const previewHeader = document.createElement('th');
+    previewHeader.className = 'geometry-cell';
+    previewHeader.setAttribute('aria-label', 'Geometry preview and feature actions');
+    previewHeader.title = 'Geometry preview and feature actions';
+    thead.appendChild(previewHeader);
     const th0 = document.createElement('th');
     th0.className = 'rn';
     th0.textContent = '#';
@@ -1169,7 +1530,7 @@
         leavesOf(lyr).forEach(leaf => {
           width = Math.max(width, context.measureText(display(leaf.feature.properties[f])).width + padding);
         });
-        resizeColumn(fieldIndex + 1, Math.ceil(width + parseFloat(getComputedStyle(th).borderRightWidth) + 2));
+        resizeColumn(fieldIndex + 2, Math.ceil(width + parseFloat(getComputedStyle(th).borderRightWidth) + 2));
       };
       resizer.addEventListener('dblclick', (event) => {
         event.preventDefault();
@@ -1181,13 +1542,13 @@
         if (event.button !== 0) return;
         event.preventDefault();
         event.stopPropagation();
-        drag = { startX: event.clientX, width: sizes[fieldIndex + 1] };
+        drag = { startX: event.clientX, width: sizes[fieldIndex + 2] };
         resizer.setPointerCapture(event.pointerId);
         table.classList.add('resizing');
-        [...table.rows].forEach(row => row.cells[fieldIndex + 1].classList.add('resizing-column'));
+        [...table.rows].forEach(row => row.cells[fieldIndex + 2].classList.add('resizing-column'));
       });
       resizer.addEventListener('pointermove', (event) => {
-        if (drag) resizeColumn(fieldIndex + 1, drag.width + event.clientX - drag.startX);
+        if (drag) resizeColumn(fieldIndex + 2, drag.width + event.clientX - drag.startX);
       });
       resizer.addEventListener('lostpointercapture', () => {
         drag = null;
@@ -1203,7 +1564,7 @@
         if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
         event.preventDefault();
         const step = event.shiftKey ? 50 : 10;
-        resizeColumn(fieldIndex + 1, sizes[fieldIndex + 1] + (event.key === 'ArrowRight' ? step : -step));
+        resizeColumn(fieldIndex + 2, sizes[fieldIndex + 2] + (event.key === 'ArrowRight' ? step : -step));
       });
       th.append(box, resizer);
       thead.appendChild(th);
@@ -1215,6 +1576,11 @@
       const tr = tbody.insertRow();
       tr._leaf = leaf;
       if (leaf === state.selected) tr.classList.add('sel');
+      const preview = tr.insertCell();
+      preview.className = 'geometry-cell';
+      const previewContent = document.createElement('div');
+      previewContent.className = 'preview-content';
+      preview.appendChild(previewContent);
       const rn = tr.insertCell();
       rn.className = 'rn';
       const rnContent = document.createElement('div');
@@ -1228,7 +1594,8 @@
         iconButton('Download', 'Download this feature', () => downloadFeature(lyr, leaf)),
         iconButton('Trash2', 'Delete feature', () => deleteFeature(lyr, leaf))
       );
-      rnContent.append(rowNumber, geometryPreview(leaf), rowActions);
+      previewContent.append(geometryPreview(leaf), rowActions);
+      rnContent.appendChild(rowNumber);
       rn.appendChild(rnContent);
       lyr.fields.forEach((f) => {
         const td = tr.insertCell();
@@ -1246,16 +1613,15 @@
       });
     });
     wrap.appendChild(table);
-    sizes = [...thead.cells].map((cell, index) => index === 0
-      ? savedWidths.get(null) || cell.getBoundingClientRect().width
-      : savedWidths.get(lyr.fields[index - 1]) || Math.max(MIN_COLUMN_WIDTH, cell.getBoundingClientRect().width));
-    savedWidths.set(null, sizes[0]);
+    sizes = [...thead.cells].map((cell, index) => index === 0 ? 112 : index === 1
+      ? Math.max(40, String(items.length).length * 10 + 16)
+      : savedWidths.get(lyr.fields[index - 2]) || Math.max(MIN_COLUMN_WIDTH, cell.getBoundingClientRect().width));
     columns.forEach((column, index) => { column.style.width = `${sizes[index]}px`; });
     table.style.tableLayout = 'fixed';
     table.style.width = `${sizes.reduce((total, size) => total + size, 0)}px`;
     lyr.fields.forEach((field, index) => {
-      savedWidths.set(field, sizes[index + 1]);
-      thead.cells[index + 1].querySelector('.column-resizer').setAttribute('aria-valuenow', sizes[index + 1]);
+      savedWidths.set(field, sizes[index + 2]);
+      thead.cells[index + 2].querySelector('.column-resizer').setAttribute('aria-valuenow', sizes[index + 2]);
     });
   }
 
@@ -1272,92 +1638,353 @@
   }
 
   /* ---------- import ---------- */
-  function lonLatLooksValid(features) {
-    let bad = false;
-    const check = (c) => {
-      if (typeof c[0] === 'number') { if (Math.abs(c[0]) > 180 || Math.abs(c[1]) > 90) bad = true; } else c.forEach(check);
-    };
-    for (const f of features) { check(f.geometry.coordinates); if (bad) return false; }
-    return true;
+  let importQueue = Promise.resolve();
+  let importWorkersEnabled = typeof Worker === 'function' && /^https?:$/.test(location.protocol);
+  const paintImport = async (signal) => {
+    signal.throwIfAborted();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    signal.throwIfAborted();
+  };
+
+  async function importStep(work, signal) {
+    signal.throwIfAborted();
+    let abort;
+    const cancelled = new Promise((resolve, reject) => {
+      abort = () => reject(signal.reason);
+      signal.addEventListener('abort', abort, { once: true });
+    });
+    try { return await Promise.race([work(), cancelled]); }
+    finally { signal.removeEventListener('abort', abort); }
   }
 
-  function addFromFeatureCollection(fc, name, format) {
-    const prep = prepare(fc, format);
-    if (!prep.features.length) { toast(`“${name}” contains no features with geometry.`, 'warn'); return null; }
-    if (!lonLatLooksValid(prep.features)) {
-      toast(`“${name}”: coordinates are not longitude/latitude. A shapefile in a projected CRS needs its .prj file included.`, 'error', 9000);
-      return null;
+  function startImportProgress(files) {
+    const controller = new AbortController();
+    const button = $('btnCancelImport');
+    const cancel = () => controller.abort();
+    button.disabled = false;
+    button.addEventListener('click', cancel);
+    let completed = 0;
+    let currentProgress = 0;
+    let percent = 0;
+    let columns = 1;
+    const track = $('importProgressTrack');
+    const revealColumns = () => {
+      track.style.setProperty('--import-reveal', `${Math.floor(percent * columns / 100) / columns * 100}%`);
+    };
+    const columnObserver = new ResizeObserver(([entry]) => {
+      columns = Math.max(1, Math.round(entry.contentRect.width / 6));
+      revealColumns();
+    });
+    columnObserver.observe(track);
+    revealColumns();
+    const show = () => {
+      $('importProgress').hidden = false;
+      $('mapWrap').classList.add('importing');
+    };
+    const timer = setTimeout(show, 1000);
+    $('mapWrap').setAttribute('aria-busy', 'true');
+    if (files.some(file => file.size >= 1024 * 1024)) show();
+    return {
+      signal: controller.signal,
+      update(index, name, fraction, stage, count = 1) {
+        controller.signal.throwIfAborted();
+        if (index !== completed) { completed = index; currentProgress = 0; }
+        currentProgress = Math.max(currentProgress, fraction);
+        percent = Math.floor((index + currentProgress * count) / files.length * 100);
+        revealColumns();
+        const label = files.length === 1 ? '1 file' : `${index + 1} of ${files.length} files`;
+        $('importProgressBar').value = percent;
+        $('importProgressBar').setAttribute('aria-valuetext', `${percent}% - ${label}`);
+        $('importProgressStatus').textContent = `${percent}% - ${label}`;
+        $('importProgressFile').textContent = name;
+        $('importProgressFile').title = name;
+      },
+      close() {
+        clearTimeout(timer);
+        columnObserver.disconnect();
+        button.removeEventListener('click', cancel);
+        $('importProgress').hidden = true;
+        $('mapWrap').classList.remove('importing');
+        $('mapWrap').removeAttribute('aria-busy');
+      },
+    };
+  }
+
+  function readImportFile(file, binary, report, signal) {
+    signal.throwIfAborted();
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      const abort = () => reader.abort();
+      signal.addEventListener('abort', abort, { once: true });
+      reader.onloadend = () => signal.removeEventListener('abort', abort);
+      reader.onprogress = event => {
+        if (!signal.aborted && event.lengthComputable) report(event.loaded / Math.max(1, event.total) * .2, 'Reading file');
+      };
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error || new Error('Could not read the file.'));
+      reader.onabort = () => reject(signal.reason || new Error('File reading was interrupted.'));
+      if (binary) reader.readAsArrayBuffer(file);
+      else reader.readAsText(file);
+    });
+  }
+
+  async function appendImportFeatures(lyr, features, report, context) {
+    let sliceStart = performance.now();
+    for (let offset = 0; offset < features.length; offset += 100) {
+      context.signal.throwIfAborted();
+      const batch = L.geoJSON(features.slice(offset, offset + 100), {
+        renderer: vectorRenderer, pointToLayer: lyr.group.options.pointToLayer,
+      });
+      batch.eachLayer(leaf => { wireLeaf(lyr, leaf); lyr.group.addLayer(leaf); });
+      report(Math.min(offset + 100, features.length) / features.length);
+      if (performance.now() - sliceStart >= 8 || offset + 100 >= features.length) {
+        await paintImport(context.signal);
+        sliceStart = performance.now();
+      }
     }
-    const lyr = createLayer({ name, features: prep.features, fields: prep.fields, types: prep.types, geomType: prep.geomType, format });
+  }
+
+  function finishImportedLayer(lyr, prep) {
+    lyr.importing = false;
+    lyr.group.options.pmIgnore = false;
+    L.PM.reInitLayer(lyr.group);
+    scheduleMapDisplay();
     const notes = [];
     if (prep.split) notes.push(`${prep.split} multi-part geometry collection(s) were split into separate features`);
     if (prep.skipped) notes.push(`${prep.skipped} feature(s) without geometry were skipped`);
-    toast(`Loaded “${name}” (${prep.features.length} features)` + (notes.length ? ' – ' + notes.join('; ') : ''));
+    const count = prep.count ?? prep.features.length;
+    toast(`Loaded “${lyr.name}” (${count} features)` + (notes.length ? ' – ' + notes.join('; ') : ''));
+  }
+
+  function parseKmlCollection(text, fallbackName) {
+    const dom = new DOMParser().parseFromString(text, 'text/xml');
+    if (dom.querySelector('parsererror')) throw new Error('Not a valid KML document.');
+    const collection = ImportCore.fromKml(dom, toGeoJSON);
+    const docName = dom.querySelector('Document > name');
+    return { collection, name: (docName && docName.textContent.trim()) || fallbackName };
+  }
+
+  function loadImportWorker(job, report, context) {
+    if (!importWorkersEnabled) return Promise.resolve(null);
+    let worker;
+    try { worker = new Worker(new URL('js/import-worker.js', document.baseURI)); }
+    catch { importWorkersEnabled = false; return Promise.resolve(null); }
+    return new Promise((resolve, reject) => {
+      let ready = false;
+      let settled = false;
+      let current = null;
+      let metadata = null;
+      let last = null;
+      const finish = (error, result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(startupTimer);
+        context.signal.removeEventListener('abort', abort);
+        worker.terminate();
+        if (error && current) {
+          map.removeLayer(current.group);
+          state.layers = state.layers.filter(layer => layer !== current);
+        }
+        if (error) reject(error);
+        else resolve(result);
+      };
+      const abort = () => finish(context.signal.reason);
+      const startupTimer = setTimeout(() => {
+        if (!ready) { importWorkersEnabled = false; finish(null, null); }
+      }, 5000);
+      context.signal.addEventListener('abort', abort, { once: true });
+      worker.onerror = event => {
+        event.preventDefault();
+        if (!ready) { importWorkersEnabled = false; finish(null, null); }
+        else finish(new Error(event.message || 'Background import failed.'));
+      };
+      worker.onmessageerror = () => finish(new Error('Could not receive background import data.'));
+      worker.onmessage = async event => {
+        if (settled) return;
+        try {
+          context.signal.throwIfAborted();
+          const data = event.data;
+          let value;
+          if (data.type === 'ready') {
+            ready = true;
+            clearTimeout(startupTimer);
+            worker.postMessage({ ...job, type: 'import' });
+            return;
+          }
+          if (data.type === 'progress') { report(data.fraction, 'Processing file'); return; }
+          if (data.type === 'warning') { toast(data.message, data.kind, 9000); return; }
+          if (data.type === 'error') { finish(new Error(data.message)); return; }
+          if (data.type === 'done') { finish(null, { layer: last }); return; }
+          if (data.type === 'kml') {
+            await paintImport(context.signal);
+            value = parseKmlCollection(data.text, data.name);
+          } else if (data.type === 'layer') {
+            metadata = data.metadata;
+            current = createLayer({ name: data.name, format: data.format, ...metadata, importing: true });
+            context.layers.add(current);
+          } else if (data.type === 'features') {
+            await appendImportFeatures(current, data.features,
+              fraction => report(data.start + (data.end - data.start) * fraction, 'Building layer'), context);
+          } else if (data.type === 'layer-end') {
+            finishImportedLayer(current, metadata);
+            last = current;
+            current = null;
+          }
+          if (!settled) worker.postMessage({ type: 'ack', value });
+        } catch (error) { finish(error); }
+      };
+      if (context.signal.aborted) abort();
+    });
+  }
+
+  async function addFromFeatureCollection(fc, name, format, report, context) {
+    report(.55, 'Preparing features');
+    await paintImport(context.signal);
+    const prep = ImportCore.prepare(fc, format);
+    if (!prep.features.length) { toast(`“${name}” contains no features with geometry.`, 'warn'); return null; }
+    if (!ImportCore.lonLatLooksValid(prep.features)) {
+      toast(`“${name}”: coordinates are not longitude/latitude. A shapefile in a projected CRS needs its .prj file included.`, 'error', 9000);
+      return null;
+    }
+    const lyr = createLayer({ name, fields: prep.fields, types: prep.types, geomType: prep.geomType, format, kmlFolders: prep.kmlFolders, importing: true });
+    context.layers.add(lyr);
+    try {
+      await appendImportFeatures(lyr, prep.features, fraction => report(.6 + .35 * fraction, 'Building layer'), context);
+    } catch (error) {
+      map.removeLayer(lyr.group);
+      state.layers = state.layers.filter(layer => layer !== lyr);
+      throw error;
+    }
+    finishImportedLayer(lyr, prep);
     return lyr;
   }
 
-  async function loadKmlText(text, fallbackName, format) {
-    const dom = new DOMParser().parseFromString(text, 'text/xml');
-    if (dom.querySelector('parsererror')) throw new Error('Not a valid KML document.');
-    const fc = toGeoJSON.kml(dom);
-    const docName = dom.querySelector('Document > name');
-    return addFromFeatureCollection(fc, (docName && docName.textContent.trim()) || fallbackName, format);
+  async function loadKmlText(text, fallbackName, format, report, context) {
+    report(.35, 'Parsing KML');
+    await paintImport(context.signal);
+    const converted = parseKmlCollection(text, fallbackName);
+    return addFromFeatureCollection(converted.collection, converted.name, format, report, context);
   }
 
-  async function loadShapefileBuffer(buf, fallbackName) {
-    const result = await shp(buf);
+  async function loadShapefileBuffer(buf, fallbackName, report, context) {
+    report(.35, 'Parsing shapefile');
+    await paintImport(context.signal);
+    const result = await importStep(() => shp(buf), context.signal);
     const collections = [].concat(result);
     let last = null;
-    collections.forEach((fc) => {
+    for (const [index, fc] of collections.entries()) {
       const name = collections.length > 1 && fc.fileName ? baseName(fc.fileName) : fallbackName;
-      last = addFromFeatureCollection(fc, name, 'shp') || last;
-    });
+      last = (await addFromFeatureCollection(fc, name, 'shp', (fraction, stage) => report(.5 + .45 * (index + fraction) / collections.length, stage), context)) || last;
+    }
     return last;
   }
 
-  async function loadFile(file) {
+  async function loadFile(file, report, context) {
+    const signal = context.signal;
     const ext = (file.name.split('.').pop() || '').toLowerCase();
     const name = baseName(file.name);
-    if (ext === 'kml') return loadKmlText(await file.text(), name, 'kml');
+    if (file.size >= 1024 * 1024 || ext === 'zip' || ext === 'kmz') {
+      const threaded = await loadImportWorker({ file }, report, context);
+      if (threaded) return threaded.layer;
+    }
+    if (ext === 'kml') return loadKmlText(await readImportFile(file, false, report, signal), name, 'kml', report, context);
     if (ext === 'geojson' || ext === 'json') {
-      const gj = JSON.parse(await file.text());
+      const text = await readImportFile(file, false, report, signal);
+      report(.3, 'Parsing GeoJSON');
+      await paintImport(signal);
+      const gj = JSON.parse(text);
       const fc = gj.type === 'FeatureCollection' ? gj : gj.type === 'Feature' ? { features: [gj] } : { features: [{ type: 'Feature', properties: {}, geometry: gj }] };
-      return addFromFeatureCollection(fc, name, 'geojson');
+      return addFromFeatureCollection(fc, name, 'geojson', report, context);
     }
     if (ext === 'kmz' || ext === 'zip') {
-      const buf = await file.arrayBuffer();
-      const zip = await JSZip.loadAsync(buf);
+      const buf = await readImportFile(file, true, report, signal);
+      report(.25, 'Opening archive');
+      await paintImport(signal);
+      const zip = await importStep(() => JSZip.loadAsync(buf), signal);
       const names = Object.keys(zip.files).filter((n) => !zip.files[n].dir && !/(^|\/)__MACOSX\//.test(n));
-      if (ext === 'zip' && names.some((n) => /\.shp$/i.test(n))) return loadShapefileBuffer(buf, name);
+      if (ext === 'zip' && names.some((n) => /\.shp$/i.test(n))) return loadShapefileBuffer(buf, name, report, context);
       const kmlName = names.find((n) => /(^|\/)doc\.kml$/i.test(n)) || names.find((n) => /\.kml$/i.test(n));
-      if (kmlName) return loadKmlText(await zip.files[kmlName].async('string'), name, ext === 'kmz' ? 'kmz' : 'kml');
+      if (kmlName) return loadKmlText(await importStep(() => zip.files[kmlName].async('string', meta => {
+        if (!signal.aborted) report(.3 + .2 * meta.percent / 100, 'Extracting KML');
+      }), signal), name, ext === 'kmz' ? 'kmz' : 'kml', report, context);
       throw new Error(ext === 'kmz' ? 'No .kml found inside the KMZ.' : 'No .shp (shapefile) or .kml found inside the zip.');
     }
     throw new Error(`Unsupported file type “.${ext}”.`);
   }
 
-  async function handleFiles(fileList) {
+  function handleFiles(fileList) {
     const files = [...fileList];
+    const pending = importQueue.then(() => importFiles(files));
+    importQueue = pending.catch(() => {});
+    return pending;
+  }
+
+  async function importFiles(files) {
+    if (!files.length) return;
     const loose = files.filter((f) => /\.(shp|shx|dbf|prj|cpg)$/i.test(f.name));
     const rest = files.filter((f) => !loose.includes(f));
+    const progress = startImportProgress(files);
+    const context = { signal: progress.signal, layers: new Set() };
     let lastLayer = null;
-    for (const f of rest) {
-      try { lastLayer = (await loadFile(f)) || lastLayer; } catch (err) { toast(`${f.name}: ${err.message || err}`, 'error', 9000); }
-    }
-    if (loose.length) {
-      try {
-        if (!loose.some((f) => /\.shp$/i.test(f.name))) throw new Error('Select the .shp file together with its .dbf and .prj, or upload a zip.');
-        const zip = new JSZip();
-        loose.forEach((f) => zip.file(f.name, f));
-        const buf = await zip.generateAsync({ type: 'arraybuffer' });
-        const shpFile = loose.find((f) => /\.shp$/i.test(f.name));
-        lastLayer = (await loadShapefileBuffer(buf, baseName(shpFile.name))) || lastLayer;
-      } catch (err) { toast(`Shapefile parts: ${err.message || err}`, 'error', 9000); }
-    }
-    if (lastLayer) {
-      setActive(lastLayer);
-      const b = L.featureGroup(state.layers.map((l) => l.group)).getBounds();
-      fitVisibleBounds(b);
+    try {
+      for (const [index, file] of rest.entries()) {
+        context.signal.throwIfAborted();
+        context.layers.clear();
+        const report = (fraction, stage) => progress.update(index, file.name, fraction, stage);
+        report(0, 'Reading file');
+        await paintImport(context.signal);
+        try { lastLayer = (await loadFile(file, report, context)) || lastLayer; } catch (err) {
+          if (context.signal.aborted) throw err;
+          toast(`${file.name}: ${err.message || err}`, 'error', 9000);
+        }
+        report(1, 'File processed');
+      }
+      if (loose.length) {
+        context.signal.throwIfAborted();
+        context.layers.clear();
+        const shpFile = loose.find(file => /\.shp$/i.test(file.name));
+        const report = (fraction, stage) => {
+          progress.update(rest.length, `${shpFile ? shpFile.name : 'Shapefile parts'} (+${loose.length - 1} supporting files)`, fraction, stage, loose.length);
+        };
+        report(0, 'Packing shapefile parts');
+        await paintImport(context.signal);
+        try {
+          if (!shpFile) throw new Error('Select the .shp file together with its .dbf and .prj, or upload a zip.');
+          const threaded = await loadImportWorker({ files: loose }, report, context);
+          if (threaded) lastLayer = threaded.layer || lastLayer;
+          else {
+            const zip = new JSZip();
+            loose.forEach((file) => zip.file(file.name, file));
+            const buf = await importStep(() => zip.generateAsync({ type: 'arraybuffer' }, meta => {
+              if (!context.signal.aborted) report(.2 * meta.percent / 100, 'Packing shapefile parts');
+            }), context.signal);
+            lastLayer = (await loadShapefileBuffer(buf, baseName(shpFile.name), report, context)) || lastLayer;
+          }
+        } catch (err) {
+          if (context.signal.aborted) throw err;
+          toast(`Shapefile parts: ${err.message || err}`, 'error', 9000);
+        }
+        report(1, 'Files processed');
+      }
+      context.signal.throwIfAborted();
+      $('btnCancelImport').disabled = true;
+      if (lastLayer) {
+        setActive(lastLayer);
+        const b = L.featureGroup(state.layers.map((l) => l.group)).getBounds();
+        fitVisibleBounds(b);
+      }
+      if (!$('importProgress').hidden) await new Promise(resolve => setTimeout(resolve, 200));
+    } catch (error) {
+      if (!context.signal.aborted) throw error;
+      context.layers.forEach(layer => map.removeLayer(layer.group));
+      state.layers = state.layers.filter(layer => !context.layers.has(layer));
+      if (context.layers.has(state.selected?._glayer)) state.selected = null;
+      if (context.layers.has(state.active)) state.active = null;
+      if (lastLayer && state.layers.includes(lastLayer)) setActive(lastLayer);
+      else renderAll();
+      toast('Import cancelled. The unfinished file was removed.', 'warn');
+    } finally {
+      progress.close();
     }
   }
 
@@ -1718,7 +2345,10 @@
   }
 
   /* ---------- UI wiring ---------- */
-  $('btnAbout').addEventListener('click', () => $('aboutDlg').showModal());
+  $('btnAbout').addEventListener('click', () => {
+    $('aboutDlg').showModal();
+    $('aboutTitle').focus({ preventScroll: true });
+  });
   $('aboutDlg').addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
       event.preventDefault();
@@ -1822,6 +2452,7 @@
   });
 
   // Resizable table panel
+  let initialMapViewPending = true;
   const panelObserver = new ResizeObserver(() => {
     const main = $('main').getBoundingClientRect();
     const sidebar = $('sidebar').getBoundingClientRect();
@@ -1834,6 +2465,10 @@
     const visibleHeight = table.top - main.top - (stacked ? sidebar.height : 0) - 6;
     const scalePosition = visibleWidth < 800 || visibleHeight < 440 ? 'bottomright' : 'bottomleft';
     if (scaleControl.getPosition() !== scalePosition) scaleControl.setPosition(scalePosition);
+    if (initialMapViewPending) {
+      initialMapViewPending = false;
+      if (!state.layers.length) fitVisibleBounds(L.latLngBounds([[-44, 112], [-10, 154]]));
+    }
   });
   [$('main'), $('sidebar'), $('tablePanel')].forEach(panel => panelObserver.observe(panel));
 
@@ -1854,9 +2489,6 @@
   });
 
   renderAll();
-  requestAnimationFrame(() => {
-    if (!state.layers.length) fitVisibleBounds(L.latLngBounds([[-44, 112], [-10, 154]]));
-  });
 
   // Exposed for debugging / automated tests.
   window.__geoEditor = { state, map, handleFiles, createLayer, downloadLayers };

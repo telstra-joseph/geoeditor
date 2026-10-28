@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>GPU renderer tests</title>
+  <link rel="stylesheet" href="../lib/leaflet.css">
+  <link rel="stylesheet" href="../lib/geoman.css">
+</head>
+<body>
+  <h1>GPU renderer tests</h1>
+  <pre id="results"></pre>
+  <div id="map" style="width:640px;height:480px"></div>
+  <script src="../lib/leaflet.js"></script>
+  <script src="../lib/pixi.min.js"></script>
+  <script src="../js/gpu-renderer.js"></script>
+  <script src="../lib/geoman.js"></script>
+  <script>
+    'use strict';
+    const results = window.gpuTestResults = [];
+    const assert = (condition, message) => { if (!condition) throw new Error(message); };
+    async function test(name, run) {
+      try {
+        const skipped = await run() === 'skip';
+        results.push({ name, passed: !skipped, skipped });
+      } catch (error) {
+        results.push({ name, passed: false, error: error.message });
+      }
+      document.getElementById('results').textContent = results.map(result =>
+        `${result.skipped ? 'SKIP' : result.passed ? 'PASS' : 'FAIL'} ${result.name}${result.error ? ': ' + result.error : ''}`).join('\n');
+    }
+    window.gpuTestDone = (async () => {
+      const map = L.map('map', { zoomAnimation: false }).setView([0, 0], 4);
+      const renderer = new L.GpuCanvas();
+      const paint = async () => {
+        await new Promise(resolve => setTimeout(resolve, 20));
+        map.eachLayer(layer => {
+          if (layer instanceof L.Canvas) {
+            L.Util.cancelAnimFrame(layer._redrawRequest);
+            layer._redraw();
+          }
+        });
+      };
+      const polygon = L.polygon([
+        [[-6, -6], [-6, 6], [6, 6], [6, -6]],
+        [[-2, -2], [-2, 2], [2, 2], [2, -2]],
+      ], { renderer, color: '#ff0000', fillOpacity: 1 }).addTo(map);
+      const point = L.circleMarker([8, 8], { renderer, radius: 8, fillColor: '#00ff00', fillOpacity: 1 }).addTo(map);
+      const line = L.polyline([[-10, -8], [-8, -8]], { renderer, color: '#0000ff', weight: 4 }).addTo(map);
+      const pixel = (latlng, backend = renderer) => {
+        const scale = backend._gpu?.resolution || (L.Browser.retina ? 2 : 1);
+        const position = map.latLngToLayerPoint(latlng).subtract(backend._bounds.min).multiplyBy(scale);
+        if (!backend._gpu) return backend._ctx.getImageData(Math.round(position.x), Math.round(position.y), 1, 1).data;
+        backend._gpu.render(backend._stage);
+        const context = backend._gpu.gl;
+        const data = new Uint8Array(4);
+        context.readPixels(Math.round(position.x), backend._container.height - Math.round(position.y) - 1,
+          1, 1, context.RGBA, context.UNSIGNED_BYTE, data);
+        return data;
+      };
+      await paint();
+      await test('Points, lines and polygons render visible pixels', () => {
+        assert(['webgl', 'canvas'].includes(renderer._container.dataset.renderer), 'Missing drawing backend');
+        assert(pixel([8, 8])[3] > 0 && pixel([-9, -8])[3] > 0 && pixel([4, 4])[3] > 0, 'Missing geometry');
+      });
+      await test('Polygon holes remain transparent and are not hit targets', () => {
+        assert(pixel([0, 0])[3] === 0, 'Hole was filled');
+        assert(!polygon._containsPoint(map.latLngToLayerPoint([0, 0])), 'Hole intercepts clicks');
+      });
+      await test('MultiPolygon holes belong to their own outer rings', async () => {
+        const multiple = L.polygon([
+          [[[10, -12], [10, -6], [16, -6], [16, -12]], [[12, -10], [12, -8], [14, -8], [14, -10]]],
+          [[[10, 6], [10, 12], [16, 12], [16, 6]]],
+        ], { renderer, fillOpacity: 1 }).addTo(map);
+        await paint();
+        assert(pixel([11, -11])[3] > 0 && pixel([13, -9])[3] === 0 && pixel([13, 9])[3] > 0, 'MultiPolygon fill incorrect');
+        map.removeLayer(multiple);
+        await paint();
+      });
+      await test('Style updates retain other features without rebuilding them', async () => {
+        if (!renderer._gpu) return 'skip';
+        const saved = renderer._graphic;
+        const rebuilt = [];
+        renderer._graphic = function(layer) { rebuilt.push(layer); return saved.call(this, layer); };
+        try {
+          point.setStyle({ fillColor: '#0000ff' });
+          await paint();
+          assert(rebuilt.length === 1 && rebuilt[0] === point, 'Unchanged geometry rebuilt');
+          assert(pixel([8, 8])[2] > 200 && pixel([4, 4])[0] > 200, 'Style update lost geometry');
+        } finally { renderer._graphic = saved; }
+      });
+      await test('Styling an undisplayed feature does not recreate its graphic', async () => {
+        const hidden = L.circleMarker([-12, 12], { renderer, radius: 8, fillOpacity: 1 }).addTo(map);
+        await paint();
+        map.removeLayer(hidden);
+        hidden.setStyle({ fillColor: '#0000ff' });
+        await paint();
+        assert(!renderer._graphics?.has(L.stamp(hidden)), 'Removed graphic recreated');
+        assert(pixel([-12, 12])[3] === 0, 'Undisplayed feature rendered');
+        hidden.addTo(map);
+        await paint();
+        assert(pixel([-12, 12])[2] > 200, 'Style lost when feature reappeared');
+        map.removeLayer(hidden);
+        await paint();
+      });
+      await test('Coordinate edits update the GPU path', async () => {
+        point.setLatLng([8, 12]);
+        await paint();
+        assert(pixel([8, 12])[3] > 0 && pixel([8, 8])[3] === 0, 'Point did not move');
+      });
+      await test('Bring to front and back preserve rendering order', async () => {
+        const red = L.circleMarker([10, 0], { renderer, radius: 12, stroke: false, fillColor: '#ff0000', fillOpacity: 1 }).addTo(map);
+        const green = L.circleMarker([10, 0], { renderer, radius: 12, stroke: false, fillColor: '#00ff00', fillOpacity: 1 }).addTo(map);
+        await paint();
+        red.bringToFront();
+        await paint();
+        assert(pixel([10, 0])[0] > 200, 'Front order incorrect');
+        red.bringToBack();
+        await paint();
+        assert(pixel([10, 0])[1] > 200, 'Back order incorrect');
+        map.removeLayer(red);
+        map.removeLayer(green);
+        await paint();
+      });
+      await test('Batched additions build each new geometry only once', async () => {
+        if (!renderer._gpu) return 'skip';
+        const saved = renderer._graphic;
+        let builds = 0;
+        const additions = [];
+        renderer._graphic = function(layer) { builds++; return saved.call(this, layer); };
+        try {
+          for (let batch = 0; batch < 5; batch++) {
+            for (let index = 0; index < 100; index++) {
+              additions.push(L.circleMarker([-12 + index / 100, batch], { renderer }).addTo(map));
+            }
+            await paint();
+          }
+          assert(builds === 500, `Expected 500 geometry builds, got ${builds}`);
+        } finally {
+          renderer._graphic = saved;
+          additions.forEach(layer => map.removeLayer(layer));
+          await paint();
+        }
+        assert(renderer._graphics.size === 3 && renderer._stage.children.length === 3, 'Removed geometry leaked');
+      });
+      await test('Zoom and pan keep polygons and holes aligned', async () => {
+        map.setView([2, 3], 5, { animate: false });
+        await paint();
+        assert(pixel([4, 4])[3] > 0 && pixel([0, 0])[3] === 0, 'View transform misaligned');
+      });
+      await test('Missing WebGL library falls back to native Canvas', async () => {
+        const library = window.PIXI;
+        const fallback = new L.GpuCanvas();
+        let marker;
+        try {
+          window.PIXI = null;
+          marker = L.circleMarker([0, 10], { renderer: fallback, fillOpacity: 1 }).addTo(map);
+        } finally { window.PIXI = library; }
+        await paint();
+        assert(fallback._container.dataset.renderer === 'canvas' && !!fallback._ctx, 'Canvas fallback not active');
+        assert(pixel([0, 10], fallback)[3] > 0, 'Canvas fallback did not draw');
+        map.removeLayer(marker);
+        map.removeLayer(fallback);
+      });
+      await test('Drawing guides do not block clicks on rendered features', async () => {
+        map.panTo(point.getLatLng(), { animate: false });
+        map.pm.enableDraw('Polygon');
+        map.pm.disableDraw();
+        await paint();
+        map.getContainer().scrollIntoView({ block: 'center', inline: 'center' });
+        const position = map.latLngToContainerPoint(point.getLatLng());
+        const rect = map.getContainer().getBoundingClientRect();
+        const clientX = rect.left + position.x;
+        const clientY = rect.top + position.y;
+        const target = document.elementFromPoint(clientX, clientY);
+        let clicks = 0;
+        const clicked = () => clicks++;
+        point.on('click', clicked);
+        try {
+          target.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX, clientY }));
+          assert(clicks === 1, 'Temporary guide renderer intercepted the click');
+        } finally { point.off('click', clicked); }
+      });
+      return results;
+    })();
+  </script>
+</body>
+</html>

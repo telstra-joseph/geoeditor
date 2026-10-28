@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Import worker tests</title>
+</head>
+<body>
+  <h1>Import worker tests</h1>
+  <pre id="results"></pre>
+  <script src="../lib/jszip.js"></script>
+  <script src="../lib/togeojson.js"></script>
+  <script src="../js/shapefile-writer.js"></script>
+  <script src="../js/import-core.js"></script>
+  <script>
+    'use strict';
+    const results = [];
+    function assert(condition, message) {
+      if (!condition) throw new Error(message);
+    }
+    async function test(name, run) {
+      try {
+        await run();
+        results.push({ name, passed: true });
+      } catch (error) {
+        results.push({ name, passed: false, error: error.message });
+      }
+      document.getElementById('results').textContent = results.map(result =>
+        `${result.passed ? 'PASS' : 'FAIL'} ${result.name}${result.error ? ': ' + result.error : ''}`).join('\n');
+    }
+    const point = (properties = {}) => ({ type: 'Feature', properties, geometry: { type: 'Point', coordinates: [149, -35] } });
+    const jsonFile = (data, name = 'points.geojson') => new File([JSON.stringify(data)], name);
+    const collection = features => ({ type: 'FeatureCollection', features });
+    const pause = () => new Promise(resolve => setTimeout(resolve, 40));
+    const kml = '<kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>Styled line</name><Style id="red"><LineStyle><color>ff0000ff</color><width>3</width></LineStyle></Style><Placemark><name>Road</name><styleUrl>#red</styleUrl><LineString><coordinates>149,-35 150,-34</coordinates></LineString></Placemark></Document></kml>';
+
+    function runJob(job, onFeatures) {
+      return new Promise((resolve, reject) => {
+        const worker = new Worker('../js/import-worker.js');
+        const output = { layers: [], batches: [], warnings: [], kmlConversions: 0 };
+        let current = null;
+        const finish = error => {
+          clearTimeout(timer);
+          worker.terminate();
+          if (error) reject(error);
+          else resolve(output);
+        };
+        const timer = setTimeout(() => finish(new Error('Worker timed out')), 15000);
+        worker.onerror = event => finish(new Error(event.message));
+        worker.onmessage = async event => {
+          try {
+            const data = event.data;
+            let value;
+            if (data.type === 'ready') { worker.postMessage({ ...job, type: 'import' }); return; }
+            if (data.type === 'error') { finish(new Error(data.message)); return; }
+            if (data.type === 'done') { finish(); return; }
+            if (data.type === 'progress') return;
+            if (data.type === 'warning') { output.warnings.push(data); return; }
+            if (data.type === 'layer') {
+              current = { ...data, features: [] };
+              output.layers.push(current);
+            } else if (data.type === 'features') {
+              current.features.push(...data.features);
+              output.batches.push(data.features.length);
+              if (onFeatures) await onFeatures(output);
+            } else if (data.type === 'kml') {
+              output.kmlConversions++;
+              const dom = new DOMParser().parseFromString(data.text, 'text/xml');
+              if (dom.querySelector('parsererror')) throw new Error('Invalid KML');
+              value = { collection: ImportCore.fromKml(dom, toGeoJSON), name: dom.querySelector('Document > name')?.textContent || data.name };
+            }
+            worker.postMessage({ type: 'ack', value });
+          } catch (error) { finish(error); }
+        };
+      });
+    }
+
+    async function zipFile(name, entries) {
+      const zip = new JSZip();
+      entries.forEach(entry => zip.file(entry.name, entry.data));
+      return new File([await zip.generateAsync({ type: 'arraybuffer' })], name);
+    }
+
+    const groupedKml = '<kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>Grouped labels</name><Style id="label"><IconStyle><scale>0</scale></IconStyle><LabelStyle><color>800000ff</color><scale>1.5</scale></LabelStyle></Style><Style id="none"><LabelStyle><scale>0</scale></LabelStyle></Style><Folder><name>Zones</name><Placemark><name>Footprint</name><Polygon><outerBoundaryIs><LinearRing><coordinates>148,-36 150,-36 150,-34 148,-34 148,-36</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark><Folder><name>Labels</name><Placemark><name>B</name><styleUrl>#label</styleUrl><Point><coordinates>149,-35</coordinates></Point></Placemark><Placemark><name>1</name><MultiGeometry><Point><coordinates>149.5,-35</coordinates></Point><Point><coordinates>149.7,-35</coordinates></Point></MultiGeometry></Placemark></Folder></Folder><Folder><name>Labels</name><visibility>0</visibility><Placemark><name>F</name><Point><coordinates>149,-34.5</coordinates></Point></Placemark></Folder><Folder><name>Empty</name></Folder><Placemark><name>E</name><styleUrl>#none</styleUrl><Point><coordinates>149,-35.5</coordinates></Point></Placemark><Placemark><name>A</name><Polygon><outerBoundaryIs><LinearRing><coordinates>150,-36 151,-36 151,-35 150,-35 150,-36</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark></Document></kml>';
+
+    async function withEditor(run) {
+      const frame = document.createElement('iframe');
+      frame.title = 'Import regression editor';
+      frame.style.cssText = 'width:100%;height:600px;border:0';
+      const loaded = new Promise((resolve, reject) => {
+        frame.onload = resolve;
+        frame.onerror = () => reject(new Error('Could not load editor'));
+      });
+      frame.src = '../index.html?import-regression=1';
+      document.body.appendChild(frame);
+      try {
+        await loaded;
+        assert(frame.contentWindow.__geoEditor, 'Editor did not initialize');
+        await new Promise(resolve => frame.contentWindow.setTimeout(resolve, 350));
+        const map = frame.contentWindow.__geoEditor.map;
+        const fitBounds = map.fitBounds;
+        map.fitBounds = function(bounds, options) {
+          return fitBounds.call(this, bounds, { ...options, animate: false });
+        };
+        await run(frame.contentWindow, frame.contentDocument);
+      } finally {
+        const app = frame.contentWindow.__geoEditor;
+        if (app) {
+          app.state.layers.forEach(layer => app.map.removeLayer(layer.group));
+          app.state.layers.length = 0;
+        }
+        frame.remove();
+      }
+    }
+
+    (async () => {
+      await test('GeoJSON preparation retains types, normalizes values and splits geometries', async () => {
+        const input = collection([
+          { ...point({ id: 1, flag: true, nested: { ok: true } }), kml: { unrelated: true } },
+          { type: 'Feature', properties: { id: 2 }, geometry: { type: 'MultiPoint', coordinates: [[149, -35], [150, -34]] } },
+          { type: 'Feature', properties: {}, geometry: null },
+        ]);
+        input.kmlFolders = 'unrelated GeoJSON metadata';
+        const expected = ImportCore.prepare(input, 'geojson');
+        const output = await runJob({ file: jsonFile(input) });
+        const layer = output.layers[0];
+        assert(JSON.stringify(layer.features) === JSON.stringify(expected.features), 'Worker and fallback features differ');
+        assert(JSON.stringify(layer.metadata.types) === JSON.stringify(expected.types), 'Worker and fallback types differ');
+        assert(!layer.features[0].kml && layer.metadata.kmlFolders.length === 0, 'Foreign GeoJSON metadata treated as KML');
+        assert(layer.metadata.count === 3 && layer.metadata.skipped === 1 && layer.metadata.split > 0, 'Preparation notes changed');
+      });
+      await test('Feature and raw geometry inputs are accepted', async () => {
+        for (const data of [point({ id: 1 }), point().geometry]) {
+          const output = await runJob({ file: jsonFile(data) });
+          assert(output.layers[0].features.length === 1, 'Single geometry lost');
+        }
+      });
+      await test('Feature transfers are bounded and wait for acknowledgment', async () => {
+        const input = collection(Array.from({ length: 2101 }, (_, index) => point({ index })));
+        const output = await runJob({ file: jsonFile(input) }, async output => {
+          if (output.batches.length === 1) {
+            await pause();
+            assert(output.batches.length === 1, 'Worker sent another batch before acknowledgment');
+          }
+        });
+        assert(output.batches.join() === '1000,1000,101', 'Unexpected batch sizes');
+        assert(output.layers[0].features.at(-1).properties.index === 2100, 'Order changed');
+      });
+      await test('KML conversion returns to the worker and keeps document name and styles', async () => {
+        const output = await runJob({ file: new File([kml], 'styled.kml') });
+        const layer = output.layers[0];
+        assert(output.kmlConversions === 1 && layer.name === 'Styled line', 'KML bridge or name failed');
+        assert(layer.features[0].style.stroke === '#ff0000', 'KML colour lost');
+        assert(!layer.metadata.fields.includes('stroke'), 'Style leaked into attribute fields');
+      });
+      await test('Nested, duplicate and empty KML folders survive worker preparation', async () => {
+        const output = await runJob({ file: new File([groupedKml], 'grouped.kml') });
+        const layer = output.layers[0];
+        const folders = layer.metadata.kmlFolders;
+        assert(folders.length === 4 && folders[1].parentId === folders[0].id, 'Hierarchy lost');
+        assert(folders[1].name === folders[2].name && folders[1].id !== folders[2].id, 'Duplicate names merged');
+        assert(folders[2].visible === false && folders[3].name === 'Empty', 'Hidden or empty folder lost');
+        const numbers = layer.features.filter(feature => feature.properties.name === '1');
+        assert(numbers.length === 2 && numbers.every(feature => feature.kml.folderIds.join() === [folders[0].id, folders[1].id].join()), 'Split features lost folder membership');
+        assert(!layer.metadata.fields.includes('kml'), 'Folder metadata leaked into attributes');
+      });
+      await test('Editor renders styled labels and keeps folder hiding through layer toggles', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        await app.handleFiles([new File([groupedKml], 'grouped.kml')]);
+        app.map.stop();
+        app.map.setView([-35, 149], 14, { animate: false });
+        await new Promise(resolve => host.setTimeout(resolve, 80));
+        const layer = app.state.layers[0];
+        const leaves = layer.group.getLayers();
+        const letter = leaves.find(leaf => leaf.feature.properties.name === 'B');
+        const hidden = leaves.find(leaf => leaf.feature.properties.name === 'F');
+        assert(letter.getTooltip().getContent().textContent === 'B', 'Letter not rendered');
+        assert(letter.getTooltip().getContent().style.fontSize === '12px', 'Single-character size cap ignored');
+        assert(host.getComputedStyle(letter.getTooltip().getElement()).fontWeight === '400', 'Label is bold');
+        assert(letter.getTooltip().getContent().style.color === 'rgb(255, 0, 0)', 'Label colour ignored');
+        assert(Math.abs(letter.getTooltip().options.opacity - 128 / 255) < .001, 'Label opacity ignored');
+        assert(letter.options.fillOpacity === 0 && letter.options.opacity === 0, 'Letter replaced by a dot');
+        assert(!leaves.find(leaf => leaf.feature.properties.name === 'E').getTooltip(), 'Zero-scale label rendered');
+        assert(leaves.find(leaf => leaf.feature.properties.name === 'A').getTooltip(), 'Polygon letter not rendered');
+        assert(!app.map.hasLayer(hidden), 'Initially hidden folder rendered');
+        assert(doc.querySelectorAll('.kml-folder-row').length === 4, 'Folder rows missing');
+        const folders = [...doc.querySelectorAll('.kml-folder-row')];
+        assert(layer.kmlFolders.every(folder => folder.expanded === false), 'Folders did not start collapsed');
+        const labels = folders[1].querySelector('input');
+        labels.click();
+        assert(!app.map.hasLayer(letter), 'Folder did not hide label');
+        const parent = doc.querySelector('#layerList > li > input[type=checkbox]');
+        parent.click();
+        parent.click();
+        assert(!app.map.hasLayer(letter) && !app.map.hasLayer(hidden), 'Layer toggle reset folder visibility');
+        labels.click();
+        assert(app.map.hasLayer(letter) && app.map.hasLayer(letter.getTooltip()), 'Folder did not restore label');
+        const disclosure = folders[0].querySelector('button');
+        assert(disclosure.getAttribute('aria-expanded') === 'false' && doc.getElementById(disclosure.getAttribute('aria-controls')).hidden, 'Folder did not start collapsed');
+        disclosure.click();
+        assert(disclosure.getAttribute('aria-expanded') === 'true' && !doc.getElementById(disclosure.getAttribute('aria-controls')).hidden, 'Folder did not expand');
+        disclosure.click();
+        assert(disclosure.getAttribute('aria-expanded') === 'false' && doc.getElementById(disclosure.getAttribute('aria-controls')).hidden, 'Folder did not collapse');
+        assert(layer.group.getLayers().length === 7, 'Visibility removed editable features');
+        letter.setLatLng([-34.9, 149.1]);
+        assert(letter.getTooltip().getLatLng().equals(letter.getLatLng()), 'Label did not follow edited point');
+      }));
+      await test('KMZ editor imports retain folder controls and point labels', () => withEditor(async (host, doc) => {
+        const file = await zipFile('grouped.kmz', [{ name: 'doc.kml', data: groupedKml }]);
+        await host.__geoEditor.handleFiles([file]);
+        host.__geoEditor.map.stop();
+        host.__geoEditor.map.setView([-35, 149], 14, { animate: false });
+        await new Promise(resolve => host.setTimeout(resolve, 80));
+        const layer = host.__geoEditor.state.layers[0];
+        assert(layer.kmlFolders.length === 4 && doc.querySelectorAll('.kml-folder-row').length === 4, 'Worker lost folder controls');
+        assert(layer.group.getLayers().find(leaf => leaf.feature.properties.name === 'B').getTooltip().getContent().textContent === 'B', 'Worker lost point label');
+      }));
+      await test('Large layers obey every zoom cap, refresh on pan and retain export features', () => withEditor(async host => {
+        const app = host.__geoEditor;
+        const settle = () => new Promise(resolve => host.setTimeout(resolve, 80));
+        await settle();
+        app.map.options.zoomAnimation = false;
+        app.map.setView([-35, 149], 3, { animate: false });
+        const features = Array.from({ length: 24001 }, (_, index) => ({
+          ...point({ id: index }),
+          geometry: { type: 'Point', coordinates: [149 + (index % 100 - 50) / 100000, -35 + (Math.floor(index / 100) - 60) / 100000] },
+        }));
+        const layer = app.createLayer({ name: 'Massive', features, fields: ['id'], types: { id: 'number' } });
+        assert(layer.group.getLayers()[0].getRadius() === 3 && layer.group.getLayers()[0].options.weight === .75, 'Point dot is not half-size');
+        for (const [zoom, limit] of [[3, 1000], [6, 2000], [9, 10000], [12, 10000], [15, 20000]]) {
+          app.map.setView([-35, 149], zoom, { animate: false });
+          await settle();
+          assert(layer.displayed.size === limit, `Wrong display count at zoom ${zoom}: ${layer.displayed.size}`);
+          assert(layer.group.getLayers().filter(leaf => app.map.hasLayer(leaf)).length === limit, 'Map bypassed display limit');
+        }
+        const stable = [...layer.displayed];
+        app.map.fire('moveend');
+        await settle();
+        assert(stable.every(leaf => layer.displayed.has(leaf)), 'Unchanged viewport changed the sample');
+        app.map.setView([0, 0], 15, { animate: false });
+        await settle();
+        assert(layer.displayed.size === 0, 'Offscreen massive layer still displayed');
+        app.map.setView([-35, 149], 3, { animate: false });
+        await settle();
+        assert(layer.displayed.size === 1000, 'Panning back did not restore features');
+        assert(layer.group.getLayers().length === 24001 && layer.group.toGeoJSON().features.length === 24001, 'Display cap discarded model or export features');
+        app.map.removeLayer(layer.group);
+        assert(layer.displayed.size === 0, 'Hiding layer left displayed features');
+        layer.group.addTo(app.map);
+        assert(layer.displayed.size === 1000, 'Layer toggle bypassed display cap');
+      }));
+      await test('Selected features and KML labels respect display budgets and folder visibility', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        const settle = () => new Promise(resolve => host.setTimeout(resolve, 80));
+        await settle();
+        app.map.options.zoomAnimation = false;
+        app.map.setView([-35, 149], 3, { animate: false });
+        const features = Array.from({ length: 1201 }, (_, index) => ({
+          ...point({ name: `Label ${index}` }), kml: { folderIds: ['labels'] }, style: { 'icon-scale': 0 },
+        }));
+        const layer = app.createLayer({ name: 'Many labels', features, format: 'kml', fields: ['name'], kmlFolders: [{ id: 'labels', parentId: null, name: 'Labels', visible: true, expanded: false }] });
+        layer.group.getLayers()[0].fire('click', { latlng: host.L.latLng(-35, 149) });
+        app.map.closePopup();
+        const target = layer.group.getLayers().slice(0, 200).find(leaf => !app.map.hasLayer(leaf));
+        assert(target, 'Test has no sampled-out feature');
+        const cell = [...doc.querySelectorAll('#tableWrap tbody input')].find(input => input.value === target.feature.properties.name);
+        assert(cell, 'Sampled-out feature missing from table');
+        cell.dispatchEvent(new host.Event('focus'));
+        assert(app.state.selected === target && app.map.hasLayer(target), 'Table selection did not reveal the feature');
+        assert(layer.displayed.size === 1000, 'Pinned selection exceeded display cap');
+        assert(Object.values(app.map._layers).filter(leaf => leaf instanceof host.L.Tooltip).length === 1000, 'Labels bypassed display limit');
+        const visible = doc.querySelector('.kml-folder-row input');
+        visible.click();
+        assert(layer.displayed.size === 0 && !app.state.selected, 'Hidden folder retained selection or display features');
+        const parent = doc.querySelector('#layerList > li > input[type=checkbox]');
+        parent.click();
+        parent.click();
+        assert(layer.displayed.size === 0, 'Parent toggle restored hidden folder');
+        visible.click();
+        assert(layer.displayed.size === 1000 && layer.group.getLayers().length === 1201, 'Folder toggle bypassed cap or deleted features');
+        layer.group.removeLayer(layer.group.getLayers()[0]);
+        await settle();
+        assert(layer.displayed.size === 1000 && layer.group.toGeoJSON().features.length === 1200, 'Deletion left stale display state');
+      }));
+      await test('Crowded layers reserve display slots for polygons before points', () => withEditor(async host => {
+        const app = host.__geoEditor;
+        await new Promise(resolve => host.setTimeout(resolve, 80));
+        app.map.setView([-35, 149], 3, { animate: false });
+        const polygons = Array.from({ length: 1200 }, () => ({
+          type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [[[148.99, -35.01], [149.01, -35.01], [149.01, -34.99], [148.99, -34.99], [148.99, -35.01]]] },
+        }));
+        const layer = app.createLayer({ name: 'Polygon priority', features: [...Array.from({ length: 1200 }, () => point()), ...polygons] });
+        assert(layer.displayed.size === 1000, 'Wrong crowded-layer limit');
+        assert([...layer.displayed].every(leaf => leaf instanceof host.L.Polygon), 'Points displaced polygons');
+        assert(layer.group.toGeoJSON().features.length === 2400, 'Priority discarded features');
+      }));
+      await test('Isolated site folders retain complete sector polygons within the zoom budget', () => withEditor(async host => {
+        const app = host.__geoEditor;
+        app.map.setView([-35, 149], 3, { animate: false });
+        const features = [];
+        const folders = [];
+        for (let site = 0; site <= 110; site++) {
+          const isolated = site === 110;
+          const name = `S${String(site).padStart(3, '0')}`;
+          const id = `site-${site}`;
+          const longitude = isolated ? 170 : 149 + site / 100000;
+          const kml = { folderIds: [id] };
+          folders.push({ id, parentId: null, name, visible: true, expanded: false });
+          features.push({ ...point({ name }), geometry: { type: 'Point', coordinates: [longitude, -35] }, kml });
+          for (let sector = 0; sector < (isolated ? 50 : 10); sector++) {
+            features.push({ type: 'Feature', properties: { name: `${name}-${sector}` }, kml,
+              geometry: { type: 'Polygon', coordinates: [[[longitude, -35], [longitude + .01, -35], [longitude + .01, -34.99], [longitude, -35]]] },
+            });
+          }
+        }
+        const layer = app.createLayer({ name: 'Site sectors', format: 'kml', features, kmlFolders: folders });
+        const remote = layer.group.getLayers().filter(leaf => leaf instanceof host.L.Polygon && leaf.feature.kml.folderIds[0] === 'site-110');
+        assert(remote.length === 50 && remote.every(leaf => app.map.hasLayer(leaf)), 'Isolated site lost sector polygons');
+        assert(layer.displayed.size === 1000, 'Site-aware sampling exceeded zoom budget');
+        assert([...layer.displayed].some(leaf => leaf.feature.kml.folderIds[0] !== 'site-110'), 'Dense sites were all discarded');
+        assert(layer.group.toGeoJSON().features.length === 1261, 'Sampling discarded export features');
+        const generic = app.createLayer({ name: 'Generic polygons', format: 'geojson', features });
+        const genericRemote = generic.group.getLayers().filter(leaf => leaf instanceof host.L.Polygon && leaf.feature.kml.folderIds[0] === 'site-110');
+        assert(genericRemote.some(leaf => !app.map.hasLayer(leaf)), 'Site-specific sampling changed generic layers');
+        const neighbourFolder = { id: 'neighbour', parentId: null, name: 'NEAR', visible: true, expanded: false };
+        const neighbour = { ...point({ name: 'NEAR' }), geometry: { type: 'Point', coordinates: [170.001, -35] }, kml: { folderIds: ['neighbour'] } };
+        const crowded = app.createLayer({ name: 'Site with nearby neighbour', format: 'kml', features: [...features, neighbour], kmlFolders: [...folders, neighbourFolder] });
+        const crowdedRemote = crowded.group.getLayers().filter(leaf => leaf instanceof host.L.Polygon && leaf.feature.kml.folderIds[0] === 'site-110');
+        assert(crowdedRemote.some(leaf => !app.map.hasLayer(leaf)), 'Site without sector polygons was ignored as a neighbour');
+      }));
+      await test('Four-character map labels have a thin black outline without bold text', () => withEditor(async (host, doc) => {
+        const layer = host.__geoEditor.createLayer({ name: 'Outlined labels', format: 'kml', features: ['AB12', 'ABC', 'ABCDE'].map(name => ({
+          ...point({ name }), kml: { folderIds: [] },
+        })) });
+        const labels = layer.group.getLayers().map(leaf => leaf.getTooltip().getContent());
+        const style = host.getComputedStyle(labels[0]);
+        assert(labels[0].classList.contains('kml-label-outlined'), 'Four-character label not outlined');
+        assert(style.webkitTextStrokeWidth === '1px' && style.webkitTextStrokeColor === 'rgb(0, 0, 0)', 'Incorrect outline width or colour');
+        assert(style.fontWeight === '400', 'Outlined label became bold');
+        assert(style.fontSize === '14px', 'Site label is not a consistent readable size');
+        assert(labels.slice(1).every(label => !label.classList.contains('kml-label-outlined')), 'Other label lengths were outlined');
+        assert(host.getComputedStyle(doc.getElementById('btnAbout')).webkitTextStrokeColor === 'rgb(0, 0, 0)', 'Site-name outline missing');
+        const app = host.__geoEditor;
+        const [node, other] = layer.group.getLayers();
+        for (const [zoom, radius] of [[4, 1], [9, 1.3], [12, 1.6], [16, 2]]) {
+          app.map.setView([-35, 149], zoom, { animate: false });
+          await new Promise(resolve => host.setTimeout(resolve, 80));
+          assert(Math.abs(node.getRadius() - radius) < .001, `Four-character dot has wrong size at zoom ${zoom}`);
+          assert(other.getRadius() === 3, 'Other point sizes changed');
+          assert(node.options.weight === radius / 4, 'Small dot outline did not scale');
+        }
+        node.fire('click', { latlng: node.getLatLng() });
+        app.map.closePopup();
+        assert(node.getRadius() === 9, 'Selection highlight was lost');
+        other.fire('click', { latlng: other.getLatLng() });
+        app.map.closePopup();
+        assert(node.getRadius() === 2, 'Deselection did not restore zoom-dependent size');
+      }));
+      await test('Site labels avoid collisions and give selected names placement priority', () => withEditor(async host => {
+        const app = host.__geoEditor;
+        app.map.setView([-35, 149], 10, { animate: false });
+        const layer = app.createLayer({ name: 'Site label placement', format: 'kml', features: ['AB12', 'CD34', 'EF56', 'GH78', 'IJ90', 'KL12'].map(name => ({
+          ...point({ name }), kml: { folderIds: [] }, style: { 'label-scale': .7, 'label-color': '#ffff00' },
+        })) });
+        const leaves = layer.group.getLayers();
+        const visible = () => leaves.filter(leaf => leaf.getTooltip().getElement().style.visibility !== 'hidden');
+        const shown = visible();
+        assert(shown.length >= 2 && shown.length < leaves.length, 'Crowded labels were not placed or suppressed');
+        shown.forEach((leaf, index) => {
+          const element = leaf.getTooltip().getElement();
+          const rectangle = element.getBoundingClientRect();
+          assert(host.getComputedStyle(leaf.getTooltip().getContent()).fontSize === '14px', 'KML scale reduced site-name legibility');
+          assert(host.getComputedStyle(element).backgroundColor === 'rgba(0, 0, 0, 0)', 'Site label has a backing field');
+          assert(host.getComputedStyle(element).borderWidth === '0px', 'Site label has a bounding-field outline');
+          shown.slice(index + 1).forEach(other => {
+            const next = other.getTooltip().getElement().getBoundingClientRect();
+            assert(rectangle.right <= next.left || rectangle.left >= next.right || rectangle.bottom <= next.top || rectangle.top >= next.bottom, 'Visible site names overlap');
+          });
+        });
+        const hidden = leaves.find(leaf => !shown.includes(leaf));
+        hidden.fire('click', { latlng: hidden.getLatLng() });
+        app.map.closePopup();
+        assert(hidden.getTooltip().getElement().style.visibility !== 'hidden', 'Selected site name stayed suppressed');
+        app.map.setView([-35, 149], 13, { animate: false });
+        await new Promise(resolve => host.setTimeout(resolve, 80));
+        assert(visible().includes(hidden), 'Zooming lost selected label priority');
+        const content = hidden.getTooltip().getContent();
+        app.map.fire('moveend');
+        await new Promise(resolve => host.setTimeout(resolve, 80));
+        assert(hidden.getTooltip().getContent() === content, 'Unchanged label DOM was recreated');
+        assert(layer.group.toGeoJSON().features.length === 6, 'Label layout discarded data');
+      }));
+      await test('Single-character labels require close zoom and a large nearby displayed polygon', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        const settle = () => new Promise(resolve => host.setTimeout(resolve, 80));
+        await settle();
+        app.map.options.zoomAnimation = false;
+        app.map.setView([-35, 149], 9, { animate: false });
+        const polygon = (west, south, size, name = '') => ({
+          type: 'Feature', properties: { name }, kml: { folderIds: ['zones'] },
+          geometry: { type: 'Polygon', coordinates: [[[west, south], [west + size, south], [west + size, south + size], [west, south + size], [west, south]]] },
+        });
+        const letter = (name, longitude, latitude) => ({
+          ...point({ name }), geometry: { type: 'Point', coordinates: [longitude, latitude] },
+          kml: { folderIds: [] }, style: { 'label-scale': 5 },
+        });
+        const layer = app.createLayer({ name: 'Fitted labels', format: 'kml', fields: ['name'],
+          kmlFolders: [{ id: 'zones', parentId: null, name: 'Zones', visible: true, expanded: false }],
+          features: [polygon(148.995, -35.005, .01, 'A'), polygon(149.02, -35.000025, .00005), letter('B', 149, -35), letter('E', 149.0055, -35), letter('F', 149.1, -35), letter('1', 149.020025, -35)],
+        });
+        const leaves = layer.group.getLayers();
+        const named = name => leaves.find(leaf => leaf.feature.properties.name === name);
+        assert(!named('A').getTooltip() && !app.map.hasLayer(named('B')), 'Single-character labels visible at distant zoom');
+        app.map.setView([-35, 149], 14, { animate: false });
+        await settle();
+        assert(app.map.hasLayer(named('B')) && named('B').getTooltip(), 'Nearby letter missing at close zoom');
+        assert(app.map.hasLayer(named('E')), 'Letter immediately outside polygon not associated');
+        assert(!app.map.hasLayer(named('F')), 'Distant letter associated with unrelated polygon');
+        assert(!app.map.hasLayer(named('1')), 'Letter shown over a tiny polygon');
+        const text = named('B').getTooltip().getContent();
+        assert(Number.parseFloat(text.style.fontSize) <= 12 && host.getComputedStyle(text).fontWeight === '400', 'Letter too large or bold');
+        const bounds = named('A').getBounds();
+        const size = app.map.latLngToContainerPoint(bounds.getSouthEast()).subtract(app.map.latLngToContainerPoint(bounds.getNorthWest()));
+        assert(Number.parseFloat(text.style.fontSize) < Math.min(size.x, size.y) * .2, 'Letter exceeds polygon-relative size');
+        named('A').fire('click', { latlng: host.L.latLng(-35, 149) });
+        app.map.closePopup();
+        doc.querySelector('.kml-folder-row input').click();
+        assert(!app.map.hasLayer(named('B')) && !app.map.hasLayer(named('E')), 'Labels survived hiding nearby polygon');
+        doc.querySelector('.kml-folder-row input').click();
+        app.map.setView([-35, 149], 9, { animate: false });
+        await settle();
+        assert(!named('A').getTooltip() && !app.map.hasLayer(named('B')), 'Zooming out left single-character labels visible');
+        named('A').setLatLngs([[-35.15, 148.85], [-35.15, 149.15], [-34.85, 149.15], [-34.85, 148.85]]);
+        app.map.setView([-35, 149], 10, { animate: false });
+        await settle();
+        assert(app.map.hasLayer(named('B')) && named('B').getTooltip(), 'Large-polygon label missing at zoom 10');
+        assert(Number.parseFloat(named('B').getTooltip().getContent().style.fontSize) <= 12, 'Zoom-10 label exceeds size cap');
+        assert(layer.group.toGeoJSON().features.length === 6, 'Label suppression discarded data');
+      }));
+      await test('Geometry previews have a separate column and four-digit row actions fit', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        const features = Array.from({ length: 1001 }, (_, id) => ({
+          type: 'Feature', properties: { id },
+          geometry: { type: 'Polygon', coordinates: [[[149, -35], [149.01, -35], [149.01, -34.99], [149, -35]]] },
+        }));
+        await app.handleFiles([jsonFile(collection(features), 'table-columns.geojson')]);
+        app.state.page = 9999;
+        doc.getElementById('pgNext').click();
+        const table = doc.querySelector('table.attrs');
+        const row = table.tBodies[0].rows[0];
+        assert(row.cells[0].querySelector('.geometry-preview'), 'Missing leading geometry preview');
+        assert(row.cells[0].querySelectorAll('button').length === 3, 'Feature actions missing from preview column');
+        assert(!row.cells[1].querySelector('button'), 'Feature actions remain in row-number column');
+        assert(!row.cells[1].querySelector('.geometry-preview'), 'Preview remains in row-number cell');
+        assert(row.cells[1].querySelector('.rn-content > span').textContent === '1001', 'Expected four-digit row number');
+        for (const width of ['100%', '360px']) {
+          host.frameElement.style.width = width;
+          for (const cell of [row.cells[0], row.cells[1]]) {
+            const bounds = cell.getBoundingClientRect();
+            for (const element of cell.querySelectorAll('button, .geometry-preview, .rn-content > span')) {
+              const rect = element.getBoundingClientRect();
+              assert(rect.left >= bounds.left && rect.right <= bounds.right, 'Row number, preview or actions overflow');
+            }
+          }
+        }
+        for (const theme of ['light', 'dark']) {
+          doc.documentElement.dataset.theme = theme;
+          const background = cell => host.getComputedStyle(cell).backgroundColor;
+          assert(background(row.cells[0]) === background(row.cells[2]), `Preview background differs in ${theme} theme`);
+          assert(background(table.tHead.rows[0].cells[0]) === background(table.tHead.rows[0].cells[2]), `Preview header differs in ${theme} theme`);
+          row.classList.add('sel');
+          assert(background(row.cells[0]) === background(row.cells[2]), `Selected preview background differs in ${theme} theme`);
+          row.classList.remove('sel');
+        }
+        const columns = [...table.querySelectorAll('col')];
+        const widths = columns.map(column => parseFloat(column.style.width));
+        table.querySelector('.column-resizer').dispatchEvent(new host.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+        assert(parseFloat(columns[2].style.width) === widths[2] + 10, 'Field resize targets wrong column');
+        assert(parseFloat(columns[0].style.width) === widths[0] && parseFloat(columns[1].style.width) === widths[1], 'Field resize changed leading columns');
+        doc.getElementById('pgPrev').click();
+        assert(parseFloat(doc.querySelectorAll('table.attrs col')[2].style.width) === widths[2] + 10, 'Field width lost after paging');
+      }));
+      await test('Imports defer full display scans until construction finishes', () => withEditor(async host => {
+        const app = host.__geoEditor;
+        const original = host.L.GeoJSON.prototype.getLayers;
+        let intermediateScans = 0;
+        host.L.GeoJSON.prototype.getLayers = function() {
+          if (app.state.layers.some(layer => layer.group === this && layer.importing)) intermediateScans++;
+          return original.call(this);
+        };
+        try {
+          await app.handleFiles([jsonFile(collection(Array.from({ length: 3000 }, (_, id) => point({ id }))), 'deferred-sampling.geojson')]);
+          const layer = app.state.layers[0];
+          assert(layer && !layer.importing && layer.group.getLayers().length === 3000, 'Import did not finalize all features');
+          assert(intermediateScans === 0, 'Growing layer was repeatedly scanned during import');
+          assert(layer.group.pm && layer.group.pm.getLayers().length === 3000, 'Import did not restore group editing for every feature');
+          assert(layer.displayed.size > 0 && layer.displayed.size <= 20000, 'Final display was not refreshed');
+        } finally { host.L.GeoJSON.prototype.getLayers = original; }
+      }));
+      await test('Cancelling a time-sliced import preserves completed files and the next queued import', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        const original = host.L.FeatureGroup.prototype.fire;
+        let requested = false;
+        host.L.FeatureGroup.prototype.fire = function(type, ...args) {
+          if (!requested && type === 'layeradd' && app.state.layers.some(layer => layer.group === this && layer.name === 'cancel-performance')) {
+            requested = true;
+            host.setTimeout(() => doc.getElementById('btnCancelImport').click(), 0);
+          }
+          return original.call(this, type, ...args);
+        };
+        try {
+          const pending = app.handleFiles([
+            jsonFile(collection([point()]), 'completed-performance.geojson'),
+            jsonFile(collection(Array.from({ length: 5000 }, (_, id) => point({ id }))), 'cancel-performance.geojson'),
+          ]);
+          const queued = app.handleFiles([jsonFile(collection([point()]), 'queued-performance.geojson')]);
+          await pending;
+          await queued;
+          assert(requested, 'Test never reached partial layer construction');
+          assert(app.state.layers.map(layer => layer.name).join() === 'completed-performance,queued-performance', 'Cancellation removed completed data or kept the partial file');
+          assert(app.state.layers.every(layer => !layer.importing), 'Import state did not recover');
+          assert(doc.getElementById('importProgress').hidden, 'Progress remained open');
+        } finally {
+          if (original === host.L.Evented.prototype.fire) delete host.L.FeatureGroup.prototype.fire;
+          else host.L.FeatureGroup.prototype.fire = original;
+        }
+      }));
+      await test('KMZ and KML ZIP archives decompress in the worker', async () => {
+        for (const name of ['styled.kmz', 'styled.zip']) {
+          const file = await zipFile(name, [{ name: 'nested/doc.kml', data: kml }]);
+          const output = await runJob({ file });
+          assert(output.layers[0].features.length === 1 && output.kmlConversions === 1, 'Archive import failed');
+        }
+      });
+      const parts = ShapefileWriter.writeShapefiles('parts', [point({ name: 'Canberra', count: 7 })], ['name', 'count'], { name: 'string', count: 'number' }).files;
+      await test('Shapefile ZIP parsing keeps coordinates and DBF attributes', async () => {
+        const output = await runJob({ file: await zipFile('parts.zip', parts) });
+        const layer = output.layers[0];
+        assert(layer.metadata.geomType === 'Point', 'Shapefile geometry type changed');
+        assert(layer.features[0].properties.name === 'Canberra' && layer.features[0].properties.count === 7, 'DBF attributes changed');
+        assert(layer.features[0].geometry.coordinates.join() === '149,-35', 'Coordinates changed');
+      });
+      await test('Loose shapefile components are packed and read in the worker', async () => {
+        const output = await runJob({ files: parts.map(part => new File([part.data], part.name)) });
+        assert(output.layers[0].name === 'parts' && output.layers[0].features.length === 1, 'Loose parts failed');
+      });
+      await test('Multiple shapefiles in one ZIP retain separate layer names', async () => {
+        const other = ShapefileWriter.writeShapefiles('other', [point({})], [], {}).files;
+        const output = await runJob({ file: await zipFile('multiple.zip', [...parts, ...other]) });
+        assert(output.layers.map(layer => layer.name).sort().join() === 'other,parts', 'Layer collections merged or renamed');
+      });
+      await test('Empty and out-of-range geometries create no layers and report warnings', async () => {
+        for (const features of [[], [{ ...point(), geometry: { type: 'Point', coordinates: [300, -35] } }]]) {
+          const output = await runJob({ file: jsonFile(collection(features)) });
+          assert(output.layers.length === 0 && output.warnings.length === 1, 'Invalid collection accepted silently');
+        }
+      });
+      await test('Malformed JSON and unsupported archives surface errors', async () => {
+        for (const file of [new File(['{invalid'], 'bad.json'), await zipFile('empty.zip', [])]) {
+          let rejected = false;
+          try { await runJob({ file }); } catch { rejected = true; }
+          assert(rejected, 'Invalid input accepted');
+        }
+      });
+      window.importWorkerTestResults = results;
+      window.importWorkerTestDone = true;
+    })();
+  </script>
+</body>
+</html>

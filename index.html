@@ -84,6 +84,17 @@
             <span>Zipped shapefile (.zip), .kml, .kmz or .geojson</span>
           </button>
         </div>
+        <div id="importProgress" hidden>
+          <div class="import-progress-content">
+            <div class="import-progress-title">Loading layer</div>
+            <div id="importProgressTrack">
+              <progress id="importProgressBar" max="100" value="0" aria-label="Import progress"></progress>
+            </div>
+            <output id="importProgressStatus" aria-live="polite"></output>
+            <div id="importProgressFile"></div>
+            <button id="btnCancelImport" type="button" aria-label="Cancel import" title="Cancel import"><i data-lucide="x" class="action-icon" aria-hidden="true"></i></button>
+          </div>
+        </div>
       </div>
       <div id="splitter" title="Drag to resize"></div>
       <div id="tablePanel">
@@ -121,8 +132,8 @@
     </div>
     <div class="about-content">
       <div class="about-logo" aria-hidden="true">🌏</div>
-      <h1 id="aboutTitle">Geo Editor</h1>
-      <p>Imagined by Joseph Malicdem</p>
+      <h1 id="aboutTitle" tabindex="-1">Geo Editor</h1>
+      <p>Imagineered by Joseph Malicdem</p>
       <div class="about-details">
         <p>Version 1.0</p>
         <p>October 2026</p>
@@ -237,6 +248,8 @@
   </dialog>
 
   <script src="lib/leaflet.js"></script>
+  <script src="lib/pixi.min.js"></script>
+  <script src="js/gpu-renderer.js"></script>
   <script src="lib/geoman.js"></script>
   <script src="lib/jszip.js"></script>
   <script src="lib/shp.js"></script>
@@ -244,6 +257,7 @@
   <script src="js/qgis-style.js"></script>
   <script src="js/shapefile-writer.js"></script>
   <script src="lib/lucide.js"></script>
+  <script src="js/import-core.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>
