@@ -566,6 +566,25 @@
     return zoom <= 5 ? 1000 : zoom <= 8 ? 2000 : zoom <= 11 ? 10000 : zoom <= 14 ? 10000 : 20000;
   }
 
+  function uncoveredMapBounds() {
+    const mapRect = map.getContainer().getBoundingClientRect();
+    const workspace = $('workspace').getBoundingClientRect();
+    const splitter = $('splitter').getBoundingClientRect();
+    const left = Math.max(mapRect.left, workspace.left);
+    const top = Math.max(mapRect.top, workspace.top);
+    const right = Math.min(mapRect.right, workspace.right);
+    const bottom = Math.min(mapRect.bottom, workspace.bottom, splitter.top);
+    if (left >= right || top >= bottom) return null;
+    return L.latLngBounds(
+      map.containerPointToLatLng([left - mapRect.left, top - mapRect.top]),
+      map.containerPointToLatLng([right - mapRect.left, bottom - mapRect.top])
+    );
+  }
+
+  function leafIntersectsBounds(leaf, bounds) {
+    return !!bounds && (leaf.getBounds ? bounds.intersects(leaf.getBounds()) : bounds.contains(leaf.getLatLng()));
+  }
+
   function sitePolygonIndex(lyr) {
     if (lyr.format !== 'kml' && lyr.format !== 'kmz') return null;
     if (lyr.sitePolygons) return lyr.sitePolygons;
@@ -623,31 +642,49 @@
     return preferred;
   }
 
+  function folderDisplaySelection(lyr, all, limit, bounds) {
+    const featureFolders = new Set(all.map(leaf => leaf.feature?.kml?.folderIds?.at(-1)).filter(Boolean));
+    const groups = new Map();
+    all.forEach(leaf => {
+      if (!kmlLeafVisible(lyr, leaf) || !leafIntersectsBounds(leaf, bounds)) return;
+      const folderIds = leaf.feature?.kml?.folderIds || [];
+      const key = folderIds.find(id => featureFolders.has(id)) ?? leaf;
+      if (!groups.has(key)) groups.set(key, { leaves: [], pinned: false });
+      const group = groups.get(key);
+      group.leaves.push(leaf);
+      group.pinned ||= leaf === state.selected || leaf._displayEditing;
+    });
+    const candidates = [...groups.values()];
+    const chosen = new Set(candidates.filter(group => group.pinned).slice(0, limit));
+    const remaining = candidates.filter(group => !chosen.has(group));
+    const count = Math.min(limit - chosen.size, remaining.length);
+    for (let index = 0; index < count; index++) chosen.add(remaining[Math.floor(index * remaining.length / count)]);
+    return new Set([...chosen].flatMap(group => group.leaves));
+  }
+
   function syncLayerDisplay(lyr) {
     if (!map.hasLayer(lyr.group) || lyr.importing) return;
     const all = leavesOf(lyr);
     const limit = displayLimit();
-    const limited = all.length > limit;
-    const bounds = map.getBounds().pad(.1);
+    const grouped = lyr.kmlFolders.length > 0;
+    const bounds = uncoveredMapBounds();
     const pinned = [];
     const candidates = [[], [], []];
-    all.forEach(leaf => {
-      if (!kmlLeafVisible(lyr, leaf)) return;
+    if (!grouped) all.forEach(leaf => {
+      if (!kmlLeafVisible(lyr, leaf) || !leafIntersectsBounds(leaf, bounds)) return;
       if (leaf === state.selected || leaf._displayEditing) { pinned.push(leaf); return; }
-      if (!limited || (leaf.getBounds ? bounds.intersects(leaf.getBounds()) : bounds.contains(leaf.getLatLng()))) {
-        candidates[leaf instanceof L.Polygon ? 0 : isPointLeaf(leaf) ? 2 : 1].push(leaf);
-      }
+      candidates[leaf instanceof L.Polygon ? 0 : isPointLeaf(leaf) ? 2 : 1].push(leaf);
     });
-    const desired = new Set(pinned.slice(0, limit));
-    if (candidates[0].length > limit - desired.size) {
+    const desired = grouped ? folderDisplaySelection(lyr, all, limit, bounds) : new Set(pinned.slice(0, limit));
+    if (!grouped && candidates[0].length > limit - desired.size) {
       isolatedSitePolygons(lyr, candidates[0], limit - desired.size).forEach(leaf => desired.add(leaf));
     }
-    candidates.slice(0, 2).forEach(items => {
+    if (!grouped) candidates.slice(0, 2).forEach(items => {
       const remaining = items.filter(leaf => !desired.has(leaf));
       const count = Math.min(limit - desired.size, remaining.length);
       for (let index = 0; index < count; index++) desired.add(remaining[Math.floor(index * remaining.length / count)]);
     });
-    const needsNearby = pinned.some(leaf => isPointLeaf(leaf) && singleCharacterLabel(leaf)) ||
+    const needsNearby = (grouped && [...desired].some(singleCharacterLabel)) || pinned.some(leaf => isPointLeaf(leaf) && singleCharacterLabel(leaf)) ||
       (desired.size < limit && candidates[2].some(singleCharacterLabel));
     const nearby = needsNearby ? polygonLabelIndex([...desired].filter(leaf => leaf instanceof L.Polygon)) : new Map();
     const points = candidates[2].filter(leaf => {
@@ -655,7 +692,7 @@
       leaf._kmlLabelSize = polygonLabelSize(leaf, nearby);
       return leaf._kmlLabelSize > 0;
     });
-    const pointCount = Math.min(limit - desired.size, points.length);
+    const pointCount = grouped ? 0 : Math.min(limit - desired.size, points.length);
     for (let index = 0; index < pointCount; index++) desired.add(points[Math.floor(index * points.length / pointCount)]);
     desired.forEach(leaf => {
       if (isPointLeaf(leaf) && leaf !== state.selected && leaf.options.radius !== pointRadius(leaf)) restyle(leaf);
@@ -720,10 +757,6 @@
       leaf.addEventParent(this);
       this._layers[L.stamp(leaf)] = leaf;
       this.fire('layeradd', { layer: leaf });
-      if (this._map && lyr.displayed.size < displayLimit() && kmlLeafVisible(lyr, leaf) && !singleCharacterLabel(leaf)) {
-        lyr.displayed.add(leaf);
-        map.addLayer(leaf);
-      }
       if (!lyr.importing) scheduleMapDisplay();
       return this;
     };
@@ -2736,6 +2769,7 @@
       initialMapViewPending = false;
       if (!state.layers.length) fitVisibleBounds(L.latLngBounds([[-44, 112], [-10, 154]]));
     }
+    scheduleMapDisplay();
   });
   [$('main'), $('sidebar'), $('tablePanel')].forEach(panel => panelObserver.observe(panel));
 
