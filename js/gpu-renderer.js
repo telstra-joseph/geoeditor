@@ -74,13 +74,39 @@
       if (!this._gpu) L.Canvas.prototype._clear.call(this);
     },
 
+    _initPath(layer) {
+      L.Canvas.prototype._initPath.call(this, layer);
+      this._layerOrderDirty = true;
+    },
+
+    _sortLayerOrder() {
+      if (!this._layerOrderDirty) return;
+      const paths = [];
+      for (let path = this._drawFirst; path; path = path.next) paths.push(path);
+      paths.sort((first, second) => (first.layer._glayer?.order ?? 0) - (second.layer._glayer?.order ?? 0));
+      paths.forEach((path, index) => {
+        path.prev = paths[index - 1] || null;
+        path.next = paths[index + 1] || null;
+        const graphic = this._graphics?.get(L.stamp(path.layer));
+        if (graphic) graphic.zIndex = index;
+      });
+      this._drawFirst = paths[0] || null;
+      this._drawLast = paths.at(-1) || null;
+      this._stage?.sortChildren();
+      this._layerOrderDirty = false;
+    },
+
     _draw() {
-      if (!this._gpu) return L.Canvas.prototype._draw.call(this);
+      if (!this._gpu) {
+        this._sortLayerOrder();
+        return L.Canvas.prototype._draw.call(this);
+      }
       if (this._gpu.context.isLost) return;
       this._drawing = true;
       try {
         for (const layer of this._dirty) layer._updatePath();
         this._dirty.clear();
+        this._sortLayerOrder();
         this._gpu.render(this._stage);
       } finally {
         this._drawing = false;
@@ -161,12 +187,14 @@
 
     _bringToFront(layer) {
       L.Canvas.prototype._bringToFront.call(this, layer);
+      this._layerOrderDirty = true;
       const graphic = this._graphics?.get(L.stamp(layer));
       if (graphic) this._stage.setChildIndex(graphic, this._stage.children.length - 1);
     },
 
     _bringToBack(layer) {
       L.Canvas.prototype._bringToBack.call(this, layer);
+      this._layerOrderDirty = true;
       const graphic = this._graphics?.get(L.stamp(layer));
       if (graphic) this._stage.setChildIndex(graphic, 0);
     },

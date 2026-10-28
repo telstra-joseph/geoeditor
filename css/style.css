@@ -143,12 +143,20 @@ button:disabled { opacity: .48; cursor: not-allowed; box-shadow: none; transform
 
 #layerList { list-style: none; margin: 0; padding: 0; }
 #layerList li {
-  display: grid; grid-template-columns: auto auto 1fr; gap: 4px 8px; align-items: center;
+  display: grid; grid-template-columns: auto auto auto minmax(0, 1fr); gap: 4px 8px; align-items: center;
   padding: 8px; margin-bottom: 6px; border: 1px solid var(--line); border-radius: 6px; cursor: pointer;
-  transition: background-color var(--ease-ui), border-color var(--ease-ui), box-shadow var(--ease-ui);
+  transition: background-color var(--ease-ui), border-color var(--ease-ui), box-shadow var(--ease-ui), transform 180ms cubic-bezier(.22, 1, .36, 1), opacity 140ms ease;
 }
 #layerList li:hover:not(.active) { background: rgba(245, 247, 250, .65); border-color: #bccbd5; }
 #layerList li.active { border-color: var(--accent); background: rgba(237, 245, 255, .65); box-shadow: 0 0 0 1px var(--accent) inset; }
+#layerList .layer-reorder { width: 22px; height: 24px; min-height: 24px; padding: 2px; border: 0; background: transparent; box-shadow: none; cursor: grab; touch-action: none; }
+#layerList .layer-reorder:active { cursor: grabbing; }
+#layerList .layer-reorder svg { width: 16px; height: 16px; }
+#layerList > li:only-child { grid-template-columns: auto auto minmax(0, 1fr); }
+#layerList > li:only-child .layer-reorder { display: none; }
+#layerList li.layer-dragging { position: relative; z-index: 4; opacity: .95; scale: 1.02; pointer-events: none; background: var(--surface); box-shadow: 0 8px 20px rgba(16, 26, 58, .22); transition: box-shadow 140ms ease, opacity 140ms ease; }
+#layerList li.drop-before { box-shadow: 0 -3px 0 var(--accent); }
+#layerList li.drop-after { box-shadow: 0 3px 0 var(--accent); }
 #layerList input[type=checkbox] {
   appearance: none; display: grid; place-items: center; width: 16px; height: 16px;
   margin: 0; border: 1px solid var(--muted); border-radius: 4px;
@@ -166,6 +174,7 @@ button:disabled { opacity: .48; cursor: not-allowed; box-shadow: none; transform
 #layerList .lname { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #layerList .lmeta { grid-column: 1 / -1; display: flex; align-items: center; gap: 4px; font-size: 12px; color: #6b7280; }
 #layerList .lmeta .spacer { flex: 1; }
+#layerList .layer-actions { display: flex; align-items: center; gap: 4px; }
 #layerList .lmeta button { width: 28px; height: 28px; min-height: 28px; flex: 0 0 28px; padding: 0; font-size: 13px; }
 #layerList .lmeta button svg { width: 16.2624px; height: 16.2624px; flex: 0 0 16.2624px; vertical-align: middle; }
 #layerList input[type=color] { width: 24px; height: 24px; padding: 0; border: 1px solid #cbd5e1; border-radius: 4px; background: none; }
@@ -179,6 +188,7 @@ button:disabled { opacity: .48; cursor: not-allowed; box-shadow: none; transform
 #layerList .kml-folder-children { margin-left: 12px; }
 #map .kml-map-label { padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; white-space: pre; font-weight: 400; line-height: 1.2; pointer-events: none; }
 #map .kml-map-label::before { display: none; }
+#map .kml-map-label.leaflet-interactive { pointer-events: auto; cursor: pointer; }
 #map .kml-map-label span { text-shadow: 0 1px 2px rgba(0, 0, 0, .7); }
 #map .kml-map-label .kml-label-outlined { -webkit-text-stroke: 1px #000; paint-order: stroke fill; text-shadow: none; }
 #map .kml-site-label { padding: 0; border-radius: 0; background: transparent; }
@@ -266,6 +276,7 @@ button[value="cancel"]:hover:not(:disabled),
 #map .leaflet-control-layers .leaflet-control-layers-list {
   display: block; position: absolute; top: calc(100% + 4px); right: 0;
   width: 184px; max-width: calc(100vw - 24px); padding: 6px; margin: 0;
+  max-height: max(32px, calc(var(--map-controls-height, 400px) - 44px)); overflow: auto;
   border: 1px solid var(--line); border-radius: 8px; background: var(--surface);
   box-shadow: 0 12px 28px rgba(16, 26, 58, .16);
   opacity: 0; visibility: hidden; pointer-events: none;
@@ -286,6 +297,18 @@ button[value="cancel"]:hover:not(:disabled),
 #map .leaflet-control-layers-selector { margin: 0; top: 0; accent-color: var(--accent); }
 #map .leaflet-control-layers label:has(input:checked) { background: #eaf3ff; color: var(--navy); }
 #map .leaflet-control-layers label:hover { background: var(--hover-fill); color: var(--navy); }
+#map.compact-controls .leaflet-top.leaflet-left { display: flex; flex-wrap: wrap; align-items: flex-start; max-width: calc(100% - var(--panel-left) - 60px); max-height: var(--map-controls-height); overflow: visible; pointer-events: auto; padding: 0 4px 4px 0; }
+#map.compact-controls .leaflet-control-layers .leaflet-control-layers-list { top: 0; right: calc(100% + 4px); max-height: max(0px, calc(var(--map-controls-height) - 10px)); max-width: min(184px, calc(100vw - var(--panel-left) - 60px)); }
+#map.compact-controls .leaflet-control-layers-expanded::after { top: 0; right: 100%; width: 4px; height: 100%; }
+#map.compact-controls .leaflet-pm-toolbar { display: flex; touch-action: none; user-select: none; -webkit-touch-callout: none; }
+#map.compact-controls .leaflet-pm-toolbar > .mobile-tool-current { order: -1; }
+#map.compact-controls .leaflet-pm-toolbar:not(.mobile-tools-open) > .button-container:not(.mobile-tool-current) { display: none; }
+#map.compact-controls .leaflet-pm-toolbar .button-container > a { border-radius: 0; border-bottom: 0; border-right: 1px solid var(--line); }
+#map.compact-controls .leaflet-pm-toolbar .button-container:first-child > a { border-radius: 5px 0 0 5px; }
+#map.compact-controls .leaflet-pm-toolbar .button-container:last-child > a { border-radius: 0 5px 5px 0; border-right: 0; }
+#map.compact-controls .leaflet-pm-toolbar .leaflet-pm-actions-container { top: calc(100% + 5px); left: 0; max-width: min(260px, calc(100vw - 120px)); }
+#map.compact-controls .leaflet-pm-toolbar:not(.mobile-tools-open) > .mobile-tool-current > a { border-radius: 5px; border-right: 0; }
+#map.compact-controls .leaflet-pm-toolbar:not(.mobile-tools-open) .leaflet-pm-actions-container { top: -1px; left: calc(100% + 5px); max-width: calc(100vw - 100px); }
 #emptyState {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
   left: var(--panel-left); top: var(--panel-top); bottom: var(--panel-bottom);
@@ -349,15 +372,15 @@ button[value="cancel"]:hover:not(:disabled),
 #tableWrap { flex: 1 1 auto; overflow: auto; }
 #tableWrap .empty { padding: 16px; color: #6b7280; }
 
-table.attrs { border-collapse: separate; border-spacing: 0; font-size: 13px; background: var(--surface); }
+table.attrs { --geometry-column-width: 112px; border-collapse: separate; border-spacing: 0; font-size: 13px; background: var(--surface); }
 table.attrs th, table.attrs td { border-right: 1px solid var(--column-edge, var(--table-line)); border-bottom: 1px solid var(--table-line); padding: 0; white-space: nowrap; vertical-align: middle; }
 table.attrs td { background: var(--surface); }
 table.attrs tbody tr { transition: background-color 120ms ease; }
-table.attrs tbody tr:not(.sel):hover td:not(.rn) { background: #f6f9fb; }
+table.attrs tbody tr:not(.sel):hover td { background: #f6f9fb; }
 table.attrs th { position: sticky; top: 0; background: #f3f6f8; z-index: 2; text-align: left; }
-table.attrs th.geometry-cell, table.attrs td.geometry-cell { position: sticky; left: 0; z-index: 1; width: 112px; min-width: 112px; padding: 0; text-align: center; }
+table.attrs th.geometry-cell, table.attrs td.geometry-cell { position: sticky; left: 0; z-index: 1; width: var(--geometry-column-width); min-width: var(--geometry-column-width); padding: 0; text-align: center; }
 table.attrs th.geometry-cell { z-index: 3; }
-table.attrs th.rn, table.attrs td.rn { position: sticky; left: 112px; z-index: 1; background: #f8fafc; }
+table.attrs th.rn, table.attrs td.rn { position: sticky; left: var(--geometry-column-width); z-index: 1; background: #f8fafc; }
 table.attrs th.rn { z-index: 3; padding: 4px 8px; text-align: center; }
 table.attrs .th { display: flex; align-items: center; gap: 4px; padding: 4px; min-width: 0; min-height: 32px; }
 table.attrs .fname { min-width: 0; min-height: 24px; justify-content: flex-start; border: 0; background: none; font-weight: 600; padding: 3px 4px; flex: 1; text-align: left; box-shadow: none; overflow: hidden; }
@@ -422,6 +445,8 @@ dialog { border: 1px solid var(--line); border-radius: 8px; padding: 18px 20px; 
 #dlg.compact menu { flex-wrap: wrap; }
 #editHelpDlg { min-width: 0; width: min(560px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto; }
 dialog[open] { animation: dialog-enter 160ms ease-out both; }
+dialog[open].closing { animation: dialog-exit 180ms ease-in both; }
+dialog.closing::backdrop { animation: dialog-backdrop-exit 180ms ease-in both; }
 dialog::backdrop { background: rgba(15,23,42,.45); }
 dialog h3 { margin: 0 0 10px; }
 dialog p { margin: 0 0 10px; }
@@ -472,9 +497,17 @@ dialog label small { display: block; font-weight: 400; color: #6b7280; }
 dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; margin: 14px 0 0; }
 
 .popup-form { max-height: 260px; overflow: auto; min-width: 220px; }
+.popup-form.has-description { min-width: 0; max-height: min(440px, 60vh); }
 .popup-form h4 { margin: 0 0 6px; }
 .popup-form label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 6px; }
-.popup-form input { display: block; width: 100%; padding: 3px 6px; border: 1px solid #cbd5e1; border-radius: 4px; font-weight: 400; }
+.popup-form input, .popup-form textarea { display: block; width: 100%; padding: 3px 6px; border: 1px solid #cbd5e1; border-radius: 4px; font-weight: 400; background: var(--surface); color: var(--ink); }
+.popup-form textarea { min-height: 67px; resize: vertical; }
+.popup-form summary { cursor: pointer; margin-bottom: 6px; }
+.feature-description { overflow: auto; overflow-wrap: anywhere; white-space: pre-wrap; margin-bottom: 10px; font-size: 13px; }
+.feature-description table { border-collapse: collapse; white-space: normal; }
+.feature-description th, .feature-description td { border: 1px solid var(--table-line); padding: 4px 6px; text-align: left; }
+.feature-description pre { white-space: pre-wrap; }
+.feature-description a { color: var(--accent); }
 
 @keyframes toast-enter {
   from { opacity: 0; transform: translateY(8px); }
@@ -496,6 +529,16 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
+@keyframes dialog-exit {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(8px) scale(.96); }
+}
+
+@keyframes dialog-backdrop-exit {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
 @container (max-width: 1100px) {
   #tableBar { flex-wrap: wrap; min-height: 56px; }
   #tableHeading { display: flex; flex-direction: column; flex: 1 1 220px; min-width: 0; max-width: 100%; gap: 2px; }
@@ -508,21 +551,79 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
   #pager { margin-left: auto; }
 }
 
+@media (max-width: 1024px) {
+  body { font-size: 16px; }
+  button { min-width: 44px; min-height: 44px; font-size: 16px; }
+  #sidebar h2 { font-size: 14px; }
+  #layerList .lmeta, #layerList .kml-folder-count, #tableCount, .popup-form label { font-size: 14px; }
+  #layerList .kml-folder-name, .feature-description, #emptyUpload { font-size: 15px; }
+  #tableTitle, dialog p, #aboutDlg p { font-size: 16px; }
+  #filter, dialog :is(input, textarea, select), .popup-form :is(input, textarea) { font-size: 16px; }
+  button .action-icon,
+  #layerList .layer-reorder svg, #layerList .lmeta button svg, #layerList .kml-folder-row button svg,
+  #tableBar button svg, table.attrs button svg, #aboutDlg .action-icon,
+  #map .leaflet-control-zoom svg, #map .leaflet-pm-toolbar svg, #map .leaflet-control-layers-toggle svg {
+    width: 24px; height: 24px; flex: 0 0 24px;
+  }
+  #map .leaflet-pm-toolbar .control-icon { width: 24px; height: 24px; }
+  #btnTheme, #btnToggleLayers, #btnEditHelp { width: 44px; height: 44px; flex-basis: 44px; }
+  #headerActions > button { width: 44px; height: 44px; padding: 0; }
+  #headerActions .button-label { display: none; }
+  #btnCancelImport, #aboutDlg .about-close { width: 44px; height: 44px; }
+  #aboutDlg .about-feedback { min-height: 44px; }
+  dialog menu { flex-wrap: wrap; }
+  #layerList .layer-reorder, #layerList .lmeta button, #layerList .kml-folder-row button { width: 44px; height: 44px; min-height: 44px; flex-basis: 44px; }
+  #layerList > li > .layer-reorder, #layerList > li > input { grid-row: 1 / span 2; }
+  #layerList > li > .lname { grid-column: -2 / -1; grid-row: 1; align-self: end; }
+  #layerList .lmeta { display: contents; }
+  #layerList .lmeta > span:first-child { grid-column: -2 / -1; grid-row: 2; align-self: start; min-width: 0; overflow-wrap: anywhere; }
+  #layerList .lmeta .spacer { display: none; }
+  #layerList .layer-actions { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, 44px); gap: 8px; margin-top: 4px; }
+  #layerList input[type=checkbox], #layerList input[type=color] { width: 36px; height: 36px; }
+  #layerList input[type=checkbox]::after { width: 7px; height: 13px; border-width: 0 3px 3px 0; }
+  #layerList .kml-folder-row { grid-template-columns: 36px 36px minmax(0, 1fr) auto 44px; min-height: 44px; }
+  #layerList .kml-folder-row > button:first-child { width: 36px; height: 36px; min-width: 36px; min-height: 36px; flex-basis: 36px; }
+  #layerList .kml-folder-row > button:first-child svg { width: 20px; height: 20px; flex-basis: 20px; }
+  #map .leaflet-control-zoom a, #map .leaflet-pm-toolbar .leaflet-buttons-control-button,
+  #map .leaflet-control-layers-toggle { width: 44px; height: 44px; }
+  #map .leaflet-pm-toolbar .leaflet-pm-actions-container .leaflet-pm-action { min-width: 44px; height: 44px; }
+  #map .leaflet-control-layers label { min-height: 44px; }
+  #map .leaflet-popup-close-button { display: grid; place-items: center; width: 44px; height: 44px; font-size: 28px; line-height: 1; }
+  .popup-form h4 { padding-right: 28px; }
+  table.attrs .sort, table.attrs .x { width: 44px; height: 44px; min-height: 44px; flex-basis: 44px; }
+  table.attrs .fname { min-height: 44px; }
+  table.attrs .rn-actions button { width: 44px; height: 44px; min-height: 44px; }
+  table.attrs { --geometry-column-width: 188px; font-size: 16px; }
+  table.attrs .geometry-preview { width: 28px; height: 28px; flex-basis: 28px; }
+  #tablePanel { min-height: 120px; }
+  #tableBar { display: grid; grid-template-columns: minmax(0, 1fr) repeat(4, 44px); gap: 8px; align-items: center; }
+  #tableBar button { height: 44px; }
+  #tableHeading { grid-column: 1; grid-row: 1; }
+  #tableTitle { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #tableActions { display: contents; }
+  #tableActions > button { grid-row: 1; width: 44px; padding: 0; }
+  #btnFilter { display: inline-flex; grid-column: 2; }
+  #btnUndo { grid-column: 3; }
+  #btnAddField { grid-column: 4; }
+  #btnBulkDelete { grid-column: 5; }
+  #tableActions .button-label { display: none; }
+  #filter { display: none; }
+  #pager { grid-column: 1 / -1; justify-self: end; margin-left: 0; }
+}
+
 @media (max-width: 760px) {
   #emptyState { padding: 0 48px 32px; }
-  #emptyUpload { width: min(200px, 100%); padding: 10px 12px; gap: 2px; border-radius: 8px; font-size: 11px; }
-  #emptyState .big { font-size: 15px; margin-bottom: 2px; }
+  #emptyUpload { width: min(240px, 100%); padding: 10px 12px; gap: 2px; border-radius: 8px; font-size: 15px; }
+  #emptyState .big { font-size: 18px; margin-bottom: 2px; }
   #emptyUpload .empty-upload-desktop { display: none; }
   #emptyUpload .empty-upload-mobile { display: block; }
   #dlg { min-width: 0; width: min(560px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto; }
   #topbar { flex-wrap: wrap; gap: 6px; }
   #topbar h1 { margin-right: 4px; }
   #topbar .spacer { display: none; }
-  #headerActions > button { width: 28px; height: 28px; padding: 0; }
-  #headerActions .button-label { display: none; }
   #topbar .fmt { flex: 1 1 auto; justify-content: flex-end; }
   #main { flex-direction: column; --panel-left: 0px; }
-  #sidebar { flex: 0 0 auto; max-height: 25vh; border-right: 0; border-bottom: 1px solid var(--line); }
+  #sidebar { flex: 0 0 auto; max-height: min(25vh, max(64px, calc(100dvh - 256px))); padding: 8px; border-right: 0; border-bottom: 1px solid var(--line); }
   #sidebar.collapsed { flex-basis: auto; }
   #sidebar.collapsed h2 { display: block; }
   #sidebar.collapsed #sidebarHeader { flex-direction: row; }
@@ -531,29 +632,7 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
   #btnToggleLayers svg { rotate: 90deg; }
   #workspace { flex: 1 1 auto; min-height: 0; }
   #map .leaflet-control-zoom { display: none; }
-  #map .leaflet-pm-toolbar { display: flex; }
-  #map .leaflet-pm-toolbar { touch-action: none; user-select: none; -webkit-touch-callout: none; }
-  #map .leaflet-pm-toolbar > .mobile-tool-current { order: -1; }
-  #map .leaflet-pm-toolbar:not(.mobile-tools-open) > .button-container:not(.mobile-tool-current) { display: none; }
-  #map .leaflet-pm-toolbar .button-container > a { border-radius: 0; border-bottom: 0; border-right: 1px solid var(--line); }
-  #map .leaflet-pm-toolbar .button-container:first-child > a { border-radius: 5px 0 0 5px; }
-  #map .leaflet-pm-toolbar .button-container:last-child > a { border-radius: 0 5px 5px 0; border-right: 0; }
-  #map .leaflet-pm-toolbar .leaflet-pm-actions-container { top: calc(100% + 5px); left: 0; max-width: min(260px, calc(100vw - 120px)); }
-  #map .leaflet-pm-toolbar:not(.mobile-tools-open) > .mobile-tool-current > a { border-radius: 5px; border-right: 0; }
-  #map .leaflet-pm-toolbar:not(.mobile-tools-open) .leaflet-pm-actions-container { top: -1px; left: calc(100% + 5px); max-width: calc(100vw - 100px); }
-  #tablePanel { flex-basis: 42%; min-height: 120px; }
-  #tableBar { display: grid; grid-template-columns: minmax(0, 1fr) repeat(4, 28px); gap: 8px; align-items: center; }
-  #tableHeading { grid-column: 1; grid-row: 1; }
-  #tableTitle { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #tableActions { display: contents; }
-  #tableActions > button { grid-row: 1; width: 28px; padding: 0; }
-  #btnFilter { display: inline-flex; grid-column: 2; }
-  #btnUndo { grid-column: 3; }
-  #btnAddField { grid-column: 4; }
-  #btnBulkDelete { grid-column: 5; }
-  #tableActions .button-label { display: none; }
-  #filter { display: none; }
-  #pager { grid-column: 1 / -1; justify-self: end; margin-left: 0; }
+  #tablePanel { flex-basis: 42%; }
 }
 
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
@@ -575,7 +654,7 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
 :root[data-theme="dark"] #tableBar { background: rgba(36, 38, 41, .5); }
 :root[data-theme="dark"] table.attrs th { background: #2a2d32; }
 :root[data-theme="dark"] table.attrs :is(th.rn, td.rn) { background: #25272b; color: var(--muted); }
-:root[data-theme="dark"] table.attrs tbody tr:not(.sel):hover td:not(.rn) { background: #3a404a; }
+:root[data-theme="dark"] table.attrs tbody tr:not(.sel):hover td { background: #3a404a; }
 :root[data-theme="dark"] table.attrs .sort { color: #b6c7df; }
 :root[data-theme="dark"] table.attrs .x { color: #b8bdc6; }
 :root[data-theme="dark"] table.attrs tr.sel td { background: #2f4e72; }
@@ -604,6 +683,7 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
 }
 
 @media (prefers-reduced-motion: reduce) {
+  #layerList li.layer-dragging { scale: 1; }
   button, select, #sidebar, #layerList li, #splitter, table.attrs tbody tr, .toast, dialog[open],
   #map .leaflet-bar a, #map .leaflet-control-layers-toggle,
   #map .leaflet-control-layers-list, #map .leaflet-control-layers label,

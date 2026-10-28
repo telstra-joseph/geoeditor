@@ -121,6 +121,36 @@
         map.removeLayer(green);
         await paint();
       });
+      await test('Logical layer order survives selection, reordering and later additions', async () => {
+        const red = L.circleMarker([10, 0], { renderer, radius: 12, stroke: false, fillColor: '#ff0000', fillOpacity: 1 });
+        const green = L.circleMarker([10, 0], { renderer, radius: 12, stroke: false, fillColor: '#00ff00', fillOpacity: 1 });
+        const blue = L.circleMarker([10, 0], { renderer, radius: 12, stroke: false, fillColor: '#0000ff', fillOpacity: 1 });
+        red._glayer = { order: 2 };
+        green._glayer = blue._glayer = { order: 1 };
+        try {
+          red.addTo(map);
+          green.addTo(map);
+          await paint();
+          assert(pixel([10, 0])[0] > 200, 'Top logical layer is not drawn on top');
+          green.bringToFront();
+          blue.addTo(map);
+          await paint();
+          assert(pixel([10, 0])[0] > 200, 'Selection or new geometry escaped layer order');
+          red._glayer.order = 0;
+          renderer._layerOrderDirty = true;
+          red.redraw();
+          await paint();
+          assert(pixel([10, 0])[2] > 200, 'Changed layer order was not rendered');
+          assert(renderer._drawLast.layer === blue, 'Hit-test order differs from rendered order');
+          map.removeLayer(red);
+          red.addTo(map);
+          await paint();
+          assert(pixel([10, 0])[2] > 200, 'Re-added geometry escaped layer order');
+        } finally {
+          [red, green, blue].forEach(layer => map.removeLayer(layer));
+          await paint();
+        }
+      });
       await test('Batched additions build each new geometry only once', async () => {
         if (!renderer._gpu) return 'skip';
         const saved = renderer._graphic;

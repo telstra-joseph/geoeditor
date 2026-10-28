@@ -344,7 +344,7 @@
       if (!parts.length) { skipped++; return; }
       groups[fam].push({ parts, props: f.properties || {} });
     });
-    if (skipped) warnings.push(`${skipped} feature(s) with empty or invalid geometry were skipped.`);
+    if (skipped) warnings.push(`${skipped} ${skipped === 1 ? 'feature with empty or invalid geometry was' : 'features with empty or invalid geometry were'} skipped.`);
 
     const used = Object.keys(groups).filter((k) => groups[k].length);
     const suffix = { point: '_points', line: '_lines', polygon: '_polygons' };

@@ -114,6 +114,15 @@
         assert(dbf(out, `mixed_${suffix}.dbf`).count === 1, 'DBF records changed');
       });
       assert(out.warnings.length === 1, 'Skipped geometry warning lost');
+      assert(out.warnings[0] === '1 feature with empty or invalid geometry was skipped.', 'Single skipped feature uses incorrect grammar');
+    });
+    test('Skipped geometry warnings use zero, singular and plural forms', () => {
+      for (const count of [0, 1, 2]) {
+        const features = [point({}), ...Array.from({ length: count }, () => ({ properties: {}, geometry: null }))];
+        const out = ShapefileWriter.writeShapefiles('counts', features, [], {});
+        assert(out.warnings.length === (count ? 1 : 0), 'Incorrect warning count');
+        if (count) assert(out.warnings[0] === `${count} ${count === 1 ? 'feature with empty or invalid geometry was' : 'features with empty or invalid geometry were'} skipped.`, 'Incorrect skipped-feature plural form');
+      }
     });
     test('No attributes still generates an ID and excluded category fields are rejected', () => {
       const out = ShapefileWriter.writeShapefiles('id', [point({})], [], {});
@@ -499,6 +508,24 @@
       assert(enter.defaultPrevented, 'Enter in the bulk panel could submit the export form');
       button('Clear selection').click();
       assert(body.textContent.includes('0 of 4 selected') && button('Apply to selected').disabled, 'Clear selection failed');
+      filter.value = 'Alpha';
+      filter.dispatchEvent(new Event('input'));
+      button('Select shown').click();
+      size.value = '3';
+      size.dispatchEvent(new Event('input'));
+      button('Apply to selected').click();
+      assert(status.textContent === 'Updated 1 category.', 'Single-category update has incorrect plural form');
+      const copyFrom = body.querySelector('select[aria-label="Copy style from category"]');
+      copyFrom.value = '1';
+      button('Copy style to selected').click();
+      assert(status.textContent.startsWith('Copied the symbol to 1 category.'), 'Single-category copy has incorrect plural form');
+      button('Clear selection').click();
+      filter.value = 'ta';
+      filter.dispatchEvent(new Event('input'));
+      button('Select shown').click();
+      copyFrom.value = '0';
+      button('Copy style to selected').click();
+      assert(status.textContent.startsWith('Copied the symbol to 2 categories.'), 'Multi-category copy has incorrect plural form');
     });
     test('Bulk editor is only offered for categorized styles with several categories', () => {
       const single = QgisStyle.read(QgisStyle.singleStyle('point'));

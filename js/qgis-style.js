@@ -477,7 +477,7 @@
       applyRows.forEach((row) => { if (row.apply.checked) row.collect(spec); });
       try {
         const result = applyBulk(model, [...selected], spec);
-        finish(result, `Updated ${result.count} categories.`);
+        finish(result, `Updated ${result.count} ${result.count === 1 ? 'category' : 'categories'}.`);
       } catch (error) { fail(error); }
     });
     applyButton.className = 'primary';
@@ -498,7 +498,7 @@
     const copyButton = button('Copy style to selected', () => {
       try {
         const result = copySymbol(model, Number(copyFrom.value), [...selected]);
-        finish(result, `Copied the symbol to ${result.count} categories. Labels and visibility are unchanged.`);
+        finish(result, `Copied the symbol to ${result.count} ${result.count === 1 ? 'category' : 'categories'}. Labels and visibility are unchanged.`);
       } catch (error) { fail(error); }
     });
     const copyRow = el('div', 'qml-bulk-copy');

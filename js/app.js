@@ -218,7 +218,7 @@
           updateClear();
           clear.addEventListener('click', () => {
             input.value = '';
-            dlg.close('ok');
+            closeDialog(dlg, 'ok');
           });
           body.appendChild(clear);
         }
@@ -291,6 +291,10 @@
   map.getContainer().querySelector('.leaflet-control-zoom-out').replaceChildren(actionIcon('Minus'));
 
   const mobileControls = window.matchMedia('(max-width: 760px)');
+  const touchControls = window.matchMedia('(max-width: 1024px)');
+  let compactMapControls = touchControls.matches;
+  const resetMapToolbars = [];
+  map.getContainer().classList.toggle('compact-controls', compactMapControls);
   map.getContainer().querySelectorAll('.leaflet-pm-toolbar').forEach((toolbar) => {
     const tools = [...toolbar.children];
     let current = tools[0];
@@ -304,7 +308,7 @@
       suppressUntil = 0;
       toolbar.classList.remove('mobile-tools-open');
       tools.forEach(tool => tool.querySelector('.leaflet-buttons-control-button').removeAttribute('aria-expanded'));
-      if (mobileControls.matches) current.querySelector('.leaflet-buttons-control-button').setAttribute('aria-expanded', 'false');
+      if (compactMapControls) current.querySelector('.leaflet-buttons-control-button').setAttribute('aria-expanded', 'false');
     };
     const cancelHold = () => {
       clearTimeout(holdTimer);
@@ -315,7 +319,7 @@
       current.querySelector('.leaflet-buttons-control-button').setAttribute('aria-expanded', 'true');
     };
     toolbar.addEventListener('pointerdown', (event) => {
-      if (!mobileControls.matches || event.button !== 0) return;
+      if (!compactMapControls || event.button !== 0) return;
       const button = event.target.closest('.leaflet-buttons-control-button');
       if (!button || !current.contains(button)) return;
       cancelHold();
@@ -336,10 +340,10 @@
     toolbar.addEventListener('pointerleave', cancelHold);
     toolbar.addEventListener('pointercancel', () => { cancelHold(); closeTools(); });
     toolbar.addEventListener('contextmenu', (event) => {
-      if (mobileControls.matches) event.preventDefault();
+      if (compactMapControls) event.preventDefault();
     });
     toolbar.addEventListener('click', (event) => {
-      if (!mobileControls.matches) return;
+      if (!compactMapControls) return;
       const button = event.target.closest('.leaflet-buttons-control-button');
       if (!button) return;
       if (button === heldButton && performance.now() < suppressUntil) {
@@ -355,7 +359,7 @@
       closeTools();
     }, true);
     toolbar.addEventListener('keydown', (event) => {
-      if (!mobileControls.matches) return;
+      if (!compactMapControls) return;
       const button = event.target.closest('.leaflet-buttons-control-button');
       if (!button) return;
       if (event.key === 'ArrowDown') {
@@ -374,6 +378,7 @@
       if (!toolbar.contains(event.target)) { cancelHold(); closeTools(); }
     }, true);
     mobileControls.addEventListener('change', () => { cancelHold(); closeTools(); });
+    resetMapToolbars.push(() => { cancelHold(); closeTools(); });
     closeTools();
   });
 
@@ -473,11 +478,17 @@
     leaf._kmlLabelKey = labelKey;
     const text = document.createElement('span');
     text.textContent = name;
+    text.addEventListener('click', (event) => {
+      L.DomEvent.stopPropagation(event);
+      if (pmBusy()) return;
+      selectLeaf(leaf, { fromMap: true });
+      openPopup(leaf);
+    });
     if ([...name].length === 4) text.className = 'kml-label-outlined';
     text.style.color = style['label-color'] || '#ffffff';
     text.style.fontSize = `${fontSize}px`;
     const options = {
-      permanent: true, interactive: false, className: site ? 'kml-map-label kml-site-label' : 'kml-map-label',
+      permanent: true, interactive: true, className: site ? 'kml-map-label kml-site-label' : 'kml-map-label',
       direction: site ? 'top' : centered ? 'center' : 'right', offset: site ? L.point(0, -4) : L.point(centered ? 0 : 8, 0),
       opacity: alpha,
     };
@@ -660,6 +671,30 @@
       if (!lyr.displayed.has(leaf)) { lyr.displayed.add(leaf); map.addLayer(leaf); }
     });
     placeSiteLabels(lyr);
+    lyr.displayed.forEach(leaf => {
+      const label = leaf.getTooltip()?.getElement();
+      if (label) label.style.zIndex = String(lyr.order || 0);
+    });
+  }
+
+  function syncLayerOrder() {
+    const displayed = state.layers.filter(lyr => lyr.displayed.size > 0);
+    const orderChanged = displayed.some((lyr, index) => index > 0 && displayed[index - 1].order < lyr.order);
+    state.layers.forEach((lyr, index) => {
+      const order = state.layers.length - index;
+      if (lyr.order === order) return;
+      lyr.order = order;
+      lyr.displayed.forEach(leaf => {
+        const label = leaf.getTooltip()?.getElement();
+        if (label) label.style.zIndex = String(lyr.order);
+      });
+    });
+    if (!orderChanged) return;
+    vectorRenderer._layerOrderDirty = true;
+    if (vectorRenderer._map && vectorRenderer._drawFirst) {
+      vectorRenderer._redrawBounds = L.bounds(vectorRenderer._bounds.min, vectorRenderer._bounds.max);
+      vectorRenderer._requestRedraw(vectorRenderer._drawFirst.layer);
+    }
   }
 
   let displayRefreshTimer = null;
@@ -708,9 +743,12 @@
       state.selected = null;
       restyle(previous);
       map.closePopup();
-      renderTable();
     }
     syncLayerDisplay(lyr);
+    if (state.active === lyr) {
+      state.page = 0;
+      renderTable();
+    }
   }
 
   function restyle(leaf) {
@@ -790,6 +828,7 @@
     lyr.group.eachLayer((leaf) => wireLeaf(lyr, leaf));
     lyr.group.addTo(map);
     state.layers.push(lyr);
+    syncLayerOrder();
     return lyr;
   }
 
@@ -806,7 +845,8 @@
   }
 
   async function deleteLayer(lyr) {
-    if (!(await confirmBox('Delete layer', `Delete “${lyr.name}” and its ${leavesOf(lyr).length} feature(s)? Download it first if you need it.`, 'Delete', true))) return;
+    const count = leavesOf(lyr).length;
+    if (!(await confirmBox('Delete layer', `Delete “${lyr.name}” and its ${count} ${count === 1 ? 'feature' : 'features'}? Download it first if you need it.`, 'Delete', true))) return;
     map.removeLayer(lyr.group);
     state.layers = state.layers.filter((l) => l !== lyr);
     if (state.selected && state.selected._glayer === lyr) state.selected = null;
@@ -903,6 +943,17 @@
     if (fromMap || pan) scrollToSelectedRow();
   }
 
+  function descriptionText(value) {
+    if (typeof value === 'string') {
+      try {
+        const parsed = JSON.parse(value);
+        if (parsed?.['@type'] === 'html' && typeof parsed.value === 'string') return parsed.value;
+      } catch {}
+    }
+    if (value?.['@type'] === 'html' && typeof value.value === 'string') return value.value;
+    return display(value);
+  }
+
   function openPopup(leaf, latlng) {
     const lyr = leaf._glayer;
     const form = document.createElement('div');
@@ -910,6 +961,34 @@
     const h = document.createElement('h4');
     h.textContent = lyr.name;
     form.appendChild(h);
+    const properties = leaf.feature.properties;
+    const descriptionField = Object.keys(properties).find(field => field.toLowerCase() === 'description');
+    const popupWidth = descriptionField ? Math.min(320, Math.max(100, map.getSize().x - 64)) : 320;
+    if (descriptionField) {
+      form.classList.add('has-description');
+      form.style.width = `${popupWidth}px`;
+    }
+    const description = document.createElement('div');
+    description.className = 'feature-description';
+    const renderDescription = () => {
+      const value = descriptionText(descriptionField ? properties[descriptionField] : leaf.feature.style?.['description-html'] ?? '');
+      description.hidden = !value.trim();
+      if (globalThis.DOMPurify) {
+        description.replaceChildren(DOMPurify.sanitize(value, {
+          RETURN_DOM_FRAGMENT: true,
+          ALLOWED_TAGS: ['a', 'b', 'strong', 'i', 'em', 'u', 's', 'p', 'br', 'div', 'span', 'ul', 'ol', 'li', 'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'pre', 'code', 'hr', 'dl', 'dt', 'dd', 'sub', 'sup'],
+          ALLOWED_ATTR: ['href', 'title', 'colspan', 'rowspan'],
+          ALLOW_DATA_ATTR: false,
+          ALLOW_ARIA_ATTR: false,
+        }));
+        description.querySelectorAll('a').forEach(link => {
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+        });
+      } else description.textContent = value;
+    };
+    renderDescription();
+    form.appendChild(description);
     if (!lyr.fields.length) {
       const p = document.createElement('p');
       p.className = 'muted';
@@ -919,16 +998,23 @@
     lyr.fields.forEach((f) => {
       const label = document.createElement('label');
       label.append(f);
-      const input = document.createElement('input');
-      input.value = display(leaf.feature.properties[f]);
+      const input = document.createElement(f === descriptionField ? 'textarea' : 'input');
+      if (f === descriptionField) input.rows = 3;
+      input.value = f === descriptionField ? descriptionText(properties[f]) : display(properties[f]);
       input.addEventListener('change', () => {
-        if (!setValue(lyr, leaf, f, input.value)) input.value = display(leaf.feature.properties[f]);
-        else renderTable();
+        if (!setValue(lyr, leaf, f, input.value)) input.value = f === descriptionField ? descriptionText(properties[f]) : display(properties[f]);
+        else { renderDescription(); renderTable(); }
       });
       label.appendChild(input);
-      form.appendChild(label);
+      if (f === descriptionField) {
+        const editor = document.createElement('details');
+        const summary = document.createElement('summary');
+        summary.textContent = 'Edit description';
+        editor.append(summary, label);
+        form.appendChild(editor);
+      } else form.appendChild(label);
     });
-    L.popup({ maxWidth: 320 }).setLatLng(latlng || (leaf.getLatLng ? leaf.getLatLng() : leaf.getBounds().getCenter())).setContent(form).openOn(map);
+    L.popup({ maxWidth: popupWidth }).setLatLng(latlng || (leaf.getLatLng ? leaf.getLatLng() : leaf.getBounds().getCenter())).setContent(form).openOn(map);
   }
 
   /* ---------- drawing ---------- */
@@ -990,7 +1076,8 @@
       option.textContent = field;
       return option;
     }));
-    $('bulkDeleteScope').textContent = `All ${leavesOf(lyr).length} features in "${lyr.name}", across all pages. The table search filter is ignored.`;
+    const total = leavesOf(lyr).length;
+    $('bulkDeleteScope').textContent = `${total} ${total === 1 ? 'feature' : 'features'} in "${lyr.name}", across all pages. The table search filter is ignored.`;
     let matches = [];
     const updatePreview = () => {
       const field = $('bulkDeleteField').value;
@@ -1020,7 +1107,7 @@
         const matched = !empty && (membership ? values.includes(value) : values.some((v) => display(value).includes(v)));
         return op === 'not-in' || op === 'not-contains' ? !matched : matched;
       });
-      $('bulkDeletePreview').textContent = error || `${matches.length} features will be deleted; ${leavesOf(lyr).length - matches.length} will remain.`;
+      $('bulkDeletePreview').textContent = error || `${matches.length} ${matches.length === 1 ? 'feature' : 'features'} will be deleted; ${leavesOf(lyr).length - matches.length} will remain.`;
       $('bulkDeleteReview').disabled = !!error || !matches.length;
     };
     form.addEventListener('input', updatePreview);
@@ -1035,7 +1122,7 @@
     form.removeEventListener('input', updatePreview);
     form.removeEventListener('change', updatePreview);
     if (!review || !matches.length) return;
-    if (!(await confirmBox('Confirm bulk deletion', `Delete ${matches.length} features from "${lyr.name}"? ${leavesOf(lyr).length - matches.length} will remain. This cannot be undone.`, `Delete ${matches.length} features`, true))) return;
+    if (!(await confirmBox('Confirm bulk deletion', `Delete ${matches.length} ${matches.length === 1 ? 'feature' : 'features'} from "${lyr.name}"? ${leavesOf(lyr).length - matches.length} will remain. This cannot be undone.`, `Delete ${matches.length} ${matches.length === 1 ? 'feature' : 'features'}`, true))) return;
     matches.forEach((leaf) => {
       if (state.selected === leaf) {
         state.selected = null;
@@ -1046,7 +1133,7 @@
     state.page = 0;
     renderLayers();
     renderTable();
-    toast(`Deleted ${matches.length} features from "${lyr.name}".`);
+    toast(`Deleted ${matches.length} ${matches.length === 1 ? 'feature' : 'features'} from "${lyr.name}".`);
   }
 
   /* ---------- fields ---------- */
@@ -1262,12 +1349,156 @@
     return svg;
   }
 
+  function layerRowPositions() {
+    return new Map([...$('layerList').children].map(row => [row.dataset.layerId, row.getBoundingClientRect()]));
+  }
+
+  function reorderLayer(lyr, target, after, previousPositions = layerRowPositions()) {
+    if (lyr === target || !state.layers.includes(lyr) || !state.layers.includes(target)) return;
+    state.layers.splice(state.layers.indexOf(lyr), 1);
+    state.layers.splice(state.layers.indexOf(target) + (after ? 1 : 0), 0, lyr);
+    syncLayerOrder();
+    const list = $('layerList');
+    const row = list.querySelector(`[data-layer-id="${lyr.id}"]`);
+    const next = state.layers[state.layers.indexOf(lyr) + 1];
+    list.insertBefore(row, next ? list.querySelector(`[data-layer-id="${next.id}"]`) : null);
+    const rows = [...list.children];
+    rows.forEach(item => item.getAnimations().forEach(animation => {
+      if (animation.id === 'layer-reorder' || animation.transitionProperty === 'transform') animation.cancel();
+    }));
+    if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      const currentPositions = layerRowPositions();
+      rows.forEach(item => {
+        const previous = previousPositions.get(item.dataset.layerId);
+        if (!previous) return;
+        const current = currentPositions.get(item.dataset.layerId);
+        const distance = previous.top - current.top;
+        if (Math.abs(distance) < 1) return;
+        item.animate([
+          { transform: `translateY(${distance}px)` },
+          { transform: 'translateY(0)' },
+        ], { id: 'layer-reorder', duration: 200, easing: 'cubic-bezier(.22, 1, .36, 1)' });
+      });
+    }
+  }
+
+  function layerReorderHandle(lyr, row) {
+    const handle = iconButton('GripVertical', `Reorder layer ${lyr.name}`, () => {});
+    handle.className = 'layer-reorder';
+    handle.title = 'Drag to reorder layer; Arrow Up or Down to move';
+    handle.setAttribute('aria-keyshortcuts', 'ArrowUp ArrowDown');
+    let drag = null;
+    let dragFrame = null;
+    const clearIndicators = () => {
+      drag?.indicator?.classList.remove('drop-before', 'drop-after');
+      if (drag) drag.indicator = null;
+    };
+    const cancelDrag = () => {
+      if (dragFrame !== null) cancelAnimationFrame(dragFrame);
+      dragFrame = null;
+      if (!drag) return;
+      clearIndicators();
+      row.classList.remove('layer-dragging');
+      drag.positions.forEach(item => { item.row.style.transform = ''; });
+      drag = null;
+    };
+    const updateDrag = () => {
+      dragFrame = null;
+      if (!drag?.moved) return;
+      const sidebar = $('sidebar');
+      const scrollTop = sidebar.scrollTop;
+      const scrollOffset = scrollTop - drag.scrollTop;
+      const hovered = drag.positions.find(item => drag.clientY >= item.bounds.top - scrollOffset &&
+        drag.clientY <= item.bounds.bottom - scrollOffset && drag.clientX >= item.bounds.left && drag.clientX <= item.bounds.right);
+      const target = hovered?.row;
+      drag.target = hovered?.layer;
+      drag.after = Boolean(hovered && drag.clientY > hovered.bounds.top - scrollOffset + hovered.bounds.height / 2);
+      const destination = !hovered || target === row ? drag.sourceIndex :
+        hovered.index + (drag.after ? 1 : 0) - (drag.sourceIndex < hovered.index ? 1 : 0);
+      const indicator = target && target !== row ? target : null;
+      const indicatorClass = drag.after ? 'drop-after' : 'drop-before';
+      row.classList.add('layer-dragging');
+      row.style.transform = `translateY(${drag.clientY - drag.startY + scrollOffset}px)`;
+      if (drag.indicator !== indicator || drag.indicatorClass !== indicatorClass) {
+        clearIndicators();
+        indicator?.classList.add(indicatorClass);
+        drag.indicator = indicator;
+        drag.indicatorClass = indicatorClass;
+      }
+      if (destination !== drag.destination) {
+        drag.positions.forEach((item, index) => {
+          if (item.row === row) return;
+          const shift = index > drag.sourceIndex && index <= destination ? -drag.gap :
+            index >= destination && index < drag.sourceIndex ? drag.gap : 0;
+          item.row.style.transform = shift ? `translateY(${shift}px)` : '';
+        });
+        drag.destination = destination;
+      }
+      const direction = drag.clientY < drag.sidebarBounds.top + 32 ? -1 : drag.clientY > drag.sidebarBounds.bottom - 32 ? 1 : 0;
+      const nextScroll = Math.min(drag.maxScroll, Math.max(0, scrollTop + direction * 12));
+      if (nextScroll !== scrollTop) {
+        sidebar.scrollTop = nextScroll;
+        dragFrame = requestAnimationFrame(updateDrag);
+      }
+    };
+    handle.addEventListener('pointerdown', event => {
+      if (event.button !== 0 || !event.isPrimary) return;
+      event.preventDefault();
+      handle.focus();
+      const sidebar = $('sidebar');
+      const layers = new Map(state.layers.map(layer => [String(layer.id), layer]));
+      const positions = [...$('layerList').children].map((item, index) => ({
+        row: item, bounds: item.getBoundingClientRect(), layer: layers.get(item.dataset.layerId), index,
+      }));
+      const sourceIndex = positions.findIndex(item => item.row === row);
+      drag = {
+        startY: event.clientY, clientX: event.clientX, clientY: event.clientY,
+        target: null, after: false, moved: false, sourceIndex, destination: sourceIndex,
+        scrollTop: sidebar.scrollTop, sidebarBounds: sidebar.getBoundingClientRect(),
+        maxScroll: Math.max(0, sidebar.scrollHeight - sidebar.clientHeight), positions,
+        gap: positions[sourceIndex].bounds.height + parseFloat(getComputedStyle(row).marginBottom),
+      };
+      handle.setPointerCapture(event.pointerId);
+    });
+    handle.addEventListener('pointermove', event => {
+      if (!drag || (!drag.moved && Math.abs(event.clientY - drag.startY) < 5)) return;
+      drag.moved = true;
+      drag.clientX = event.clientX;
+      drag.clientY = event.clientY;
+      if (dragFrame === null) dragFrame = requestAnimationFrame(updateDrag);
+    });
+    handle.addEventListener('pointerup', () => {
+      if (dragFrame !== null) {
+        cancelAnimationFrame(dragFrame);
+        updateDrag();
+      }
+      const completed = drag;
+      const positions = layerRowPositions();
+      cancelDrag();
+      if (completed?.moved && completed.target) reorderLayer(lyr, completed.target, completed.after, positions);
+    });
+    handle.addEventListener('pointercancel', cancelDrag);
+    handle.addEventListener('lostpointercapture', cancelDrag);
+    handle.addEventListener('keydown', event => {
+      if (event.key === 'Escape') { cancelDrag(); return; }
+      if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+      event.preventDefault();
+      const direction = event.key === 'ArrowUp' ? -1 : 1;
+      const target = state.layers[state.layers.indexOf(lyr) + direction];
+      if (!target) return;
+      reorderLayer(lyr, target, direction > 0);
+      $('layerList').querySelector(`[data-layer-id="${lyr.id}"] .layer-reorder`).focus();
+    });
+    return handle;
+  }
+
   function renderLayers() {
     const ul = $('layerList');
     ul.replaceChildren();
     state.layers.forEach((lyr) => {
       syncLayerDisplay(lyr);
       const li = document.createElement('li');
+      li.dataset.layerId = String(lyr.id);
       if (lyr === state.active) li.classList.add('active');
       li.addEventListener('click', () => setActive(lyr));
 
@@ -1308,8 +1539,9 @@
       const sp = document.createElement('span');
       sp.className = 'spacer';
       const downloadButton = iconButton('Download', 'Download this layer', () => downloadLayers([lyr]));
-      meta.append(
-        info, sp,
+      const actions = document.createElement('div');
+      actions.className = 'layer-actions';
+      actions.append(
         iconButton('Pencil', 'Rename layer', async () => {
           const r = await askForm('Rename layer', [{ key: 'name', label: 'Layer name', value: lyr.name, required: true }], { okLabel: 'Rename' });
           if (r && r.name.trim()) { lyr.name = r.name.trim(); renderLayers(); renderTable(); }
@@ -1318,7 +1550,8 @@
         downloadButton,
         iconButton('Trash2', 'Delete layer', () => deleteLayer(lyr))
       );
-      li.append(vis, color, name, meta);
+      meta.append(info, sp, actions);
+      li.append(layerReorderHandle(lyr, li), vis, color, name, meta);
       if (lyr.kmlFolders.length) li.appendChild(renderKmlFolders(lyr));
       ul.appendChild(li);
     });
@@ -1386,7 +1619,13 @@
   }
 
   function filteredLeaves(lyr) {
-    const all = leavesOf(lyr);
+    let all = leavesOf(lyr);
+    if (lyr.kmlFolders.some(folder => folder.visible)) {
+      all = all.filter(leaf => {
+        const folderIds = leaf.feature?.kml?.folderIds || [];
+        return folderIds.length > 0 && folderIds.every(id => lyr.kmlFolderMap.get(id)?.visible !== false);
+      });
+    }
     const q = state.filter.trim().toLowerCase();
     if (!q) return all;
     return all.filter((leaf) => lyr.fields.some((f) => display(leaf.feature.properties[f]).toLowerCase().includes(q)));
@@ -1462,7 +1701,7 @@
     const resizeColumn = (index, width) => {
       sizes[index] = Math.max(MIN_COLUMN_WIDTH, Math.round(width));
       columns[index].style.width = `${sizes[index]}px`;
-      table.style.width = `${sizes.reduce((total, size) => total + size, 0)}px`;
+      table.style.width = `calc(var(--geometry-column-width) + ${sizes.slice(1).reduce((total, size) => total + size, 0)}px)`;
       savedWidths.set(lyr.fields[index - 2], sizes[index]);
       table.tHead.rows[0].cells[index].querySelector('.column-resizer').setAttribute('aria-valuenow', sizes[index]);
     };
@@ -1613,12 +1852,12 @@
       });
     });
     wrap.appendChild(table);
-    sizes = [...thead.cells].map((cell, index) => index === 0 ? 112 : index === 1
+    sizes = [...thead.cells].map((cell, index) => index === 0 ? parseFloat(getComputedStyle(previewHeader).minWidth) : index === 1
       ? Math.max(40, String(items.length).length * 10 + 16)
       : savedWidths.get(lyr.fields[index - 2]) || Math.max(MIN_COLUMN_WIDTH, cell.getBoundingClientRect().width));
-    columns.forEach((column, index) => { column.style.width = `${sizes[index]}px`; });
+    columns.forEach((column, index) => { column.style.width = index === 0 ? 'var(--geometry-column-width)' : `${sizes[index]}px`; });
     table.style.tableLayout = 'fixed';
-    table.style.width = `${sizes.reduce((total, size) => total + size, 0)}px`;
+    table.style.width = `calc(var(--geometry-column-width) + ${sizes.slice(1).reduce((total, size) => total + size, 0)}px)`;
     lyr.fields.forEach((field, index) => {
       savedWidths.set(field, sizes[index + 2]);
       thead.cells[index + 2].querySelector('.column-resizer').setAttribute('aria-valuenow', sizes[index + 2]);
@@ -1658,6 +1897,7 @@
   }
 
   function startImportProgress(files) {
+    document.querySelector('.import-progress-title').textContent = files.length > 1 ? 'Adding layers' : 'Adding layer';
     const controller = new AbortController();
     const button = $('btnCancelImport');
     const cancel = () => controller.abort();
@@ -1750,10 +1990,10 @@
     L.PM.reInitLayer(lyr.group);
     scheduleMapDisplay();
     const notes = [];
-    if (prep.split) notes.push(`${prep.split} multi-part geometry collection(s) were split into separate features`);
-    if (prep.skipped) notes.push(`${prep.skipped} feature(s) without geometry were skipped`);
+    if (prep.split) notes.push(`${prep.split} multi-part geometry ${prep.split === 1 ? 'collection was' : 'collections were'} split into separate features`);
+    if (prep.skipped) notes.push(`${prep.skipped} ${prep.skipped === 1 ? 'feature without geometry was' : 'features without geometry were'} skipped`);
     const count = prep.count ?? prep.features.length;
-    toast(`Loaded “${lyr.name}” (${count} features)` + (notes.length ? ' – ' + notes.join('; ') : ''));
+    toast(`Loaded “${lyr.name}” (${count} ${count === 1 ? 'feature' : 'features'})` + (notes.length ? ' – ' + notes.join('; ') : ''));
   }
 
   function parseKmlCollection(text, fallbackName) {
@@ -1944,7 +2184,7 @@
         context.layers.clear();
         const shpFile = loose.find(file => /\.shp$/i.test(file.name));
         const report = (fraction, stage) => {
-          progress.update(rest.length, `${shpFile ? shpFile.name : 'Shapefile parts'} (+${loose.length - 1} supporting files)`, fraction, stage, loose.length);
+          progress.update(rest.length, `${shpFile ? shpFile.name : 'Shapefile parts'} (+${loose.length - 1} supporting ${loose.length === 2 ? 'file' : 'files'})`, fraction, stage, loose.length);
         };
         report(0, 'Packing shapefile parts');
         await paintImport(context.signal);
@@ -2060,7 +2300,7 @@
           input.disabled = category.value === String(i);
           if (input.disabled) input.checked = true;
         });
-        $('shapefileExportSummary').textContent = `${checkboxes.filter((input) => input.checked).length} of ${lyr.fields.length} attribute columns selected.`;
+        $('shapefileExportSummary').textContent = `${checkboxes.filter((input) => input.checked).length} of ${lyr.fields.length} attribute ${lyr.fields.length === 1 ? 'column' : 'columns'} selected.`;
         revision++;
         const field = selectedField();
         try {
@@ -2128,7 +2368,7 @@
           models[index] = model;
           renderStyles();
           styleStatus.className = '';
-          styleStatus.textContent = `Imported symbol appearance from "${file.name}" for ${model.entries.length} categories. Other geometry styles are unchanged; extra imported categories and non-symbol layer settings are not copied.`;
+          styleStatus.textContent = `Imported symbol appearance from "${file.name}" for ${model.entries.length} ${model.entries.length === 1 ? 'category' : 'categories'}. Other geometry styles are unchanged; extra imported categories and non-symbol layer settings are not copied.`;
           updateStyleVisibility();
         } catch (error) {
           if (!closed) {
@@ -2345,15 +2585,31 @@
   }
 
   /* ---------- UI wiring ---------- */
+  async function closeDialog(dialog, returnValue) {
+    if (!dialog.open || dialog.classList.contains('closing')) return;
+    if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      dialog.classList.add('closing');
+      await Promise.all(dialog.getAnimations().map(animation => animation.finished.catch(() => {})));
+    }
+    dialog.classList.remove('closing');
+    dialog.close(returnValue);
+  }
+
+  document.querySelectorAll('dialog').forEach(dialog => {
+    dialog.addEventListener('submit', event => {
+      if (event.defaultPrevented || event.target.method !== 'dialog') return;
+      event.preventDefault();
+      closeDialog(dialog, event.submitter?.value ?? '');
+    });
+    dialog.addEventListener('cancel', event => {
+      event.preventDefault();
+      closeDialog(dialog);
+    });
+  });
+
   $('btnAbout').addEventListener('click', () => {
     $('aboutDlg').showModal();
     $('aboutTitle').focus({ preventScroll: true });
-  });
-  $('aboutDlg').addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      $('aboutDlg').close();
-    }
   });
   const openFilePicker = () => $('fileInput').click();
   $('btnUpload').addEventListener('click', openFilePicker);
@@ -2463,6 +2719,17 @@
     $('main').style.setProperty('--panel-bottom', `${main.bottom - table.top + 6}px`);
     const visibleWidth = main.width - (stacked ? 0 : sidebar.width);
     const visibleHeight = table.top - main.top - (stacked ? sidebar.height : 0) - 6;
+    const controlsHeight = Math.max(32, visibleHeight - 4);
+    map.getContainer().style.setProperty('--map-controls-height', `${controlsHeight}px`);
+    const topLeft = map.getContainer().querySelector('.leaflet-top.leaflet-left');
+    const expandedHeight = [...topLeft.children].reduce((height, control) => height + 10 +
+      (control.matches('.leaflet-pm-toolbar') ? control.children.length * 32 + 2 : control.getBoundingClientRect().height), 0);
+    const compact = touchControls.matches || expandedHeight + 20 > controlsHeight;
+    if (compact !== compactMapControls) {
+      compactMapControls = compact;
+      map.getContainer().classList.toggle('compact-controls', compact);
+      resetMapToolbars.forEach(reset => reset());
+    }
     const scalePosition = visibleWidth < 800 || visibleHeight < 440 ? 'bottomright' : 'bottomleft';
     if (scaleControl.getPosition() !== scalePosition) scaleControl.setPosition(scalePosition);
     if (initialMapViewPending) {

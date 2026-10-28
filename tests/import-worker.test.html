@@ -204,6 +204,367 @@
         letter.setLatLng([-34.9, 149.1]);
         assert(letter.getTooltip().getLatLng().equals(letter.getLatLng()), 'Label did not follow edited point');
       }));
+      await test('Table follows visible folders and shows all rows when no folders are checked', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        await app.handleFiles([new File([groupedKml], 'grouped-table.kml')]);
+        const layer = app.state.active;
+        const inputs = [...doc.querySelectorAll('.kml-folder-row input[type=checkbox]')];
+        const names = () => [...doc.querySelectorAll('table.attrs tbody tr')].map(row => row.querySelector('input').value);
+        const visible = (index, checked) => { if (inputs[index].checked !== checked) inputs[index].click(); };
+        assert(names().join() === 'Footprint,B,1,1', 'Initial table includes hidden or ungrouped features');
+        assert(doc.getElementById('tableCount').textContent === '4 of 7 features', 'Visible group count incorrect');
+        visible(1, false);
+        assert(names().join() === 'Footprint', 'Hidden nested group still has table rows');
+        visible(0, false);
+        assert(names().length === 0, 'Selected empty group should have no rows');
+        visible(3, false);
+        assert(names().length === 7 && names().includes('A') && names().includes('E'), 'No checked groups should show all rows, including ungrouped features');
+        app.state.page = 2;
+        visible(2, true);
+        assert(names().join() === 'F' && app.state.page === 0, 'Single selected group or page reset failed');
+        visible(0, true);
+        assert(names().join() === 'Footprint,F', 'Multiple visible groups were not combined');
+        visible(1, true);
+        assert(names().join() === 'Footprint,B,1,1,F', 'Nested group rows were not restored');
+        visible(0, false);
+        assert(names().join() === 'F', 'Checked child bypasses its hidden parent');
+        visible(0, true);
+        const search = doc.getElementById('filter');
+        search.value = 'Footprint';
+        search.dispatchEvent(new host.Event('input', { bubbles: true }));
+        assert(names().join() === 'Footprint', 'Text search did not combine with group filtering');
+        visible(0, false);
+        assert(names().length === 0, 'Text search leaked rows from a hidden group');
+        search.value = '';
+        search.dispatchEvent(new host.Event('input', { bubbles: true }));
+        assert(names().join() === 'F', 'Clearing search lost group filtering');
+        inputs.forEach(input => { if (input.checked) input.click(); });
+        assert(names().length === 7 && layer.group.getLayers().length === 7, 'Filtering removed features or failed to restore all rows');
+        await app.handleFiles([jsonFile(collection([point({ name: 'Plain one' }), point({ name: 'Plain two' })]), 'plain-table.geojson')]);
+        assert(names().join() === 'Plain one,Plain two', 'Ungrouped uploads no longer show all rows');
+      }));
+      await test('Count messages use singular and plural forms across import, delete and export', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        const closeWith = async (dialog, value) => {
+          const closed = new Promise(resolve => dialog.addEventListener('close', resolve, { once: true }));
+          dialog.querySelector(`button[value="${value}"]`).click();
+          dialog.getAnimations().forEach(animation => animation.finish());
+          await closed;
+        };
+        for (const count of [1, 2]) {
+          const noun = count === 1 ? 'feature' : 'features';
+          const features = Array.from({ length: count }, (_, id) => point(count === 1 ? { id } : { id, name: `Feature ${id}` }));
+          await app.handleFiles([jsonFile(collection(features), `count-${count}.geojson`)]);
+          assert(doc.getElementById('toasts').lastElementChild.textContent.includes(`(${count} ${noun})`), 'Import notification has incorrect plural form');
+          doc.getElementById('fmt').value = 'shp';
+          const exporting = app.downloadLayers([app.state.active]);
+          await new Promise(resolve => host.setTimeout(resolve, 0));
+          assert(doc.getElementById('shapefileExportSummary').textContent === `${count} of ${count} attribute ${count === 1 ? 'column' : 'columns'} selected.`, 'Export column count has incorrect plural form');
+          await closeWith(doc.getElementById('shapefileExportDlg'), 'cancel');
+          await exporting;
+          doc.getElementById('btnBulkDelete').click();
+          assert(doc.getElementById('bulkDeleteScope').textContent.startsWith(`${count} ${noun} in`), 'Deletion scope has incorrect plural form');
+          const operator = doc.getElementById('bulkDeleteOperator');
+          operator.value = 'not-empty';
+          operator.dispatchEvent(new host.Event('change', { bubbles: true }));
+          assert(doc.getElementById('bulkDeletePreview').textContent.startsWith(`${count} ${noun} will be deleted`), 'Deletion preview has incorrect plural form');
+          await closeWith(doc.getElementById('bulkDeleteDlg'), 'ok');
+          const confirmation = doc.getElementById('dlg');
+          assert(confirmation.textContent.includes(`Delete ${count} ${noun}`), 'Deletion confirmation has incorrect plural form');
+          await closeWith(confirmation, 'ok');
+          await new Promise(resolve => host.setTimeout(resolve, 0));
+          assert(doc.getElementById('toasts').lastElementChild.textContent.startsWith(`Deleted ${count} ${noun} from`), 'Deletion notification has incorrect plural form');
+          assert(doc.getElementById('tableCount').textContent === '0 features', 'Zero count is not plural');
+          const split = Array.from({ length: count }, () => ({ type: 'Feature', properties: {}, geometry: { type: 'GeometryCollection', geometries: [point().geometry, point().geometry] } }));
+          const skipped = Array.from({ length: count }, () => ({ type: 'Feature', properties: {}, geometry: null }));
+          await app.handleFiles([jsonFile(collection([...split, ...skipped]), `notes-${count}.geojson`)]);
+          const notification = doc.getElementById('toasts').lastElementChild.textContent;
+          assert(notification.includes(`${count} multi-part geometry ${count === 1 ? 'collection was' : 'collections were'} split`), 'Split note has incorrect noun or verb');
+          assert(notification.includes(`${count} ${count === 1 ? 'feature without geometry was' : 'features without geometry were'} skipped`), 'Skip note has incorrect noun or verb');
+        }
+        await app.handleFiles([jsonFile(collection([point({ id: 1 })]), 'delete-one.geojson')]);
+        doc.querySelector(`[data-layer-id="${app.state.active.id}"] button[aria-label="Delete layer"]`).click();
+        assert(doc.getElementById('dlg').textContent.includes('1 feature?'), 'Layer deletion prompt has incorrect singular form');
+        await closeWith(doc.getElementById('dlg'), 'cancel');
+      }));
+      await test('Layer handles reorder the map while preserving selection and data', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        await app.handleFiles(['First', 'Second', 'Third'].map(name => jsonFile(collection([point({ name })]), `${name}.geojson`)));
+        const [first, second, third] = app.state.layers;
+        doc.querySelector(`[data-layer-id="${first.id}"] .lname`).click();
+        const handle = doc.querySelector(`[data-layer-id="${second.id}"] .layer-reorder`);
+        assert(host.getComputedStyle(handle).touchAction === 'none', 'Layer drag handle does not support touch dragging');
+        assert(host.getComputedStyle(handle.closest('li')).transitionProperty.includes('transform'), 'Layer rows do not animate position changes');
+        handle.dispatchEvent(new host.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+        assert(app.state.layers.map(layer => layer.name).join() === 'Second,First,Third', 'Keyboard reorder did not change layer order');
+        assert(app.state.active === first && doc.activeElement.classList.contains('layer-reorder'), 'Reorder lost active layer or keyboard focus');
+        const settlingAnimations = () => [...doc.querySelectorAll('#layerList > li')].flatMap(row => row.getAnimations())
+          .filter(animation => animation.effect.getKeyframes().some(frame => frame.transform?.startsWith('translateY')));
+        assert(settlingAnimations().length > 0, 'Reordered layers do not settle with an animation');
+        const renderer = first.group.getLayers()[0].options.renderer;
+        const checkOrder = () => {
+          host.L.Util.cancelAnimFrame(renderer._redrawRequest);
+          renderer._redraw();
+          const paths = [];
+          for (let path = renderer._drawFirst; path; path = path.next) paths.push(path.layer);
+          assert(paths.map(leaf => leaf._glayer.name).join() === 'Third,First,Second', 'Map stacking differs from list order');
+          if (renderer._gpu) assert(paths.every((leaf, index) => renderer._stage.children[index] === renderer._graphics.get(host.L.stamp(leaf))), 'GPU stacking differs from hit-test order');
+        };
+        checkOrder();
+        third.group.getLayers()[0].fire('click', { latlng: host.L.latLng(-35, 149) });
+        app.map.closePopup();
+        checkOrder();
+        const visible = doc.querySelector(`[data-layer-id="${second.id}"] > input[type="checkbox"]`);
+        visible.click();
+        visible.click();
+        checkOrder();
+        app.map.setView([-35, 149], 8, { animate: false });
+        await new Promise(resolve => host.setTimeout(resolve, 80));
+        checkOrder();
+        assert(app.state.layers.every(layer => layer.group.toGeoJSON().features.length === 1), 'Reordering discarded feature data');
+        const matchMedia = host.matchMedia;
+        host.matchMedia = query => query === '(prefers-reduced-motion: reduce)' ? { matches: true } : matchMedia.call(host, query);
+        try {
+          doc.querySelector(`[data-layer-id="${second.id}"] .layer-reorder`).dispatchEvent(new host.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+          assert(app.state.layers.map(layer => layer.name).join() === 'First,Second,Third', 'Reduced-motion reorder did not work');
+          assert(settlingAnimations().length === 0, 'Reduced-motion reorder still animated');
+        } finally { host.matchMedia = matchMedia; }
+      }));
+      await test('Reordering large hidden layers reuses rows and coalesces drag work', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        await app.handleFiles([
+          jsonFile(collection(Array.from({ length: 5001 }, (_, id) => point({ id }))), 'Large.geojson'),
+          jsonFile(collection([point()]), 'VisibleA.geojson'), jsonFile(collection([point()]), 'VisibleB.geojson'),
+        ]);
+        const [large, visibleA, visibleB] = app.state.layers;
+        doc.querySelector(`[data-layer-id="${large.id}"] > input[type="checkbox"]`).click();
+        const rows = [...doc.querySelectorAll('#layerList > li')];
+        const renderer = visibleA.group.getLayers()[0].options.renderer;
+        const redraw = renderer._requestRedraw;
+        const groups = app.state.layers.map(layer => [layer.group, layer.group.getLayers]);
+        let scans = 0;
+        let redraws = 0;
+        groups.forEach(([group, original]) => { group.getLayers = function() { scans++; return original.call(this); }; });
+        renderer._requestRedraw = function(...args) { redraws++; return redraw.apply(this, args); };
+        try {
+          doc.querySelector(`[data-layer-id="${large.id}"] .layer-reorder`).dispatchEvent(new host.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+          assert(scans === 0 && redraws === 0, 'Moving a hidden layer scanned features or repainted the map');
+          assert(rows.every(row => row.isConnected), 'Reordering rebuilt sidebar rows');
+          rows.forEach(row => row.getAnimations().forEach(animation => animation.finish()));
+          const handle = doc.querySelector(`[data-layer-id="${visibleB.id}"] .layer-reorder`);
+          const source = handle.getBoundingClientRect();
+          const target = doc.querySelector(`[data-layer-id="${visibleA.id}"]`).getBoundingClientRect();
+          const capture = handle.setPointerCapture;
+          const request = host.requestAnimationFrame;
+          const cancel = host.cancelAnimationFrame;
+          const measured = [...rows, doc.getElementById('sidebar')].map(element => [element, element.getBoundingClientRect]);
+          let requests = 0;
+          let frame;
+          let layoutReads = 0;
+          handle.setPointerCapture = () => {};
+          host.requestAnimationFrame = callback => { requests++; frame = callback; return 1; };
+          host.cancelAnimationFrame = () => { frame = null; };
+          try {
+            handle.dispatchEvent(new host.PointerEvent('pointerdown', { button: 0, isPrimary: true, clientX: source.left + 5, clientY: source.top + 5, bubbles: true }));
+            measured.forEach(([element, original]) => { element.getBoundingClientRect = function() { layoutReads++; return original.call(this); }; });
+            for (let index = 0; index < 100; index++) {
+              handle.dispatchEvent(new host.PointerEvent('pointermove', { clientX: target.left + 16, clientY: target.top + 5, bubbles: true }));
+            }
+            assert(requests === 1, 'Pointer events were not coalesced into one animation frame');
+            frame();
+            assert(layoutReads === 0 && scans === 0, 'Drag preview reads live row geometry or scans features');
+            handle.dispatchEvent(new host.PointerEvent('pointerup', { bubbles: true }));
+            assert(app.state.layers.map(layer => layer.name).join() === 'VisibleB,VisibleA,Large', 'Coalesced drag lost the final drop position');
+            assert(scans === 0 && redraws === 1, 'Visible reorder rescanned features or requested multiple redraws');
+            assert(rows.every(row => row.isConnected), 'Dropping rebuilt sidebar rows');
+          } finally {
+            handle.dispatchEvent(new host.PointerEvent('pointercancel'));
+            handle.setPointerCapture = capture;
+            host.requestAnimationFrame = request;
+            host.cancelAnimationFrame = cancel;
+            measured.forEach(([element, original]) => { element.getBoundingClientRect = original; });
+          }
+        } finally {
+          renderer._requestRedraw = redraw;
+          groups.forEach(([group, original]) => { group.getLayers = original; });
+        }
+      }));
+      await test('Map controls fit above the table across viewport and panel sizes', () => withEditor(async (host, doc) => {
+        const mapElement = doc.getElementById('map');
+        const tablePanel = doc.getElementById('tablePanel');
+        for (const [width, height, tableSize, compact] of [
+          [1200, 800, '38%', false], [1024, 500, '38%', true],
+          [844, 320, '38%', true], [390, 720, '42%', true],
+          [320, 320, '42%', true], [1200, 800, '600px', true],
+          [1200, 800, '38%', false],
+        ]) {
+          host.frameElement.style.width = `${width}px`;
+          host.frameElement.style.height = `${height}px`;
+          tablePanel.style.flexBasis = tableSize;
+          await new Promise(resolve => host.setTimeout(resolve, 100));
+          const tableTop = doc.getElementById('splitter').getBoundingClientRect().top;
+          const cornerElement = doc.querySelector('.leaflet-top.leaflet-left');
+          const corner = cornerElement.getBoundingClientRect();
+          assert(mapElement.classList.contains('compact-controls') === compact, `Incorrect compact mode at ${width}x${height}, table ${tableSize}`);
+          assert(corner.bottom <= tableTop + 1, `Map controls are covered at ${width}x${height}`);
+          if (compact) {
+            const style = host.getComputedStyle(cornerElement);
+            assert(style.overflowX === 'visible' && style.overflowY === 'visible', 'Compact map controls create a scroll container');
+            assert(cornerElement.offsetWidth === cornerElement.clientWidth && cornerElement.offsetHeight === cornerElement.clientHeight, 'Compact map controls show scrollbars');
+            for (const button of doc.querySelectorAll('.leaflet-pm-toolbar .mobile-tool-current > a')) {
+              const rect = button.getBoundingClientRect();
+              assert(rect.top >= corner.top && rect.bottom <= corner.bottom + 1, 'Collapsed tool is clipped');
+            }
+          }
+          const basemap = doc.querySelector('.leaflet-control-layers');
+          basemap.classList.add('leaflet-control-layers-expanded');
+          const menu = basemap.querySelector('.leaflet-control-layers-list').getBoundingClientRect();
+          assert(menu.bottom <= tableTop + 1, `Basemap menu is covered at ${width}x${height}`);
+          basemap.classList.remove('leaflet-control-layers-expanded');
+        }
+      }));
+      await test('Phone and tablet controls scale text, previews and targets without changing desktop sizes', () => withEditor(async (host, doc) => {
+        await host.__geoEditor.handleFiles([new File([groupedKml], 'touch-targets.kml')]);
+        assert(!doc.querySelector('.layer-reorder').getBoundingClientRect().width, 'Single-layer reorder handle is visible');
+        assert(host.getComputedStyle(doc.querySelector('#layerList > li')).gridTemplateColumns.split(' ').length === 3, 'Hidden handle leaves an empty grid column');
+        for (const width of [320, 390, 760, 768, 820, 1024, 1200, 820, 390]) {
+          host.frameElement.style.width = `${width}px`;
+          host.frameElement.style.height = '800px';
+          await new Promise(resolve => host.setTimeout(resolve, 100));
+          const mobile = width <= 1024;
+          const expected = mobile ? 188 : 112;
+          const preview = doc.querySelector('table.attrs td.geometry-cell');
+          assert(Math.abs(preview.getBoundingClientRect().width - expected) < 1, 'Action column width does not follow mobile mode');
+          assert(parseFloat(host.getComputedStyle(doc.querySelector('table.attrs td.rn')).left) === expected, 'Sticky row numbers use the wrong action column offset');
+          if (mobile) {
+            assert(host.getComputedStyle(doc.body).fontSize === '16px', 'Touch text remains too small');
+            assert(host.getComputedStyle(doc.querySelector('table.attrs')).fontSize === '16px', 'Touch table text remains too small');
+            assert(doc.querySelector('.geometry-preview').getBoundingClientRect().width === 28, 'Touch geometry preview remains too small');
+            assert(doc.getElementById('map').classList.contains('compact-controls'), 'Tablet map controls are not compact');
+            assert(host.getComputedStyle(doc.getElementById('main')).flexDirection === (width <= 760 ? 'column' : 'row'), 'Phone and tablet layouts are not distinct');
+            for (const meta of doc.querySelectorAll('#layerList .lmeta')) {
+              const name = meta.closest('li').querySelector('.lname').getBoundingClientRect();
+              const summary = meta.querySelector('span').getBoundingClientRect();
+              assert(Math.abs(summary.left - name.left) < 1 && summary.top >= name.bottom, 'Layer summary is not directly below the name');
+              assert(summary.right <= name.right + 1, 'Layer summary overflows the name column');
+              const actions = [...meta.querySelectorAll('button')];
+              const top = actions[0].getBoundingClientRect().top;
+              assert(actions.every(button => Math.abs(button.getBoundingClientRect().top - top) < 1), 'Touch layer actions wrap onto separate rows');
+              assert(top >= meta.querySelector('span').getBoundingClientRect().bottom + 7, 'Layer actions share a row with the feature summary');
+              assert(top > meta.closest('li').querySelector('input[type=checkbox]').getBoundingClientRect().bottom, 'Layer actions are not below the visibility checkbox');
+              actions.slice(1).forEach((button, index) => {
+                assert(Math.abs(button.getBoundingClientRect().left - actions[index].getBoundingClientRect().right - 8) < 1, 'Layer action spacing is uneven');
+              });
+            }
+            for (const input of doc.querySelectorAll('#layerList input[type=checkbox], #layerList input[type=color]')) {
+              const rect = input.getBoundingClientRect();
+              if (!rect.width || !rect.height) continue;
+              assert(rect.width === 36 && rect.height === 36, 'Layer checkbox or colour swatch has the wrong touch size');
+            }
+            for (const button of doc.querySelectorAll('button, #map .leaflet-buttons-control-button, #map .leaflet-control-layers-toggle')) {
+              const rect = button.getBoundingClientRect();
+              if (!rect.width || !rect.height) continue;
+              const disclosure = button.matches('.kml-folder-row > button:first-child');
+              const targetSize = disclosure ? 36 : 44;
+              assert(rect.width >= targetSize - .5 && rect.height >= targetSize - .5, `Small mobile target: ${button.getAttribute('aria-label') || button.title || button.textContent}`);
+              const icon = button.querySelector('svg');
+              if (icon) {
+                const glyph = icon.getBoundingClientRect();
+                const glyphSize = disclosure ? 20 : 24;
+                assert(Math.abs(glyph.width - glyphSize) < .5 && Math.abs(glyph.height - glyphSize) < .5, `Small mobile glyph: ${button.getAttribute('aria-label') || button.title || button.textContent}`);
+              }
+            }
+            for (const button of preview.querySelectorAll('button')) {
+              assert(button.getBoundingClientRect().right <= preview.getBoundingClientRect().right + 1, 'Mobile row action overlaps the row-number column');
+            }
+            const toolbar = doc.getElementById('tableBar').getBoundingClientRect();
+            for (const button of doc.querySelectorAll('#tableActions > button')) {
+              assert(button.getBoundingClientRect().right <= toolbar.right + 1, 'Mobile table toolbar overflows');
+            }
+          } else {
+            assert(host.getComputedStyle(doc.body).fontSize === '14px', 'Desktop text size changed');
+            assert(doc.querySelector('.geometry-preview').getBoundingClientRect().width === 18, 'Desktop geometry preview size changed');
+            assert(doc.getElementById('btnTheme').getBoundingClientRect().width === 28, 'Desktop theme button size changed');
+            assert(preview.querySelector('button').getBoundingClientRect().height === 24, 'Desktop row action size changed');
+            assert(Math.abs(doc.querySelector('#btnAddField svg').getBoundingClientRect().width - 16.2624) < .1, 'Desktop glyph size changed');
+          }
+        }
+        await host.__geoEditor.handleFiles([jsonFile(collection([point({ name: 'Second layer' })]), 'second-layer.geojson')]);
+        assert([...doc.querySelectorAll('.layer-reorder')].every(handle => handle.getBoundingClientRect().width > 0), 'Multiple layers do not show reorder handles');
+        doc.querySelector('#layerList > li:last-child button[aria-label="Delete layer"]').click();
+        const dialog = doc.getElementById('dlg');
+        const closed = new Promise(resolve => dialog.addEventListener('close', resolve, { once: true }));
+        dialog.querySelector('button[value="ok"]').click();
+        dialog.getAnimations().forEach(animation => animation.finish());
+        await closed;
+        await new Promise(resolve => host.setTimeout(resolve, 0));
+        assert(!doc.querySelector('.layer-reorder').getBoundingClientRect().width, 'Reorder handle remains visible after returning to one layer');
+      }));
+      await test('All modals animate dismissal while preserving validation and results', () => withEditor(async (host, doc) => {
+        for (const dialog of doc.querySelectorAll('dialog')) {
+          const button = dialog.querySelector('button[value="cancel"], button[value="close"]');
+          assert(button, `Missing dismissal button in ${dialog.id}`);
+          dialog.showModal();
+          const closed = new Promise(resolve => dialog.addEventListener('close', resolve, { once: true }));
+          button.click();
+          button.click();
+          assert(dialog.open && dialog.classList.contains('closing'), `${dialog.id} closed without an animation`);
+          assert(host.getComputedStyle(dialog).animationName === 'dialog-exit', `${dialog.id} lacks an exit animation`);
+          assert(host.getComputedStyle(dialog, '::backdrop').animationName === 'dialog-backdrop-exit', `${dialog.id} backdrop did not fade`);
+          await closed;
+          assert(!dialog.open && !dialog.classList.contains('closing') && dialog.returnValue === button.value, `${dialog.id} lost its result or closing state`);
+          dialog.returnValue = 'cancel';
+          dialog.showModal();
+          const cancelled = new Promise(resolve => dialog.addEventListener('close', resolve, { once: true }));
+          dialog.dispatchEvent(new host.Event('cancel', { cancelable: true }));
+          await cancelled;
+          assert(dialog.returnValue === 'cancel', `${dialog.id} changed its cancellation result`);
+        }
+        const dialog = doc.getElementById('dlg');
+        const form = doc.getElementById('dlgForm');
+        const required = doc.createElement('input');
+        required.required = true;
+        form.appendChild(required);
+        dialog.showModal();
+        form.requestSubmit(form.querySelector('button[value="ok"]'));
+        assert(dialog.open && !dialog.classList.contains('closing'), 'Invalid form started closing');
+        required.remove();
+        const matchMedia = host.matchMedia;
+        host.matchMedia = query => query === '(prefers-reduced-motion: reduce)' ? { matches: true } : matchMedia.call(host, query);
+        try {
+          form.requestSubmit(form.querySelector('button[value="ok"]'));
+          assert(!dialog.open && !dialog.classList.contains('closing') && dialog.returnValue === 'ok', 'Reduced-motion submit did not close immediately with its result');
+        } finally { host.matchMedia = matchMedia; }
+      }));
+      await test('Map polygons and names show safe formatted descriptions and retain editing', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        const html = '<h3>Site details</h3><table><tr><th>Band</th><td>700 MHz</td></tr></table><a href="javascript:alert(1)">Unsafe</a><a href="https://example.com/">Details</a><img src="x" onerror="window.__descriptionUnsafe=true">';
+        const source = `<kml xmlns="http://www.opengis.net/kml/2.2"><Document><Placemark><name>Area</name><description><![CDATA[${html}]]></description><Polygon><outerBoundaryIs><LinearRing><coordinates>148,-36 150,-36 150,-34 148,-34 148,-36</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark><Placemark><name>AB12</name><description>First line\nSecond line &amp; text</description><Point><coordinates>149,-35</coordinates></Point></Placemark></Document></kml>`;
+        await app.handleFiles([new File([source], 'descriptions.kml')]);
+        const leaves = app.state.layers[0].group.getLayers();
+        const polygon = leaves.find(leaf => leaf.feature.properties.name === 'Area');
+        polygon.fire('click', { latlng: host.L.latLng(-35, 149) });
+        let description = doc.querySelector('.feature-description');
+        assert(description.querySelector('h3')?.textContent === 'Site details', 'KML HTML description was not decoded');
+        assert(description.querySelector('td')?.textContent === '700 MHz', 'Description table was not rendered');
+        assert(!description.querySelector('script, img, iframe, svg, [onerror]') && !host.__descriptionUnsafe, 'Unsafe description markup survived');
+        const links = description.querySelectorAll('a');
+        assert(!links[0].hasAttribute('href'), 'Unsafe URL survived sanitization');
+        assert(links[1].target === '_blank' && links[1].rel.includes('noopener'), 'Safe link lacks isolation');
+        assert(polygon.feature.properties.description.includes('onerror'), 'Displaying description changed stored source');
+        const editor = doc.querySelector('.popup-form textarea');
+        editor.value = '<strong>Updated</strong>\nSecond line';
+        editor.dispatchEvent(new host.Event('change', { bubbles: true }));
+        assert(description.querySelector('strong')?.textContent === 'Updated', 'Description preview did not update after editing');
+        assert(polygon.feature.properties.description === editor.value, 'Description source edit was not saved');
+        const named = leaves.find(leaf => leaf.feature.properties.name === 'AB12');
+        named.getTooltip().getContent().click();
+        description = [...doc.querySelectorAll('.feature-description')].at(-1);
+        assert(app.state.selected === named, 'Clicking a name did not select its feature');
+        assert(description.textContent === 'First line\nSecond line & text', 'Plain description text or line breaks changed');
+        assert(host.getComputedStyle(description).whiteSpace === 'pre-wrap', 'Plain text line breaks are not displayed');
+        assert(host.getComputedStyle(named.getTooltip().getElement()).pointerEvents === 'auto', 'Map label cannot receive clicks');
+      }));
       await test('KMZ editor imports retain folder controls and point labels', () => withEditor(async (host, doc) => {
         const file = await zipFile('grouped.kmz', [{ name: 'doc.kml', data: groupedKml }]);
         await host.__geoEditor.handleFiles([file]);
@@ -472,10 +833,10 @@
           row.classList.remove('sel');
         }
         const columns = [...table.querySelectorAll('col')];
-        const widths = columns.map(column => parseFloat(column.style.width));
+        const widths = columns.map(column => parseFloat(host.getComputedStyle(column).width));
         table.querySelector('.column-resizer').dispatchEvent(new host.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
         assert(parseFloat(columns[2].style.width) === widths[2] + 10, 'Field resize targets wrong column');
-        assert(parseFloat(columns[0].style.width) === widths[0] && parseFloat(columns[1].style.width) === widths[1], 'Field resize changed leading columns');
+        assert(parseFloat(host.getComputedStyle(columns[0]).width) === widths[0] && parseFloat(host.getComputedStyle(columns[1]).width) === widths[1], 'Field resize changed leading columns');
         doc.getElementById('pgPrev').click();
         assert(parseFloat(doc.querySelectorAll('table.attrs col')[2].style.width) === widths[2] + 10, 'Field width lost after paging');
       }));
