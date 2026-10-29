@@ -449,7 +449,8 @@ dialog[open].closing { animation: dialog-exit 180ms ease-in both; }
 dialog.closing::backdrop { animation: dialog-backdrop-exit 180ms ease-in both; }
 dialog::backdrop { background: rgba(15,23,42,.45); }
 dialog h3 { margin: 0 0 10px; }
-dialog p { margin: 0 0 10px; }
+dialog p, dialog output { margin: 0 0 10px; }
+dialog output { display: block; }
 #dlg .clear-filter[hidden] { display: none; }
 #dlg .clear-filter:not([hidden]) { animation: clear-filter-enter 200ms ease-out both; }
 #dlg .clear-filter:enabled { color: #dc2626; }
@@ -557,7 +558,7 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
   #sidebar h2 { font-size: 14px; }
   #layerList .lmeta, #layerList .kml-folder-count, #tableCount, .popup-form label { font-size: 14px; }
   #layerList .kml-folder-name, .feature-description, #emptyUpload { font-size: 15px; }
-  #tableTitle, dialog p, #aboutDlg p { font-size: 16px; }
+  #tableTitle, dialog p, dialog output, #aboutDlg p { font-size: 16px; }
   #filter, dialog :is(input, textarea, select), .popup-form :is(input, textarea) { font-size: 16px; }
   button .action-icon,
   #layerList .layer-reorder svg, #layerList .lmeta button svg, #layerList .kml-folder-row button svg,

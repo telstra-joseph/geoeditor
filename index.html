@@ -28,7 +28,7 @@
     <h1><button id="btnAbout" type="button" title="About GeoEditor" aria-haspopup="dialog">🌏 Geo Editor</button></h1>
     <div id="headerActions">
     <button id="btnUpload" class="primary" title="Upload shapefile (.zip), KML, KMZ or GeoJSON"><i data-lucide="upload" class="action-icon" aria-hidden="true"></i> Upload</button>
-    <input id="fileInput" type="file" multiple hidden
+    <input id="fileInput" type="file" aria-label="Upload geospatial files" multiple hidden
            accept=".zip,.kml,.kmz,.geojson,.json,.shp,.shx,.dbf,.prj,.cpg">
     <button id="btnNewLayer" title="Create or upload a layer" aria-label="New layer" aria-haspopup="dialog"><i data-lucide="plus" class="action-icon" aria-hidden="true"></i><span class="button-label">New layer</span></button>
     <label class="fmt">Download as
@@ -104,7 +104,7 @@
             <span id="tableCount" class="muted"></span>
           </div>
           <div id="tableActions">
-          <input id="filter" type="search" placeholder="Filter rows…">
+          <input id="filter" type="search" aria-label="Filter rows" placeholder="Filter rows…">
           <button id="btnFilter" type="button" title="Filter rows" aria-label="Filter rows" aria-haspopup="dialog" aria-pressed="false" disabled><i data-lucide="filter" class="action-icon" aria-hidden="true"></i></button>
           <button id="btnUndo" title="Undo last table edit" aria-label="Undo last table edit" disabled><i data-lucide="undo-2" class="action-icon" aria-hidden="true"></i><span class="button-label">Undo</span></button>
           <button id="btnAddField" title="Add an attribute column" aria-label="Add an attribute column"><i data-lucide="plus" class="action-icon" aria-hidden="true"></i><span class="button-label">Field</span></button>
@@ -150,9 +150,9 @@
     </form>
   </dialog>
 
-  <dialog id="dlg">
+  <dialog id="dlg" aria-labelledby="dlgTitle">
     <form method="dialog" id="dlgForm">
-      <h3 id="dlgTitle"></h3>
+      <h3 id="dlgTitle">Geo Editor</h3>
       <p id="dlgMsg"></p>
       <div id="dlgBody"></div>
       <menu>
@@ -183,7 +183,7 @@
         <textarea id="bulkDeleteValues" rows="5" placeholder="New South Wales&#10;Australian Capital Territory"></textarea>
         <small>Text matching is case-sensitive. Leading/trailing spaces on each entered line and blank lines are ignored. Empty column values do not match listed values.</small>
       </label>
-      <p id="bulkDeletePreview" role="status" aria-live="polite"></p>
+      <output id="bulkDeletePreview" aria-live="polite"></output>
       <p>Deletes features from both the map and table. This cannot be undone. Download a backup first.</p>
       <menu>
         <button id="bulkDeleteReview" value="ok" class="primary" disabled>Review deletion</button>
@@ -208,7 +208,7 @@
         </div>
         <div id="shapefileExportColumns"></div>
       </fieldset>
-      <p id="shapefileExportSummary" role="status" aria-live="polite"></p>
+      <output id="shapefileExportSummary" aria-live="polite"></output>
       <fieldset>
         <legend>QGIS symbol styles</legend>
         <label class="qml-category-enabled">
@@ -234,7 +234,7 @@
             <small>Imports simple single-symbol or categorized styles for the matching geometry type. Choose the matching category column first. Only symbol appearance and category labels/visibility are imported; other layer settings are not. All exported categories must have matching imported values. Import a single symbol to apply it to every category.</small>
           </label>
           <p class="muted">Choose a category below to edit its symbol. Previews are schematic; sizes and widths are in millimetres. Changing the category column starts a new style.</p>
-          <p id="shapefileStyleStatus" role="status" aria-live="polite"></p>
+          <output id="shapefileStyleStatus" aria-live="polite"></output>
           <div id="shapefileStyleEditor"></div>
         </div>
       </fieldset>
