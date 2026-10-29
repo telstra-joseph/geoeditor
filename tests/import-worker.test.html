@@ -35,7 +35,7 @@
 
     function runJob(job, onFeatures) {
       return new Promise((resolve, reject) => {
-        const worker = new Worker('../js/import-worker.js');
+        const worker = new Worker('../js/import-worker.js?protocol=2');
         const output = { layers: [], batches: [], warnings: [], kmlConversions: 0 };
         let current = null;
         const finish = error => {
@@ -86,15 +86,30 @@
       const frame = document.createElement('iframe');
       frame.title = 'Import regression editor';
       frame.style.cssText = 'width:100%;height:600px;border:0';
+      const databaseName = `geoeditor-regression-${crypto.randomUUID()}`;
+      const response = await fetch('../index.html');
+      assert(response.ok, 'Could not load editor HTML');
+      const html = await response.text();
+      const bootstrap = `<base href="${new URL('../', location.href).href}"><script>
+        (() => {
+          let implementation;
+          Object.defineProperty(window, 'SessionStore', {
+            configurable: true,
+            get: () => implementation,
+            set: Store => { implementation = class extends Store { constructor(name = '${databaseName}') { super(name); } }; },
+          });
+        })();
+      <\/script>`;
       const loaded = new Promise((resolve, reject) => {
         frame.onload = resolve;
         frame.onerror = () => reject(new Error('Could not load editor'));
       });
-      frame.src = '../index.html?import-regression=1';
+      frame.srcdoc = html.replace('<head>', `<head>${bootstrap}`);
       document.body.appendChild(frame);
       try {
         await loaded;
         assert(frame.contentWindow.__geoEditor, 'Editor did not initialize');
+        await frame.contentWindow.__geoEditor.sessionReady;
         await new Promise(resolve => frame.contentWindow.setTimeout(resolve, 350));
         const map = frame.contentWindow.__geoEditor.map;
         const fitBounds = map.fitBounds;
@@ -109,10 +124,213 @@
           app.state.layers.length = 0;
         }
         frame.remove();
+        indexedDB.deleteDatabase(databaseName);
       }
     }
 
     (async () => {
+      await test('Processing workers preserve mask, export and table results and terminate after each job', () => withEditor(async host => {
+        const NativeWorker = host.Worker;
+        const tasks = [];
+        let terminated = 0;
+        host.Worker = class extends NativeWorker {
+          constructor(url, options) {
+            super(url, options);
+            tasks.push(new URL(url).searchParams.get('task'));
+          }
+          terminate() { terminated++; return super.terminate(); }
+        };
+        const fallback = () => { throw new Error('Expected real background execution'); };
+        try {
+          const features = [point({ name: 'A & B', count: 2 }), { ...point({ name: 'Outside', count: 1 }), geometry: { type: 'Point', coordinates: [160, -35] } }];
+          const polygon = { type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [[[148, -36], [150, -36], [150, -34], [148, -34], [148, -36]]] } };
+          for (const exclude of [false, true]) {
+            const result = await host.BackgroundTasks.run('mask', { features, polygons: [polygon], exclude }, { fallback });
+            const mask = host.LayerMask.combine([polygon]);
+            const expected = features.map(feature => host.LayerMask.clip(feature, mask, exclude)).filter(Boolean);
+            assert(JSON.stringify(result) === JSON.stringify(expected), 'Mask worker differs from fallback');
+          }
+          const layer = { name: 'Worker exports', features, fields: ['name', 'count'], types: { name: 'string', count: 'number' }, color: '#123456' };
+          for (const format of ['geojson', 'csv', 'kml', 'kmz', 'shp']) {
+            const job = { layer, format, base: 'worker-output', options: { fields: layer.fields, categoryField: 'name', includeStyle: true, legendSort: null } };
+            const result = await host.BackgroundTasks.run('export', job, { fallback });
+            const expected = await host.ExportCore.generate(job);
+            assert(result.files.map(file => file.name).join() === expected.files.map(file => file.name).join(), `Export worker filenames differ for ${format}`);
+            for (let index = 0; index < result.files.length; index++) {
+              const actualData = result.files[index].data;
+              const expectedData = expected.files[index].data;
+              if (format === 'kmz') {
+                const actualZip = await host.JSZip.loadAsync(actualData);
+                const expectedZip = await host.JSZip.loadAsync(expectedData);
+                assert(await actualZip.file('doc.kml').async('string') === await expectedZip.file('doc.kml').async('string'), 'KMZ contents differ');
+              } else {
+                assert(typeof actualData === 'string' ? actualData === expectedData : actualData.length === expectedData.length && actualData.every((value, offset) => value === expectedData[offset]), `Export worker contents differ for ${result.files[index].name}`);
+              }
+            }
+            assert(JSON.stringify(result.warnings) === JSON.stringify(expected.warnings), 'Export warnings differ');
+          }
+          const archive = await host.BackgroundTasks.run('export', { operation: 'zip', files: [{ name: 'test.txt', data: 'worker archive' }] }, { fallback });
+          assert(await (await host.JSZip.loadAsync(archive)).file('test.txt').async('string') === 'worker archive', 'Background archive contents differ');
+          const table = {
+            rows: [{ index: 0, properties: { name: 'Site 10', count: null }, folderIds: ['visible'] }, { index: 1, properties: { name: 'Site 2', count: 3 }, folderIds: ['visible'] }, { index: 2, properties: { name: 'Site 1', count: 1 }, folderIds: ['hidden'] }],
+            fields: ['name', 'count'], types: { name: 'string', count: 'number' }, filter: 'SITE', sort: { field: 'name', direction: 'asc' },
+            folders: [{ id: 'visible', visible: true }, { id: 'hidden', visible: false }],
+          };
+          const indices = await host.BackgroundTasks.run('table', table, { fallback });
+          assert(indices.join() === '1,0' && indices.join() === host.TableCore.query(table).join(), 'Worker filter, natural sort or folder visibility differs');
+          table.sort = { field: 'count', direction: 'desc' };
+          table.folders.forEach(folder => { folder.visible = false; });
+          assert((await host.BackgroundTasks.run('table', table, { fallback })).join() === '1,2,0', 'Numeric ordering or empty values differ');
+          assert(tasks.includes('mask') && tasks.includes('export') && tasks.includes('table'), 'Missing a worker task type');
+          assert(terminated === tasks.length, 'Completed jobs left workers running');
+        } finally { host.Worker = NativeWorker; }
+      }));
+      await test('Worker-backed downloads preserve formats, edited QGIS symbols and archive filenames', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        await app.handleFiles([jsonFile(collection([point({ name: 'A, "B"', count: 7 })]), 'worker-export.geojson')]);
+        const layer = app.state.active;
+        const downloads = [];
+        const originalUrl = host.URL.createObjectURL;
+        const originalClick = host.HTMLAnchorElement.prototype.click;
+        const originalGenerate = host.ExportCore.generate;
+        const originalPack = host.ExportCore.pack;
+        host.URL.createObjectURL = blob => { downloads.push({ blob }); return 'blob:worker-export-test'; };
+        host.HTMLAnchorElement.prototype.click = function() { downloads.at(-1).name = this.download; };
+        host.ExportCore.generate = host.ExportCore.pack = () => { throw new Error('Export unexpectedly used the main thread'); };
+        try {
+          for (const format of ['geojson', 'csv', 'kml', 'kmz']) {
+            doc.getElementById('fmt').value = format;
+            await app.downloadLayers([layer]);
+            const download = downloads.at(-1);
+            assert(download.name === `worker-export.${format}`, `Wrong download filename for ${format}`);
+            if (format === 'geojson') assert(JSON.parse(await download.blob.text()).features[0].properties.count === 7, 'GeoJSON download lost attributes');
+            if (format === 'csv') assert((await download.blob.text()).includes('"A, ""B""",7'), 'CSV download lost quoting');
+            if (format === 'kml') assert(new host.DOMParser().parseFromString(await download.blob.text(), 'text/xml').querySelector('Placemark > name').textContent === 'A, "B"', 'KML download lost escaped attributes');
+            if (format === 'kmz') assert((await host.JSZip.loadAsync(await download.blob.arrayBuffer())).file('doc.kml'), 'KMZ download lost doc.kml');
+          }
+          doc.getElementById('fmt').value = 'shp';
+          const pending = app.downloadLayers([layer]);
+          for (let attempt = 0; attempt < 100 && !doc.getElementById('shapefileExportDlg').open; attempt++) await new Promise(resolve => host.setTimeout(resolve, 20));
+          assert(doc.getElementById('shapefileExportDlg').open, 'Shapefile options did not open');
+          const category = doc.getElementById('shapefileCategoryField');
+          category.value = String(layer.fields.indexOf('name'));
+          category.dispatchEvent(new host.Event('change'));
+          const color = doc.querySelector('#shapefileStyleEditor input[type="color"]');
+          assert(color, 'Missing symbol colour editor');
+          color.value = '#123456';
+          color.dispatchEvent(new host.Event('input', { bubbles: true }));
+          color.dispatchEvent(new host.Event('change', { bubbles: true }));
+          doc.getElementById('shapefileExportSubmit').click();
+          doc.getAnimations().forEach(animation => animation.finish());
+          await pending;
+          const archive = await host.JSZip.loadAsync(await downloads.at(-1).blob.arrayBuffer());
+          assert(downloads.at(-1).name === 'worker-export.zip' && archive.file('worker-export.shp') && archive.file('worker-export.dbf'), 'Shapefile download lost binary files');
+          const qml = await archive.file('worker-export.qml').async('string');
+          assert(qml.includes('18,52,86,255') && host.QgisStyle.read(qml).entries[0].category.getAttribute('value') === 'A, "B"', 'Worker export lost edited symbols or category values');
+          doc.getElementById('fmt').value = 'geojson';
+          await app.downloadLayers([layer, layer]);
+          const multiple = await host.JSZip.loadAsync(await downloads.at(-1).blob.arrayBuffer());
+          assert(multiple.file('worker-export.geojson') && multiple.file('worker-export_2.geojson'), 'Worker archive lost unique filenames');
+          assert(layer.group.getLayers()[0].feature.properties.count === 7, 'Export changed source attributes');
+        } finally {
+          host.URL.createObjectURL = originalUrl;
+          host.HTMLAnchorElement.prototype.click = originalClick;
+          host.ExportCore.generate = originalGenerate;
+          host.ExportCore.pack = originalPack;
+        }
+      }));
+      await test('Background tasks fall back when blocked and clean up cancellation and worker errors', () => withEditor(async host => {
+        const NativeWorker = host.Worker;
+        let fallbackCalls = 0;
+        const fallback = () => { fallbackCalls++; return 'local'; };
+        try {
+          host.Worker = undefined;
+          assert(await host.BackgroundTasks.run('table', {}, { fallback }) === 'local', 'Missing Worker did not use fallback');
+          host.Worker = class { constructor() { throw new Error('Worker blocked'); } };
+          assert(await host.BackgroundTasks.run('export', {}, { fallback }) === 'local', 'Blocked Worker did not use fallback');
+          let terminated = 0;
+          host.Worker = class {
+            constructor() { host.queueMicrotask(() => this.onerror({ preventDefault() {}, message: 'Startup failed' })); }
+            terminate() { terminated++; }
+          };
+          assert(await host.BackgroundTasks.run('mask', {}, { fallback }) === 'local' && terminated === 1, 'Startup error leaked a worker or skipped fallback');
+          host.Worker = class {
+            constructor() { host.queueMicrotask(() => this.onmessage({ data: { type: 'ready' } })); }
+            postMessage() { host.queueMicrotask(() => this.onmessage({ data: { type: 'error', message: 'Task failed' } })); }
+            terminate() { terminated++; }
+          };
+          let rejected = false;
+          try { await host.BackgroundTasks.run('export', {}, { fallback }); }
+          catch (error) { rejected = error.message === 'Task failed'; }
+          assert(rejected && terminated === 2, 'Task error was swallowed or leaked a worker');
+          host.Worker = NativeWorker;
+          const controller = new host.AbortController();
+          const pending = host.BackgroundTasks.run('mask', {}, { signal: controller.signal, fallback });
+          controller.abort();
+          let aborted = false;
+          try { await pending; } catch (error) { aborted = error.name === 'AbortError'; }
+          assert(aborted && fallbackCalls === 3, 'Cancellation returned data or invoked fallback');
+        } finally { host.Worker = NativeWorker; }
+      }));
+      await test('Large table workers cancel stale filters, preserve sorting and cannot overwrite a new active layer', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        await app.handleFiles([jsonFile(collection(Array.from({ length: 2500 }, (_, index) => point({ name: index % 2 ? 'other' : 'keep', rank: index }))), 'worker-table.geojson')]);
+        const originalLayer = app.state.active;
+        const NativeWorker = host.Worker;
+        const originalQuery = host.TableCore.query;
+        let created = 0;
+        let terminated = 0;
+        let active = 0;
+        let peak = 0;
+        host.Worker = class extends NativeWorker {
+          constructor(url, options) {
+            super(url, options);
+            if (new URL(url).searchParams.get('task') === 'table') {
+              this.tableTask = true;
+              created++;
+              peak = Math.max(peak, ++active);
+            }
+          }
+          terminate() {
+            if (this.tableTask) { terminated++; active--; }
+            return super.terminate();
+          }
+        };
+        host.TableCore.query = () => { throw new Error('Large query ran on the main thread'); };
+        const filter = text => {
+          doc.getElementById('filter').value = text;
+          doc.getElementById('filter').dispatchEvent(new host.Event('input', { bubbles: true }));
+        };
+        const settled = async () => {
+          for (let attempt = 0; attempt < 500 && doc.getElementById('tableWrap').hasAttribute('aria-busy'); attempt++) await new Promise(resolve => host.setTimeout(resolve, 20));
+          assert(!doc.getElementById('tableWrap').hasAttribute('aria-busy'), 'Table worker did not settle');
+        };
+        try {
+          filter('other');
+          filter('keep');
+          await settled();
+          assert(doc.getElementById('tableCount').textContent.startsWith('1250 of 2500'), 'Stale filter result replaced the newest result');
+          assert(doc.querySelector('tbody input').value === 'keep', 'Wrong filtered row rendered');
+          doc.querySelectorAll('button.sort')[1].click();
+          await settled();
+          assert(doc.querySelector('tbody tr')._leaf.feature.properties.rank === 0, 'Worker ascending sort differs');
+          doc.querySelectorAll('button.sort')[1].click();
+          await settled();
+          assert(doc.querySelector('tbody tr')._leaf.feature.properties.rank === 2498, 'Worker descending sort differs');
+          assert(originalLayer.group.getLayers().length === 2500, 'Filtering changed source features');
+          host.TableCore.query = originalQuery;
+          const small = app.createLayer({ name: 'Small active layer', fields: ['name'], types: { name: 'string' }, features: [point({ name: 'small' })] });
+          filter('other');
+          small.group.getLayers()[0].fire('click', { latlng: host.L.latLng(-35, 149) });
+          await settled();
+          await new Promise(resolve => host.setTimeout(resolve, 150));
+          assert(app.state.active === small && doc.getElementById('tableTitle').textContent === small.name, 'Stale table result overwrote a new layer');
+          assert(created >= 5 && peak === 1 && active === 0 && terminated === created, 'Table queries overlapped or leaked workers');
+        } finally {
+          host.TableCore.query = originalQuery;
+          host.Worker = NativeWorker;
+        }
+      }));
       await test('GeoJSON preparation retains types, normalizes values and splits geometries', async () => {
         const input = collection([
           { ...point({ id: 1, flag: true, nested: { ok: true } }), kml: { unrelated: true } },
@@ -145,13 +363,56 @@
         assert(output.batches.join() === '1000,1000,101', 'Unexpected batch sizes');
         assert(output.layers[0].features.at(-1).properties.index === 2100, 'Order changed');
       });
-      await test('KML conversion returns to the worker and keeps document name and styles', async () => {
+      await test('KML conversion stays in the worker and keeps document name and styles', async () => {
         const output = await runJob({ file: new File([kml], 'styled.kml') });
         const layer = output.layers[0];
-        assert(output.kmlConversions === 1 && layer.name === 'Styled line', 'KML bridge or name failed');
+        assert(output.kmlConversions === 0 && layer.name === 'Styled line', 'KML conversion left the worker or lost its name');
         assert(layer.features[0].style.stroke === '#ff0000', 'KML colour lost');
         assert(!layer.metadata.fields.includes('stroke'), 'Style leaked into attribute fields');
       });
+      await test('KML and archived KML imports retain conversion results when workers cannot start', () => withEditor(async (host, doc) => {
+        const Worker = host.Worker;
+        let attempts = 0;
+        host.Worker = class {
+          constructor() { attempts++; throw new Error('Blocked import worker'); }
+        };
+        try {
+          await host.__geoEditor.handleFiles([
+            new File([groupedKml], 'fallback.kml'),
+            await zipFile('fallback.kmz', [{ name: 'doc.kml', data: groupedKml }]),
+            await zipFile('fallback.zip', [{ name: 'nested/map.kml', data: groupedKml }]),
+          ]);
+          const layers = host.__geoEditor.state.layers;
+          assert(attempts === 1 && layers.length === 3, 'Worker startup failure lost a fallback conversion result');
+          layers.forEach(layer => {
+            assert(layer.name === 'Grouped labels' && layer.featureCount === 7, 'Fallback lost the document name or geometry');
+            assert(layer.kmlFolders.length === 4 && layer.kmlFolders[2].visible === false, 'Fallback lost folder metadata');
+            assert(layer.fields.includes('name') && layer.types.name === 'string', 'Fallback lost prepared attributes');
+            const label = layer.group.getLayers().find(leaf => leaf.feature.properties.name === 'B');
+            assert(label.feature.style['label-color'] === '#ff0000', 'Fallback lost KML label styling');
+          });
+          assert(doc.getElementById('importProgress').hidden, 'Fallback import did not finish');
+        } finally { host.Worker = Worker; }
+      }));
+      await test('Incompatible cached import workers are terminated before receiving files', () => withEditor(async host => {
+        const Worker = host.Worker;
+        let terminated = 0;
+        let posted = 0;
+        host.Worker = class {
+          constructor(url) {
+            assert(new URL(url).searchParams.get('protocol') === '2', 'Import worker URL does not distinguish protocol versions');
+            host.setTimeout(() => this.onmessage?.({ data: { type: 'ready' } }), 0);
+          }
+          postMessage() { posted++; }
+          terminate() { terminated++; }
+        };
+        try {
+          await host.__geoEditor.handleFiles([new File([groupedKml], 'cached-worker.kml')]);
+          const layer = host.__geoEditor.state.layers[0];
+          assert(terminated === 1 && posted === 0, 'An incompatible worker received a file or was not terminated');
+          assert(layer?.featureCount === 7 && layer.kmlFolders.length === 4, 'Incompatible worker did not fall back to local KML conversion');
+        } finally { host.Worker = Worker; }
+      }));
       await test('Nested, duplicate and empty KML folders survive worker preparation', async () => {
         const output = await runJob({ file: new File([groupedKml], 'grouped.kml') });
         const layer = output.layers[0];
@@ -163,6 +424,33 @@
         assert(numbers.length === 2 && numbers.every(feature => feature.kml.folderIds.join() === [folders[0].id, folders[1].id].join()), 'Split features lost folder membership');
         assert(!layer.metadata.fields.includes('kml'), 'Folder metadata leaked into attributes');
       });
+      await test('Large KML folder trees populate collapsed branches only when expanded', () => withEditor(async (host, doc) => {
+        const branches = Array.from({ length: 80 }, (_, branch) => `<Folder><name>Group ${branch}</name>${
+          Array.from({ length: 80 }, (_, child) => `<Folder><name>Child ${child}</name>${branch === 0 && child === 0
+            ? '<Placemark><name>Site</name><Point><coordinates>149,-35</coordinates></Point></Placemark>' : ''}</Folder>`).join('')
+        }</Folder>`).join('');
+        await host.__geoEditor.handleFiles([new File([
+          `<kml xmlns="http://www.opengis.net/kml/2.2"><Document><Folder><name>Root</name>${branches}</Folder></Document></kml>`,
+        ], 'large-folder-tree.kml')]);
+        const layer = host.__geoEditor.state.active;
+        const rows = () => doc.querySelectorAll('.kml-folder-row');
+        const button = name => doc.querySelector(`button[aria-label="${name}"]`);
+        assert(layer.kmlFolders.length === 6481 && layer.featureCount === 1, 'Import lost folder metadata or geometry');
+        assert(rows().length === 1 && rows()[0].querySelector('.kml-folder-count').textContent === '1', 'Collapsed descendants were built eagerly or their count was lost');
+        button('Expand folder Root').click();
+        assert(rows().length === 81, 'Expansion built more than the immediate children');
+        button('Expand folder Group 0').click();
+        assert(rows().length === 161, 'Nested expansion omitted children or built sibling descendants');
+        button('Collapse folder Group 0').click();
+        button('Expand folder Group 0').click();
+        assert(rows().length === 161, 'Reopening a branch duplicated its controls');
+        const visibility = doc.querySelector('input[aria-label="Show / hide folder Child 0"]');
+        visibility.click();
+        doc.querySelector('#layerList > li').click();
+        assert(rows().length === 161 && button('Collapse folder Group 0'), 'Rerender lost expansion state or populated unrelated branches');
+        assert(!doc.querySelector('input[aria-label="Show / hide folder Child 0"]').checked, 'Rerender lost nested visibility');
+        assert(layer.group.getLayers().length === 1 && layer.kmlFolders.length === 6481, 'Lazy controls removed editable features or empty folders');
+      }));
       await test('Editor renders styled labels and keeps folder hiding through layer toggles', () => withEditor(async (host, doc) => {
         const app = host.__geoEditor;
         await app.handleFiles([new File([groupedKml], 'grouped.kml')]);
@@ -180,11 +468,18 @@
         assert(Math.abs(letter.getTooltip().options.opacity - 128 / 255) < .001, 'Label opacity ignored');
         assert(letter.options.fillOpacity === 0 && letter.options.opacity === 0, 'Letter replaced by a dot');
         assert(!leaves.find(leaf => leaf.feature.properties.name === 'E').getTooltip(), 'Zero-scale label rendered');
-        assert(leaves.find(leaf => leaf.feature.properties.name === 'A').getTooltip(), 'Polygon letter not rendered');
+        const polygon = leaves.find(leaf => leaf.feature.properties.name === 'A');
+        app.map.setView(polygon.getBounds().getCenter(), 14, { animate: false });
+        await new Promise(resolve => host.setTimeout(resolve, 120));
+        assert(polygon.getTooltip()?.getContent().textContent === 'A', 'Visible polygon letter not rendered');
+        app.map.setView([-35, 149], 14, { animate: false });
+        await new Promise(resolve => host.setTimeout(resolve, 120));
         assert(!app.map.hasLayer(hidden), 'Initially hidden folder rendered');
+        assert(doc.querySelectorAll('.kml-folder-row').length === 3, 'Collapsed nested folder rendered eagerly');
+        assert(layer.kmlFolders.every(folder => folder.expanded === false), 'Folders did not start collapsed');
+        doc.querySelector('.kml-folder-row button').click();
         assert(doc.querySelectorAll('.kml-folder-row').length === 4, 'Folder rows missing');
         const folders = [...doc.querySelectorAll('.kml-folder-row')];
-        assert(layer.kmlFolders.every(folder => folder.expanded === false), 'Folders did not start collapsed');
         const labels = folders[1].querySelector('input');
         labels.click();
         assert(!app.map.hasLayer(letter), 'Folder did not hide label');
@@ -195,6 +490,7 @@
         labels.click();
         assert(app.map.hasLayer(letter) && app.map.hasLayer(letter.getTooltip()), 'Folder did not restore label');
         const disclosure = folders[0].querySelector('button');
+        disclosure.click();
         assert(disclosure.getAttribute('aria-expanded') === 'false' && doc.getElementById(disclosure.getAttribute('aria-controls')).hidden, 'Folder did not start collapsed');
         disclosure.click();
         assert(disclosure.getAttribute('aria-expanded') === 'true' && !doc.getElementById(disclosure.getAttribute('aria-controls')).hidden, 'Folder did not expand');
@@ -208,6 +504,7 @@
         const app = host.__geoEditor;
         await app.handleFiles([new File([groupedKml], 'grouped-table.kml')]);
         const layer = app.state.active;
+        doc.querySelector('.kml-folder-row button').click();
         const inputs = [...doc.querySelectorAll('.kml-folder-row input[type=checkbox]')];
         const names = () => [...doc.querySelectorAll('table.attrs tbody tr')].map(row => row.querySelector('input').value);
         const visible = (index, checked) => { if (inputs[index].checked !== checked) inputs[index].click(); };
@@ -287,6 +584,93 @@
         assert(doc.getElementById('dlg').textContent.includes('1 feature?'), 'Layer deletion prompt has incorrect singular form');
         await closeWith(doc.getElementById('dlg'), 'cancel');
       }));
+      await test('Geometry analysis workers match fallback results and support reports and cancellation', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        const features = [host.turf.point([149, -35], { amount: 2 }), host.turf.lineString([[149, -35], [149.01, -35]], { amount: 4 }),
+          host.turf.bboxPolygon([149, -35, 149.01, -34.99]), host.turf.polygon([[[0, 0], [1, 1], [0, 1], [1, 0], [0, 0]]])];
+        await app.handleFiles([jsonFile(collection(features), 'analysis-fixture.geojson')]);
+        const local = await host.GeometryCore.analyze(features);
+        const remote = await host.BackgroundTasks.run('geometry', { features });
+        assert(JSON.stringify(remote) === JSON.stringify(local), 'Worker analysis differs from fallback');
+        assert(remote.validFeatures === 3 && remote.invalidFeatures === 1 && remote.areaSquareMetres > 0 && remote.lineLengthMetres > 0 && remote.numericFields[0].mean === 3, 'Geometry statistics or self-intersection detection failed');
+        const mixed = await host.BackgroundTasks.run('geometry', { features: [host.turf.geometryCollection([features[2].geometry, features[3].geometry])] });
+        assert(mixed.invalidFeatures === 1 && mixed.areaSquareMetres === 0, 'Invalid collections contributed partial measurements');
+        const waitFor = async predicate => {
+          for (let attempt = 0; attempt < 300 && !predicate(); attempt++) await pause();
+          assert(predicate(), 'Geometry analysis UI timed out');
+        };
+        const NativeWorker = host.Worker;
+        try {
+          host.Worker = class { constructor() { throw new Error('Blocked geometry worker'); } };
+          const fallback = await host.BackgroundTasks.run('geometry', { features }, { fallback: () => host.GeometryCore.analyze(features) });
+          assert(JSON.stringify(fallback) === JSON.stringify(local), 'Blocked geometry worker did not fall back');
+        } finally { host.Worker = NativeWorker; }
+        const controller = new host.AbortController();
+        const cancelled = host.BackgroundTasks.run('geometry', { features }, { signal: controller.signal });
+        controller.abort();
+        let aborted = false;
+        try { await cancelled; } catch (error) { aborted = error.name === 'AbortError'; }
+        assert(aborted, 'Geometry worker ignored cancellation');
+        doc.querySelector('button[title="Analyze layer"]').click();
+        await waitFor(() => !doc.getElementById('analysisResults').hidden);
+        assert(doc.getElementById('analysisDlg').open && doc.getElementById('analysisSummary').textContent.includes('Invalid') && doc.getElementById('analysisIssues').textContent.includes('Feature 4'), 'Analysis results were not presented');
+        const click = host.HTMLAnchorElement.prototype.click;
+        let download;
+        host.HTMLAnchorElement.prototype.click = function() { download = { filename: this.download, url: this.href }; };
+        try {
+          doc.getElementById('btnDownloadAnalysis').click();
+          assert(download?.filename === 'analysis-fixture-analysis.json', 'Analysis report filename changed');
+          const report = await (await host.fetch(download.url)).json();
+          assert(report.invalidFeatures === 1 && report.featureCount === 4, 'Downloaded report lost its statistics');
+        } finally { host.HTMLAnchorElement.prototype.click = click; }
+        doc.getElementById('btnCloseAnalysis').click();
+        doc.getElementById('analysisDlg').getAnimations().forEach(animation => animation.finish());
+        await waitFor(() => !doc.getElementById('analysisDlg').open);
+        doc.querySelector('button[title="Analyze layer"]').click();
+        doc.getElementById('btnCancelAnalysis').click();
+        await waitFor(() => !doc.getElementById('analysisDlg').open);
+        assert(app.state.layers.length === 1 && app.state.layers[0].group.getLayers().length === 4, 'Analysis or cancellation changed source data');
+      }));
+      await test('Spatial workers cache indexes, release pending jobs and fall back when startup fails', () => withEditor(async host => {
+        const NativeWorker = host.Worker;
+        const setTimer = host.setTimeout;
+        const clearTimer = host.clearTimeout;
+        const startupTimers = new Set();
+        host.setTimeout = function(callback, delay, ...args) {
+          const timer = setTimer.call(this, callback, delay, ...args);
+          if (delay === 5000) startupTimers.add(timer);
+          return timer;
+        };
+        host.clearTimeout = function(timer) { startupTimers.delete(timer); return clearTimer.call(this, timer); };
+        let uploads = 0;
+        let terminated = 0;
+        host.Worker = class extends NativeWorker {
+          postMessage(data, ...args) { if (data.records) uploads++; return super.postMessage(data, ...args); }
+          terminate() { terminated++; return super.terminate(); }
+        };
+        const records = Array.from({ length: 3000 }, (_, index) => ({ index, minX: index, maxX: index + 1, minY: 0, maxY: 1 }));
+        const bounds = { minX: 20, maxX: 25, minY: 0, maxY: 1 };
+        const expected = host.SpatialCore.query(host.SpatialCore.create(records), bounds);
+        try {
+          assert((await host.SpatialQueries.query('fixture', records, bounds)).join() === expected.join(), 'Worker spatial results differ from the local index');
+          await host.SpatialQueries.query('fixture', records, { ...bounds, minX: 30, maxX: 35 });
+          assert(uploads === 1, 'Viewport changes resent the spatial index');
+          host.SpatialQueries.release('fixture');
+          assert(terminated === 1, 'Unused spatial worker did not terminate');
+          const pending = host.SpatialQueries.query('released', records, bounds);
+          host.SpatialQueries.release('released');
+          assert((await pending).length === 0, 'Releasing a starting worker left a pending result');
+          assert(startupTimers.size === 0, 'Released spatial worker left a startup timeout running');
+          host.Worker = class { constructor() { throw new Error('Blocked worker fixture'); } };
+          assert((await host.SpatialQueries.query('fallback', records, bounds)).join() === expected.join(), 'Blocked workers did not use the spatial fallback');
+          host.SpatialQueries.release('fallback');
+        } finally {
+          host.Worker = NativeWorker;
+          host.SpatialQueries.release('fixture'); host.SpatialQueries.release('released'); host.SpatialQueries.release('fallback');
+          host.setTimeout = setTimer;
+          host.clearTimeout = clearTimer;
+        }
+      }));
       await test('Layer handles reorder the map while preserving selection and data', () => withEditor(async (host, doc) => {
         const app = host.__geoEditor;
         await app.handleFiles(['First', 'Second', 'Third'].map(name => jsonFile(collection([point({ name })]), `${name}.geojson`)));
@@ -294,6 +678,13 @@
         doc.querySelector(`[data-layer-id="${first.id}"] .lname`).click();
         const handle = doc.querySelector(`[data-layer-id="${second.id}"] .layer-reorder`);
         assert(host.getComputedStyle(handle).touchAction === 'none', 'Layer drag handle does not support touch dragging');
+        const theme = doc.documentElement.dataset.theme;
+        for (const value of ['light', 'dark']) {
+          doc.documentElement.dataset.theme = value;
+          const style = host.getComputedStyle(handle);
+          assert(style.borderTopWidth === '0px' && style.boxShadow === 'none' && style.backgroundColor === 'rgba(0, 0, 0, 0)', 'Layer drag grip has a button box');
+        }
+        doc.documentElement.dataset.theme = theme;
         assert(host.getComputedStyle(handle.closest('li')).transitionProperty.includes('transform'), 'Layer rows do not animate position changes');
         handle.dispatchEvent(new host.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
         assert(app.state.layers.map(layer => layer.name).join() === 'Second,First,Third', 'Keyboard reorder did not change layer order');
@@ -423,10 +814,277 @@
           basemap.classList.remove('leaflet-control-layers-expanded');
         }
       }));
+      await test('Loaded panel drags batch writes and defer geometry scans until release', () => withEditor(async (host, doc) => {
+        host.frameElement.style.width = '1920px';
+        host.frameElement.style.height = '1000px';
+        const app = host.__geoEditor;
+        await app.handleFiles([jsonFile(collection(Array.from({ length: 3000 }, (_, index) => point({ index }))), 'resize-performance.geojson')]);
+        await new Promise(resolve => host.setTimeout(resolve, 200));
+        const layer = app.state.active;
+        const slider = doc.getElementById('sidebarSplitter');
+        const sidebar = doc.getElementById('sidebar');
+        const main = doc.getElementById('main');
+        const originalLayers = layer.group.getLayers;
+        const originalQuery = host.SpatialQueries.query;
+        const originalProperty = host.CSSStyleDeclaration.prototype.setProperty;
+        const originalCapture = slider.setPointerCapture;
+        let scans = 0;
+        let queries = 0;
+        let writes = 0;
+        layer.group.getLayers = function() { scans++; return originalLayers.call(this); };
+        host.SpatialQueries.query = function(...args) { queries++; return originalQuery.apply(this, args); };
+        host.CSSStyleDeclaration.prototype.setProperty = function(name, ...args) {
+          if (this === main.style && name === '--sidebar-width') writes++;
+          return originalProperty.call(this, name, ...args);
+        };
+        slider.setPointerCapture = () => {};
+        const pointer = (type, clientX) => slider.dispatchEvent(new host.PointerEvent(type, { pointerId: 71, button: 0, clientX, bubbles: true }));
+        const frame = () => new Promise(resolve => host.requestAnimationFrame(resolve));
+        const settled = () => new Promise(resolve => host.setTimeout(resolve, 150));
+        try {
+          pointer('pointerdown', 330);
+          writes = 0;
+          for (let batch = 0; batch < 3; batch++) {
+            for (let step = 0; step < 20; step++) pointer('pointermove', 400 + batch * 80 + step);
+            await frame();
+            await new Promise(resolve => host.setTimeout(resolve, 40));
+          }
+          assert(writes === 3, 'Sidebar performed more than one width write per animation frame');
+          assert(scans === 0 && queries === 0, 'Sidebar drag scanned or queried loaded layer geometry');
+          pointer('pointermove', 730);
+          pointer('pointerup', 730);
+          assert(Math.abs(sidebar.getBoundingClientRect().width - 730) < 1, 'Release lost the latest pending sidebar width');
+          await settled();
+          assert(queries > 0 && !main.classList.contains('resizing-sidebar'), 'Sidebar release did not resume indexed map refresh');
+          assert(Math.abs(parseFloat(host.getComputedStyle(main).getPropertyValue('--panel-left')) - 730) < 1, 'Map offset did not follow sidebar resize');
+          const workspace = doc.getElementById('workspace').getBoundingClientRect();
+          scans = 0;
+          queries = 0;
+          doc.getElementById('splitter').dispatchEvent(new host.MouseEvent('mousedown', { button: 0, bubbles: true }));
+          for (let batch = 0; batch < 3; batch++) {
+            for (let step = 0; step < 20; step++) host.dispatchEvent(new host.MouseEvent('mousemove', { clientY: workspace.bottom - 200 - batch * 20 - step }));
+            await frame();
+            await new Promise(resolve => host.setTimeout(resolve, 40));
+          }
+          assert(scans === 0 && queries === 0, 'Table panel drag scanned or queried loaded layer geometry');
+          host.dispatchEvent(new host.MouseEvent('mousemove', { clientY: workspace.bottom - 320 }));
+          host.dispatchEvent(new host.MouseEvent('mouseup'));
+          assert(doc.getElementById('tablePanel').style.flexBasis === '320px', 'Table release lost the latest pending height');
+          await settled();
+          assert(queries > 0, 'Table release did not refresh indexed map visibility');
+          scans = 0;
+          queries = 0;
+          pointer('pointerdown', 730);
+          pointer('pointermove', 780);
+          host.dispatchEvent(new host.Event('blur'));
+          await settled();
+          assert(queries > 0 && !main.classList.contains('resizing-sidebar'), 'Focus loss left resizing or map refresh suspended');
+          assert(originalLayers.call(layer.group).length === 3000, 'Resizing changed layer data');
+        } finally {
+          pointer('pointercancel', 780);
+          host.dispatchEvent(new host.MouseEvent('mouseup'));
+          layer.group.getLayers = originalLayers;
+          host.SpatialQueries.query = originalQuery;
+          host.CSSStyleDeclaration.prototype.setProperty = originalProperty;
+          slider.setPointerCapture = originalCapture;
+        }
+      }));
+      await test('Folder disclosure and zoom controls are glyph-only and retain desktop and touch targets', () => withEditor(async (host, doc) => {
+        await host.__geoEditor.handleFiles([new File([groupedKml], 'folder-buttons.kml')]);
+        for (const width of [1440, 390]) {
+          host.frameElement.style.width = `${width}px`;
+          await new Promise(resolve => host.setTimeout(resolve, 120));
+          for (const theme of ['light', 'dark']) {
+            doc.documentElement.dataset.theme = theme;
+            for (const button of doc.querySelectorAll('.kml-folder-row button')) {
+              const style = host.getComputedStyle(button);
+              assert(style.boxShadow === 'none' && style.borderTopWidth === '0px' && style.backgroundColor === 'rgba(0, 0, 0, 0)', 'Folder glyph retains a button box');
+              const disclosure = button.matches('.kml-folder-row > button:first-child');
+              const minimum = width === 390 ? disclosure ? 36 : 44 : 24;
+              const bounds = button.getBoundingClientRect();
+              if (bounds.width) assert(bounds.width >= minimum && bounds.height >= minimum, 'Folder icon lost its click target');
+            }
+          }
+        }
+        const disclosure = doc.querySelector('.kml-folder-row > button:first-child');
+        const children = doc.getElementById(disclosure.getAttribute('aria-controls'));
+        const expanded = disclosure.getAttribute('aria-expanded') === 'true';
+        disclosure.click();
+        assert(disclosure.getAttribute('aria-expanded') === String(!expanded) && children.hidden === expanded, 'Glyph-only disclosure no longer toggles children');
+        disclosure.click();
+        assert(disclosure.getAttribute('aria-expanded') === String(expanded), 'Folder disclosure did not restore its state');
+        const zoom = doc.querySelector('.kml-folder-row > button:last-child:not(:disabled)');
+        assert(zoom && zoom.querySelector('svg') && zoom.getAttribute('aria-label').startsWith('Zoom to folder'), 'Folder zoom lost its glyph or accessible label');
+      }));
+      await test('Desktop Layers panel resizes, auto-fits names and respects responsive bounds', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        const frame = host.frameElement;
+        const slider = doc.getElementById('sidebarSplitter');
+        const sidebar = doc.getElementById('sidebar');
+        const settle = async () => {
+          doc.getAnimations().forEach(animation => animation.finish());
+          await new Promise(resolve => host.setTimeout(resolve, 120));
+          doc.getAnimations().forEach(animation => animation.finish());
+          await pause();
+        };
+        frame.style.width = '1920px';
+        frame.style.height = '1000px';
+        await settle();
+        const first = app.createLayer({ name: 'Sydney metropolitan network infrastructure coverage planning polygons and assets', features: [point()] });
+        const second = app.createLayer({ name: 'Short layer', features: [point()] });
+        second.group.getLayers()[0].fire('click', { latlng: host.L.latLng(-35, 149) });
+        assert(host.getComputedStyle(slider).display !== 'none' && slider.min === '330', 'Desktop resize control missing or wrong minimum');
+        slider.value = '650';
+        slider.dispatchEvent(new host.Event('input', { bubbles: true }));
+        await settle();
+        assert(Math.abs(sidebar.getBoundingClientRect().width - 650) < 1, 'Panel width did not change');
+        assert(Math.abs(parseFloat(host.getComputedStyle(doc.getElementById('main')).getPropertyValue('--panel-left')) - 650) < 1, 'Uncovered map offset did not follow panel width');
+        slider.value = '100';
+        slider.dispatchEvent(new host.Event('input', { bubbles: true }));
+        await settle();
+        assert(Math.abs(sidebar.getBoundingClientRect().width - 330) < 1, 'Panel shrank below the existing minimum width');
+        slider.dispatchEvent(new host.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+        await settle();
+        assert(Math.abs(sidebar.getBoundingClientRect().width - 346) < 1, 'Keyboard resizing failed');
+        slider.dispatchEvent(new host.KeyboardEvent('keydown', { key: 'Home', bubbles: true }));
+        await settle();
+        slider.dispatchEvent(new host.MouseEvent('dblclick', { bubbles: true }));
+        await settle();
+        assert(sidebar.getBoundingClientRect().width > 330, 'Double-click did not auto-fit the longest name');
+        doc.querySelectorAll('#layerList > li > .lname').forEach(label => {
+          assert(label.scrollWidth <= label.clientWidth + 1, 'Auto-fit still clips a layer name');
+        });
+        first.name = 'W'.repeat(500);
+        first.group.getLayers()[0].fire('click', { latlng: host.L.latLng(-35, 149) });
+        slider.dispatchEvent(new host.KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+        await settle();
+        assert(doc.getElementById('workspace').getBoundingClientRect().width >= 479, 'Auto-fit left no useful map/table space');
+        const longest = doc.querySelector('#layerList > li > .lname');
+        assert(longest.scrollWidth <= longest.clientWidth + 1 && host.getComputedStyle(longest).whiteSpace === 'normal', 'An oversized layer name is still clipped');
+        const fitted = sidebar.getBoundingClientRect().width;
+        doc.getElementById('btnToggleLayers').click();
+        await settle();
+        assert(host.getComputedStyle(slider).display === 'none', 'Collapsed sidebar kept the resize edge');
+        doc.getElementById('btnToggleLayers').click();
+        await settle();
+        assert(Math.abs(sidebar.getBoundingClientRect().width - fitted) < 1, 'Expanding lost the resized width');
+        frame.style.width = '1280px';
+        await settle();
+        assert(sidebar.getBoundingClientRect().width <= 801 && doc.getElementById('workspace').getBoundingClientRect().width >= 479, 'Viewport shrink did not constrain panel width');
+        for (const width of [1024, 390]) {
+          frame.style.width = `${width}px`;
+          await settle();
+          assert(host.getComputedStyle(slider).display === 'none', `Resize edge appeared on width ${width}`);
+          assert(Math.abs(sidebar.getBoundingClientRect().width - (width === 390 ? width : 330)) < 1, 'Tablet/phone sidebar layout changed');
+        }
+        frame.style.width = '1920px';
+        await settle();
+        assert(Math.abs(Number(slider.value) - sidebar.getBoundingClientRect().width) < 1, 'Accessible width value did not follow the desktop layout');
+        assert(app.state.layers.length === 2 && first.group.getLayers().length === 1, 'Resizing changed layer data');
+      }));
+      await test('Map action trays match their controls in height and alignment across viewport sizes', () => withEditor(async (host, doc) => {
+        for (const width of [1440, 820, 390, 320]) {
+          host.frameElement.style.width = `${width}px`;
+          host.frameElement.style.height = '1000px';
+          await new Promise(resolve => host.setTimeout(resolve, 150));
+          const control = doc.querySelector('.leaflet-pm-icon-edit').closest('a');
+          control.click();
+          doc.getAnimations().forEach(animation => animation.finish());
+          const tray = control.parentElement.querySelector('.leaflet-pm-actions-container');
+          const controlBounds = control.getBoundingClientRect();
+          const trayBounds = tray.getBoundingClientRect();
+          assert(host.getComputedStyle(tray).visibility === 'visible', `Map action tray did not open at width ${width}`);
+          assert(controlBounds.height === (width <= 1024 ? 44 : 32), `Map control has an unexpected height at width ${width}`);
+          assert(trayBounds.height === controlBounds.height, `Map action tray height differs from its control at width ${width}`);
+          assert(Math.abs(trayBounds.top - controlBounds.top) < 1, `Map action tray is misaligned at width ${width}`);
+          tray.querySelectorAll('.leaflet-pm-action').forEach(action => {
+            assert(action.getBoundingClientRect().height === controlBounds.height, `Map action button height differs from its control at width ${width}`);
+          });
+          control.click();
+        }
+      }));
+      await test('Compact map tool groups animate holds and selections while respecting reduced motion', () => withEditor(async (host, doc) => {
+        const reduced = host.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        const toolbar = doc.querySelector('.leaflet-pm-icon-polygon').closest('.leaflet-pm-toolbar');
+        const tools = [...toolbar.children];
+        const frame = () => new Promise(resolve => host.requestAnimationFrame(resolve));
+        const settle = async () => {
+          const animations = toolbar.getAnimations({ subtree: true });
+          animations.forEach(animation => animation.finish());
+          await Promise.all(animations.map(animation => animation.finished));
+          await frame();
+        };
+        for (const width of [820, 390]) {
+          host.frameElement.style.width = `${width}px`;
+          host.frameElement.style.height = '800px';
+          await new Promise(resolve => host.setTimeout(resolve, 100));
+          const current = toolbar.querySelector('.mobile-tool-current > a');
+          const extra = tools.find(tool => !tool.contains(current));
+          assert(extra.inert && extra.getBoundingClientRect().width === 0, 'Collapsed tools occupy space or accept interaction');
+          current.dispatchEvent(new host.PointerEvent('pointerdown', { button: 0, bubbles: true, clientX: 20, clientY: 20 }));
+          await new Promise(resolve => host.setTimeout(resolve, 470));
+          await frame();
+          assert(toolbar.classList.contains('mobile-tools-open') && current.getAttribute('aria-expanded') === 'true' && !extra.inert, 'Holding the current tool did not reveal its group');
+          assert(reduced ? extra.getAnimations().length === 0 : extra.getAnimations().length > 0, 'Tool expansion does not follow motion preference');
+          await settle();
+          assert(host.getComputedStyle(extra).opacity === '1' && extra.getBoundingClientRect().width > 0, 'Expanded tools remain faded or collapsed');
+          current.dispatchEvent(new host.PointerEvent('pointerup', { button: 0, bubbles: true }));
+          current.click();
+          assert(toolbar.classList.contains('mobile-tools-open') && !host.__geoEditor.map.pm.globalDrawModeEnabled(), 'Releasing a hold activated a tool or dismissed the group');
+          const selected = extra.querySelector('a');
+          const collapsing = tools.find(tool => !tool.contains(current) && tool !== extra);
+          selected.click();
+          await frame();
+          assert(extra.classList.contains('mobile-tool-current') && selected.getAttribute('aria-expanded') === 'false', 'Selection did not become the compact current tool');
+          assert(collapsing.inert && !extra.inert, 'Collapsing controls can still receive interaction');
+          assert(reduced ? collapsing.getAnimations().length === 0 : collapsing.getAnimations().length > 0, 'Tool collapse does not follow motion preference');
+          const selectionMotion = selected.getAnimations().filter(animation => animation.effect.getKeyframes().some(keyframe => 'transform' in keyframe));
+          assert(reduced ? selectionMotion.length === 0 : selectionMotion.length > 0, 'Selected tool did not slide into place or ignored reduced motion');
+          await settle();
+          assert(collapsing.getBoundingClientRect().width === 0 && host.getComputedStyle(collapsing).visibility === 'hidden', 'Collapsed tools did not finish hiding');
+          host.__geoEditor.map.pm.disableDraw();
+          selected.dispatchEvent(new host.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+          await settle();
+          assert(toolbar.classList.contains('mobile-tools-open'), 'Keyboard expansion stopped working');
+          doc.activeElement.dispatchEvent(new host.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+          await settle();
+          assert(!toolbar.classList.contains('mobile-tools-open') && doc.activeElement === selected, 'Keyboard dismissal lost the current selection or focus');
+        }
+      }));
+      await test('Layer rename stays beside truncated names and updates them on desktop and phones', () => withEditor(async (host, doc) => {
+        const longName = 'A long layer name that must leave room for its rename button '.repeat(8).trim();
+        await host.__geoEditor.handleFiles([jsonFile(collection([point()]), `${longName}.geojson`)]);
+        for (const width of [1440, 320]) {
+          host.frameElement.style.width = `${width}px`;
+          await new Promise(resolve => host.setTimeout(resolve, 100));
+          const row = doc.querySelector('#layerList > li');
+          const name = row.querySelector('.lname');
+          const rename = row.querySelector('.layer-rename');
+          const nameBounds = name.getBoundingClientRect();
+          const buttonBounds = rename.getBoundingClientRect();
+          assert(name.nextElementSibling === rename && !rename.closest('.layer-actions'), 'Rename is not next to the layer name');
+          assert(buttonBounds.left >= nameBounds.right && buttonBounds.right <= row.getBoundingClientRect().right, 'Rename overlaps the name or overflows the row');
+          assert(buttonBounds.top < nameBounds.bottom && buttonBounds.bottom > nameBounds.top, 'Rename is not aligned with the name');
+          assert(name.scrollWidth > name.clientWidth && host.getComputedStyle(name).textOverflow === 'ellipsis', 'Long name does not truncate');
+          assert(name.title === longName && rename.getAttribute('aria-label') === 'Rename layer', 'Name tooltip or accessible rename label was lost');
+          assert(buttonBounds.width === (width <= 1024 ? 44 : 28), 'Rename has the wrong desktop or touch size');
+          assert(row.querySelectorAll('.layer-actions > button').length === 5, 'Rename remains in the lower actions');
+        }
+        doc.querySelector('.layer-rename').click();
+        const dialog = doc.getElementById('dlg');
+        const input = dialog.querySelector('input');
+        assert(dialog.open && input.value === longName, 'Rename dialog did not retain the full name');
+        input.value = 'Renamed layer';
+        const closed = new Promise(resolve => dialog.addEventListener('close', resolve, { once: true }));
+        doc.getElementById('dlgOk').click();
+        await closed;
+        await new Promise(resolve => host.setTimeout(resolve, 0));
+        assert(host.__geoEditor.state.active.name === 'Renamed layer' && doc.querySelector('.lname').title === 'Renamed layer', 'Rename did not update the layer and its tooltip');
+      }));
       await test('Phone and tablet controls scale text, previews and targets without changing desktop sizes', () => withEditor(async (host, doc) => {
         await host.__geoEditor.handleFiles([new File([groupedKml], 'touch-targets.kml')]);
         assert(!doc.querySelector('.layer-reorder').getBoundingClientRect().width, 'Single-layer reorder handle is visible');
-        assert(host.getComputedStyle(doc.querySelector('#layerList > li')).gridTemplateColumns.split(' ').length === 3, 'Hidden handle leaves an empty grid column');
+        assert(host.getComputedStyle(doc.querySelector('#layerList > li')).gridTemplateColumns.split(' ').length === 4, 'Hidden handle leaves an empty grid column');
         for (const width of [320, 390, 760, 768, 820, 1024, 1200, 820, 390]) {
           host.frameElement.style.width = `${width}px`;
           host.frameElement.style.height = '800px';
@@ -453,7 +1111,7 @@
               assert(top >= meta.querySelector('span').getBoundingClientRect().bottom + 7, 'Layer actions share a row with the feature summary');
               assert(top > meta.closest('li').querySelector('input[type=checkbox]').getBoundingClientRect().bottom, 'Layer actions are not below the visibility checkbox');
               actions.slice(1).forEach((button, index) => {
-                assert(Math.abs(button.getBoundingClientRect().left - actions[index].getBoundingClientRect().right - 8) < 1, 'Layer action spacing is uneven');
+                assert(Math.abs(button.getBoundingClientRect().left - actions[index].getBoundingClientRect().right - 4) < 1, 'Layer action spacing is uneven');
               });
             }
             for (const input of doc.querySelectorAll('#layerList input[type=checkbox], #layerList input[type=color]')) {
@@ -500,8 +1158,8 @@
         await new Promise(resolve => host.setTimeout(resolve, 0));
         assert(!doc.querySelector('.layer-reorder').getBoundingClientRect().width, 'Reorder handle remains visible after returning to one layer');
       }));
-      await test('All modals animate dismissal while preserving validation and results', () => withEditor(async (host, doc) => {
-        for (const dialog of doc.querySelectorAll('dialog')) {
+      await test('Dismissible modals animate dismissal while preserving validation and results', () => withEditor(async (host, doc) => {
+        for (const dialog of doc.querySelectorAll('dialog:not(.progress-dialog)')) {
           const button = dialog.querySelector('button[value="cancel"], button[value="close"]');
           assert(button, `Missing dismissal button in ${dialog.id}`);
           dialog.showModal();
@@ -572,8 +1230,326 @@
         host.__geoEditor.map.setView([-35, 149], 14, { animate: false });
         await new Promise(resolve => host.setTimeout(resolve, 80));
         const layer = host.__geoEditor.state.layers[0];
+        assert(doc.querySelectorAll('.kml-folder-row').length === 3, 'Worker eagerly built collapsed folder descendants');
+        doc.querySelector('.kml-folder-row button').click();
         assert(layer.kmlFolders.length === 4 && doc.querySelectorAll('.kml-folder-row').length === 4, 'Worker lost folder controls');
         assert(layer.group.getLayers().find(leaf => leaf.feature.properties.name === 'B').getTooltip().getContent().textContent === 'B', 'Worker lost point label');
+      }));
+      await test('Session workers compress, validate and recover legacy snapshots with fallback', () => withEditor(async host => {
+        const snapshot = { version: 1, savedAt: 'fixture', layers: [{ name: 'Saved points', fields: ['value'], geomType: 'Mixed',
+          features: Array.from({ length: 1000 }, (_, value) => point({ value, text: 'Repeated session compression fixture' })) }], view: { center: [-35, 149], zoom: 8 } };
+        const packed = await host.BackgroundTasks.run('session', { operation: 'pack', session: snapshot });
+        assert(packed.geoEditorEncoding === 'zip-v1' && packed.data.byteLength < JSON.stringify(snapshot).length, 'Session worker did not compress the snapshot');
+        const unpacked = await host.BackgroundTasks.run('session', { operation: 'unpack', stored: packed });
+        assert(JSON.stringify(unpacked) === JSON.stringify(snapshot), 'Session archive round trip changed data');
+        const validation = await host.BackgroundTasks.run('session', { operation: 'validate', session: unpacked });
+        assert(validation.featureCount === 1000 && validation.layerCount === 1, 'Session worker did not validate all features');
+        const broken = structuredClone(snapshot);
+        broken.layers[0].features[0].geometry.type = 'InvalidGeometry';
+        let rejected = false;
+        try { await host.BackgroundTasks.run('session', { operation: 'validate', session: broken }); } catch { rejected = true; }
+        assert(rejected, 'Session validation accepted invalid geometry');
+        broken.layers[0].features[0].geometry = { type: 'Point', coordinates: [[149, -35]] };
+        rejected = false;
+        try { await host.BackgroundTasks.run('session', { operation: 'validate', session: broken }); } catch { rejected = true; }
+        assert(rejected, 'Session validation accepted incorrect coordinate nesting');
+        rejected = false;
+        try { await host.BackgroundTasks.run('session', { operation: 'unpack', stored: { ...packed, data: packed.data.slice(0, 20) } }); } catch { rejected = true; }
+        assert(rejected, 'Session worker accepted a truncated archive');
+        const store = new host.SessionStore();
+        await store.transact('readwrite', bucket => bucket.put(snapshot, 'current'));
+        assert((await store.load()).layers[0].features.length === 1000, 'Legacy uncompressed sessions stopped loading');
+        const NativeWorker = host.Worker;
+        try {
+          host.Worker = class { constructor() { throw new Error('Blocked session worker'); } };
+          await store.save(snapshot);
+          const stored = await store.transact('readonly', bucket => bucket.get('current'));
+          assert(stored.geoEditorEncoding === 'zip-v1', 'Fallback save did not retain the compressed storage format');
+          assert(JSON.stringify(await store.load()) === JSON.stringify(snapshot), 'Session fallback changed saved data');
+        } finally { host.Worker = NativeWorker; await store.clear(); }
+      }));
+      await test('Session storage holds one snapshot and failed saves retain the previous copy', () => withEditor(async host => {
+        const store = new host.SessionStore();
+        assert(await store.load() === null, 'Test session database is not isolated');
+        await store.save({ version: 1, savedAt: 'first', layers: [] });
+        await store.save({ version: 1, savedAt: 'second', layers: [{ name: 'Latest' }] });
+        assert((await store.load()).savedAt === 'second', 'Saving did not replace the previous snapshot');
+        const count = await new Promise((resolve, reject) => {
+          const opening = host.indexedDB.open(store.name, 1);
+          opening.onerror = () => reject(opening.error);
+          opening.onsuccess = () => {
+            const database = opening.result;
+            const transaction = database.transaction('sessions', 'readonly');
+            const request = transaction.objectStore('sessions').count();
+            request.onsuccess = () => resolve(request.result);
+            transaction.oncomplete = () => database.close();
+          };
+        });
+        assert(count === 1, 'More than one session was stored');
+        let failed = false;
+        try { await store.save({ invalid: () => {} }); } catch { failed = true; }
+        assert(failed && (await store.load()).savedAt === 'second', 'Failed save lost the previous snapshot');
+        await store.clear();
+        assert(await store.load() === null, 'Deleting the saved session failed');
+      }));
+      await test('A saved session restores full layers and view settings after reload and can be cleared', () => withEditor(async (host, doc) => {
+        let currentHost = host;
+        let currentDoc = doc;
+        const waitFor = async predicate => {
+          for (let attempt = 0; attempt < 200 && !predicate(); attempt++) {
+            currentDoc.getAnimations().filter(animation => animation.effect.getComputedTiming().iterations !== Infinity).forEach(animation => animation.finish());
+            await pause();
+          }
+          assert(predicate(), 'Session operation timed out');
+        };
+        const choose = async action => {
+          currentDoc.getElementById('btnSession').click();
+          await waitFor(() => currentDoc.getElementById('dlg').open);
+          const choice = currentDoc.querySelector(`#dlgBody input[value="${action}"]`);
+          assert(choice, `Missing session action ${action}`);
+          choice.checked = true;
+          currentDoc.getElementById('dlgOk').click();
+          currentDoc.getAnimations().filter(animation => animation.effect.getComputedTiming().iterations !== Infinity).forEach(animation => animation.finish());
+          await pause();
+          if (action === 'clear' || action === 'restore') {
+            await waitFor(() => currentDoc.getElementById('dlg').open);
+            currentDoc.getElementById('dlgOk').click();
+            currentDoc.getAnimations().filter(animation => animation.effect.getComputedTiming().iterations !== Infinity).forEach(animation => animation.finish());
+            await pause();
+          }
+          await waitFor(() => !currentDoc.getElementById('dlg').open && !currentDoc.getElementById('sessionProgressDlg').open && !currentDoc.getElementById('btnSession').disabled);
+        };
+        const app = host.__geoEditor;
+        const features = [{ ...point({ name: 'Alpha', amount: 12 }), kml: { folderIds: ['site'] }, style: { 'marker-color': '#16a34a' } }];
+        const layer = app.createLayer({ name: 'Sites', features, fields: ['name', 'amount'], types: { name: 'string', amount: 'number' }, format: 'kmz',
+          kmlFolders: [{ id: 'site', parentId: null, name: 'Site', visible: true, expanded: false }] });
+        const hidden = app.createLayer({ name: 'Hidden dataset', features: Array.from({ length: 1001 }, (_, index) => point({ name: `Record ${index}` })), fields: ['name'], types: { name: 'string' } });
+        hidden.visible = false;
+        app.map.removeLayer(hidden.group);
+        layer.group.getLayers()[0].fire('click', { latlng: host.L.latLng(-35, 149) });
+        app.state.filter = 'Alpha';
+        app.state.sort = { field: 'name', direction: 'desc' };
+        doc.getElementById('filter').value = 'Alpha';
+        doc.getElementById('tablePanel').style.flexBasis = '160px';
+        const sidebarSlider = doc.getElementById('sidebarSplitter');
+        sidebarSlider.value = '510';
+        sidebarSlider.dispatchEvent(new host.Event('input', { bubbles: true }));
+        doc.getElementById('btnToggleLayers').click();
+        doc.getAnimations().forEach(animation => animation.finish());
+        app.map.stop();
+        app.map.setView([-35, 149], 9, { animate: false });
+        await choose('save');
+        const original = await new host.SessionStore().load();
+        assert(original.layers[1].features.length === 1001 && original.selected.feature === 0, 'Save used sampled data or lost selection');
+        layer.name = 'Replacement';
+        layer.group.getLayers()[0].feature.properties.amount = 99;
+        await choose('save');
+        assert((await new host.SessionStore().load()).layers[0].name === 'Replacement', 'Session UI did not replace the saved copy');
+        const frame = host.frameElement;
+        app.state.layers = [];
+        const loaded = new Promise(resolve => { frame.onload = resolve; });
+        frame.srcdoc = frame.srcdoc;
+        await loaded;
+        currentHost = frame.contentWindow;
+        currentDoc = frame.contentDocument;
+        await currentHost.__geoEditor.sessionReady;
+        const restored = currentHost.__geoEditor;
+        assert(restored.state.layers.length === 2 && restored.state.layers[0].name === 'Replacement', 'Reload did not restore the latest layer order/names');
+        assert(restored.state.layers[1].group.getLayers().length === 1001 && !restored.state.layers[1].visible && !restored.map.hasLayer(restored.state.layers[1].group), 'Hidden dataset was lost or shown');
+        const restoredLayer = restored.state.layers[0];
+        assert(restoredLayer.types.amount === 'number' && restoredLayer.format === 'kmz' && !restoredLayer.kmlFolders[0].expanded, 'Field types, format or folder state were lost');
+        assert(restored.state.selected === restoredLayer.group.getLayers()[0] && restored.state.selected.feature.properties.amount === 99, 'Selected feature or edited attributes were lost');
+        assert(restored.state.filter === 'Alpha' && restored.state.sort.direction === 'desc' && restored.map.getZoom() === 9, 'Table settings or zoom were lost');
+        assert(Math.abs(restored.map.getCenter().lat + 35) < .001 && Math.abs(restored.map.getCenter().lng - 149) < .001, 'Map center changed');
+        assert(currentDoc.getElementById('sidebar').classList.contains('collapsed') && currentDoc.getElementById('tablePanel').style.flexBasis === '160px', 'Panel layout was lost');
+        assert(parseFloat(currentDoc.getElementById('main').style.getPropertyValue('--sidebar-width')) === 510, 'Resized Layers panel width was lost');
+        restoredLayer.name = 'Unsaved name';
+        await choose('restore');
+        assert(restored.state.layers[0].name === 'Replacement', 'Manual restore did not discard unsaved changes');
+        const before = restored.state.layers.map(item => item.group.toGeoJSON(false));
+        const valid = await new currentHost.SessionStore().load();
+        const broken = structuredClone(valid);
+        broken.layers.push({ ...structuredClone(valid.layers[0]), features: [{ type: 'Feature', properties: {}, geometry: { type: 'InvalidGeometry', coordinates: [] } }] });
+        await new currentHost.SessionStore().save(broken);
+        await choose('restore');
+        assert(JSON.stringify(restored.state.layers.map(item => item.group.toGeoJSON(false))) === JSON.stringify(before), 'Failed restoration changed the open workspace');
+        assert(restored.state.layers.filter(item => item.visible).every(item => restored.map.hasLayer(item.group)), 'Failed restoration hid existing layers');
+        assert(currentDoc.getElementById('toasts').textContent.includes('Session failed'), 'Failed restoration lacked feedback');
+        await new currentHost.SessionStore().save(valid);
+        await choose('clear');
+        assert(await new currentHost.SessionStore().load() === null, 'Saved snapshot was not cleared');
+        assert(JSON.stringify(restored.state.layers.map(item => item.group.toGeoJSON(false))) === JSON.stringify(before), 'Clearing the saved session changed the current workspace');
+      }));
+      await test('Polygon masks clip multipart geometry, holes and boundary lines without changing source metadata', () => withEditor(host => {
+        const { turf, LayerMask } = host;
+        const mask = LayerMask.combine([turf.bboxPolygon([0, 0, 2, 2]), turf.bboxPolygon([1, 0, 3, 2])]);
+        const original = { ...turf.bboxPolygon([-1, -1, 4, 3]), id: 'original', properties: { name: 'Site', value: 12 },
+          kml: { folderIds: ['site'] }, style: { fill: '#ff0000' } };
+        const before = JSON.stringify(original);
+        const clipped = LayerMask.clip(original, mask);
+        assert(turf.bbox(clipped).join() === '0,0,3,2', 'Polygon geometry or cached bounds were not clipped');
+        assert(clipped.id === 'original' && clipped.properties.value === 12 && clipped.kml.folderIds[0] === 'site' && clipped.style.fill === '#ff0000', 'Feature metadata changed');
+        clipped.properties.name = 'Copy';
+        assert(JSON.stringify(original) === before, 'Masking modified the source feature');
+        assert(LayerMask.clip(turf.point([10, 10]), mask) === null, 'Outside point retained');
+        const points = LayerMask.clip(turf.multiPoint([[0, 0, 20], [1, 1, 30], [10, 10, 40]]), mask);
+        assert(points.geometry.type === 'MultiPoint' && points.geometry.coordinates.length === 2 && points.geometry.coordinates[1][2] === 30, 'Multipart points or altitude lost');
+        const boundary = LayerMask.clip(turf.lineString([[0, 2], [3, 2]]), mask);
+        assert(boundary && boundary.geometry.coordinates[1][0] === 3, 'Boundary line was excluded');
+        const hole = turf.polygon([[[0, 0], [4, 0], [4, 4], [0, 4], [0, 0]], [[1, 1], [1, 3], [3, 3], [3, 1], [1, 1]]]);
+        assert(!LayerMask.clip(turf.point([2, 2]), hole), 'Point inside a hole retained');
+        const road = LayerMask.clip(turf.lineString([[-1, 2], [5, 2]]), hole);
+        assert(road.geometry.type === 'MultiLineString' && road.geometry.coordinates.length === 2, 'Line was not split around a hole');
+        const polygon = LayerMask.clip(turf.bboxPolygon([-1, -1, 5, 5]), hole);
+        assert(!turf.booleanPointInPolygon(turf.point([2, 2]), polygon), 'Clipped polygon lost its hole');
+        const separate = LayerMask.combine([turf.bboxPolygon([0, 0, 1, 1]), turf.bboxPolygon([2, 0, 3, 1])]);
+        const islands = LayerMask.clip(turf.bboxPolygon([-1, -1, 4, 2]), separate);
+        assert(islands.geometry.type === 'MultiPolygon' && islands.geometry.coordinates.length === 2, 'Disjoint masks were not combined');
+        const outside = LayerMask.clip(original, mask, true);
+        assert(!turf.booleanPointInPolygon(turf.point([1, 1]), outside) && turf.booleanPointInPolygon(turf.point([-0.5, -0.5]), outside), 'Inverse polygon mask retained inside geometry');
+        assert(outside.kml.folderIds[0] === 'site' && outside.properties.value === 12, 'Inverse mask lost metadata');
+        const outsidePoints = LayerMask.clip(turf.multiPoint([[0, 0, 20], [1, 1, 30], [10, 10, 40]]), mask, true);
+        assert(outsidePoints.geometry.coordinates.length === 1 && outsidePoints.geometry.coordinates[0][2] === 40, 'Inverse point mask retained inside or boundary points');
+        const outsideRoad = LayerMask.clip(turf.lineString([[-1, 1], [4, 1]]), mask, true);
+        assert(outsideRoad.geometry.type === 'MultiLineString' && outsideRoad.geometry.coordinates.length === 2 && outsideRoad.geometry.coordinates[0][0][0] === -1, 'Inverse line mask did not retain both outside segments');
+        assert(LayerMask.clip(turf.lineString([[0, 2], [3, 2]]), mask, true) === null, 'Inverse mask retained a boundary line');
+        assert(LayerMask.clip(turf.point([2, 2]), hole, true) && !LayerMask.clip(turf.point([0.5, 0.5]), hole, true), 'Inverse mask did not retain polygon holes');
+        const inverseCollection = LayerMask.clip(turf.geometryCollection([turf.point([1, 1]).geometry, turf.point([10, 10]).geometry]), mask, true);
+        assert(inverseCollection.geometry.geometries.length === 1 && inverseCollection.geometry.geometries[0].coordinates[0] === 10, 'Inverse collection mask used the wrong mode');
+        assert(JSON.stringify(original) === before, 'Inverse masking modified the source');
+      }));
+      await test('Mask retention and exclusion keep only surviving folder branches and use a mask glyph', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        const features = [host.turf.point([1, 1]), host.turf.point([10, 10]), host.turf.bboxPolygon([-1, -1, 3, 3]), host.turf.point([8, 8])];
+        const folders = [['root', null], ['inside', 'root'], ['inside-child', 'inside'], ['outside', 'root'], ['shared', 'root'], ['empty', 'root']]
+          .map(([id, parentId]) => ({ id, parentId, name: id, visible: id !== 'outside', expanded: false }));
+        features[0].kml = { folderIds: ['root', 'inside', 'inside-child'] };
+        features[1].kml = { folderIds: ['root', 'outside'] };
+        features[2].kml = { folderIds: ['root', 'shared'] };
+        features.forEach((feature, index) => { feature.properties = { name: `Feature ${index}` }; });
+        const target = app.createLayer({ name: 'Folder target', features, fields: ['name'], types: { name: 'string' }, format: 'kmz', kmlFolders: folders });
+        const source = app.createLayer({ name: 'Mask boundary', features: [host.turf.bboxPolygon([0, 0, 2, 2])] });
+        target.group.getLayers()[0].fire('click', { latlng: host.L.latLng(1, 1) });
+        const before = JSON.stringify(target.group.toGeoJSON(false));
+        const apply = async (mode, count) => {
+          const button = doc.querySelector(`[data-layer-id="${target.id}"] button[title="Mask layer"]`);
+          assert(button.querySelector('svg').innerHTML === host.lucide.createElement(host.lucide.icons.VenetianMask).innerHTML, 'Mask action still uses the cut glyph');
+          button.click();
+          const selects = doc.querySelectorAll('#dlgBody select');
+          assert(selects[1].value === 'retain', 'Retention is not the default mask operation');
+          selects[0].value = String(source.id);
+          selects[1].value = mode;
+          doc.querySelector('#dlgBody input').value = mode;
+          doc.getElementById('dlgOk').click();
+          doc.getAnimations().forEach(animation => animation.finish());
+          for (let attempt = 0; attempt < 150 && (app.state.layers.length !== count || doc.getElementById('maskProgressDlg').open); attempt++) await pause();
+          assert(app.state.layers.length === count, 'Mask operation failed');
+          return app.state.active;
+        };
+        const retained = await apply('retain', 3);
+        assert(retained.group.getLayers().length === 2 && retained.kmlFolders.map(folder => folder.id).join() === 'root,inside,inside-child,shared', 'Retention lost relevant folders or kept unrelated branches');
+        assert(retained.group.toGeoJSON(false).features[0].kml.folderIds.join() === 'root,inside,inside-child', 'Retention lost nested folder membership');
+        const excluded = await apply('exclude', 4);
+        assert(excluded.group.getLayers().length === 3 && excluded.kmlFolders.map(folder => folder.id).join() === 'root,outside,shared', 'Exclusion kept the wrong elements or folders');
+        assert(excluded.kmlFolderMap.get('outside').visible === false && excluded.kmlFolderMap.get('root').expanded === false, 'Folder settings changed');
+        assert(JSON.stringify(target.group.toGeoJSON(false)) === before && target.kmlFolders.length === 6, 'Mask operation modified the original elements or folder tree');
+      }));
+      await test('Layer and selected-polygon masks create editable copies and cancellation creates no partial layer', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        const polygons = [host.turf.bboxPolygon([0, 0, 2, 2]), host.turf.bboxPolygon([1, 0, 3, 2])];
+        const features = [host.turf.bboxPolygon([-1, -1, 4, 3]), host.turf.point([1, 1]), host.turf.point([10, 10])];
+        features.forEach((feature, index) => {
+          feature.properties = { name: `Site ${index}` };
+          feature.kml = { folderIds: ['site'] };
+        });
+        const target = app.createLayer({ name: 'Target', features, fields: ['name'], types: { name: 'string' }, format: 'kml',
+          kmlFolders: [{ id: 'site', parentId: null, name: 'Site', visible: true, expanded: false }] });
+        const source = app.createLayer({ name: 'Boundary', features: polygons });
+        target.group.getLayers()[0].fire('click', { latlng: host.L.latLng(1, 1) });
+        const before = JSON.stringify(target.group.toGeoJSON(false));
+        const finishAnimations = () => doc.getAnimations().forEach(animation => animation.finish());
+        const waitFor = async predicate => {
+          for (let attempt = 0; attempt < 150 && !predicate(); attempt++) await pause();
+          assert(predicate(), 'Mask operation timed out');
+        };
+        const submit = (value, name) => {
+          doc.querySelector(`[data-layer-id="${target.id}"] button[title="Mask layer"]`).click();
+          doc.querySelector('#dlgBody select').value = value;
+          doc.querySelector('#dlgBody input').value = name;
+          doc.getElementById('dlgOk').click();
+          finishAnimations();
+        };
+        submit(String(source.id), 'Layer copy');
+        await waitFor(() => app.state.layers.length === 3 && !doc.getElementById('maskProgressDlg').open);
+        const result = app.state.active;
+        assert(result.name === 'Layer copy' && result.group.getLayers().length === 2, 'Wrong masked layer');
+        assert(result.fields[0] === 'name' && result.types.name === 'string' && result.kmlFolders[0].id === 'site', 'Layer metadata was not preserved');
+        assert(result.group.toGeoJSON(false).features.every(feature => feature.kml.folderIds[0] === 'site'), 'Folder membership lost');
+        assert(JSON.stringify(target.group.toGeoJSON(false)) === before, 'Source layer changed');
+        app.state.selected = source.group.getLayers()[0];
+        submit('selected', 'Selected polygon copy');
+        await waitFor(() => app.state.layers.length === 4 && !doc.getElementById('maskProgressDlg').open);
+        assert(host.turf.bbox(app.state.active.group.toGeoJSON(false)).join() === '0,0,2,2', 'Selected polygon was not used');
+        const observer = new host.MutationObserver(() => {
+          if (!doc.getElementById('maskProgressDlg').open) return;
+          doc.getElementById('btnCancelMask').click();
+          observer.disconnect();
+        });
+        observer.observe(doc.getElementById('maskProgressDlg'), { attributes: true, attributeFilter: ['open'] });
+        submit(String(source.id), 'Cancelled copy');
+        await waitFor(() => !doc.getElementById('dlg').open && !doc.getElementById('maskProgressDlg').open);
+        assert(app.state.layers.length === 4 && JSON.stringify(target.group.toGeoJSON(false)) === before, 'Cancellation retained a partial layer or changed the source');
+        const empty = app.createLayer({ name: 'Outside boundary', features: [host.turf.bboxPolygon([50, 50, 51, 51])] });
+        submit(String(empty.id), 'Empty copy');
+        await waitFor(() => !doc.getElementById('dlg').open && !doc.getElementById('maskProgressDlg').open);
+        assert(app.state.layers.length === 5 && doc.getElementById('toasts').textContent.includes('No features intersect'), 'Empty intersection created a layer or lacked feedback');
+      }));
+      await test('Drawn masks do not enter the source layer and cancelled drawing restores normal creation', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        const target = app.createLayer({ name: 'Target', features: [host.turf.bboxPolygon([-1, -1, 4, 3])] });
+        target.group.getLayers()[0].fire('click', { latlng: host.L.latLng(1, 1) });
+        const begin = async (mode = 'retain') => {
+          doc.querySelector(`[data-layer-id="${target.id}"] button[title="Mask layer"]`).click();
+          doc.querySelector('#dlgBody select').value = 'draw';
+          doc.querySelectorAll('#dlgBody select')[1].value = mode;
+          doc.getElementById('dlgOk').click();
+          doc.getAnimations().forEach(animation => animation.finish());
+          for (let attempt = 0; attempt < 100 && !app.map.pm.Draw.Polygon.enabled(); attempt++) await pause();
+          assert(app.map.pm.Draw.Polygon.enabled(), 'Mask drawing did not start');
+        };
+        await begin();
+        app.map.fire('pm:create', { layer: host.L.polygon([[0, 0], [0, 2], [2, 2], [2, 0]]), shape: 'Polygon' });
+        app.map.pm.disableDraw();
+        for (let attempt = 0; attempt < 100 && (app.state.layers.length !== 2 || doc.getElementById('maskProgressDlg').open); attempt++) await pause();
+        assert(app.state.layers.length === 2 && target.group.getLayers().length === 1, 'Drawn mask was added to the source instead of clipping it');
+        await begin('exclude');
+        app.map.fire('pm:create', { layer: host.L.polygon([[0, 0], [0, 2], [2, 2], [2, 0]]), shape: 'Polygon' });
+        app.map.pm.disableDraw();
+        for (let attempt = 0; attempt < 100 && (app.state.layers.length !== 3 || doc.getElementById('maskProgressDlg').open); attempt++) await pause();
+        assert(app.state.layers.length === 3 && !host.turf.booleanPointInPolygon(host.turf.point([1, 1]), app.state.active.group.toGeoJSON(false).features[0]), 'Drawn mask did not use exclusion mode');
+        await begin();
+        app.map.pm.disableDraw();
+        const active = app.state.active;
+        const count = active.group.getLayers().length;
+        app.map.fire('pm:create', { layer: host.L.polygon([[0, 0], [0, 1], [1, 1]]), shape: 'Polygon' });
+        assert(app.state.layers.length === 3 && active.group.getLayers().length === count + 1, 'Cancelled mask drawing intercepted normal geometry creation');
+      }));
+      await test('Scheduled refreshes update every imported layer without treating callback indices as features', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        const errors = [];
+        const capture = event => { errors.push(event.message); };
+        host.addEventListener('error', capture);
+        try {
+          await app.handleFiles(['First refresh', 'Second refresh', 'Third refresh'].map(name => jsonFile(collection([point({ name })]), `${name}.geojson`)));
+          app.map.setView([-35, 149], 12, { animate: false });
+          await new Promise(resolve => host.setTimeout(resolve, 150));
+          assert(app.state.layers.every(layer => layer.displayed.size === 1), 'Imported layers did not all appear');
+          app.map.setView([-35, 160], 12, { animate: false });
+          await new Promise(resolve => host.setTimeout(resolve, 150));
+          assert(app.state.layers.every(layer => layer.displayed.size === 0), 'Scheduled panning refresh skipped a later imported layer');
+          assert(errors.length === 0, `Scheduled import refresh raised a browser error: ${errors.join('; ')}`);
+          assert(app.state.layers.every(layer => layer.group.getLayers().length === 1) && doc.getElementById('importProgress').hidden, 'Refresh changed imported data or left progress open');
+        } finally { host.removeEventListener('error', capture); }
       }));
       await test('Rendering defers panel-covered geometry and refreshes on panel changes and panning', async () => {
         for (const grouped of [false, true]) await withEditor(async (host, doc) => {
@@ -1003,6 +1979,207 @@
         doc.getElementById('pgPrev').click();
         assert(parseFloat(doc.querySelectorAll('table.attrs col')[2].style.width) === widths[2] + 10, 'Field width lost after paging');
       }));
+      await test('Shared progress views match imports across masks and sessions with native values and cancellation', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        host.frameElement.style.height = '1000px';
+        const waitFor = async predicate => {
+          for (let attempt = 0; attempt < 300 && !predicate(); attempt++) {
+            doc.getAnimations().filter(animation => animation.effect?.target?.tagName === 'DIALOG').forEach(animation => animation.finish());
+            await new Promise(resolve => host.setTimeout(resolve, 20));
+          }
+          assert(predicate(), 'Shared progress operation timed out');
+        };
+        const check = async root => {
+          root.getAnimations().forEach(animation => animation.finish());
+          const track = root.querySelector('.progress-track');
+          const bar = root.querySelector('progress');
+          assert(bar.getAttribute('aria-label') && root.querySelector('output').getAttribute('aria-live') === 'polite', 'Progress lost native or live accessibility');
+          for (const width of [1440, 390]) {
+            host.frameElement.style.width = `${width}px`;
+            await new Promise(resolve => host.setTimeout(resolve, 80));
+            for (const theme of ['light', 'dark']) {
+              doc.documentElement.dataset.theme = theme;
+              const style = host.getComputedStyle(track);
+              assert(track.getBoundingClientRect().height === 24 && style.borderTopWidth === '2px', 'Progress bar does not match import dimensions');
+              assert(style.getPropertyValue('--progress-fill').trim() === (theme === 'dark' ? '#55e698' : '#168a50'), 'Progress fill does not follow the theme');
+              assert(host.getComputedStyle(track, '::before').backgroundImage.includes('radial-gradient'), 'Progress no longer uses the dotted pattern');
+              assert(host.getComputedStyle(root.querySelector('.progress-title')).fontSize === '20px', 'Progress title size differs');
+              const status = host.getComputedStyle(root.querySelector('.progress-status'));
+              assert(status.fontFamily.includes('Doto') && status.fontWeight === '900' && status.fontSize === '14px', 'Progress status typography differs');
+              assert(track.getBoundingClientRect().right <= width && track.getBoundingClientRect().left >= 0, 'Progress bar overflows its viewport');
+              const cancel = root.querySelector('.progress-cancel');
+              if (cancel) {
+                const bounds = cancel.getBoundingClientRect();
+                assert(bounds.width === (width === 390 ? 44 : 32) && bounds.height === bounds.width && cancel.querySelector('svg'), 'Progress cancel control does not match import');
+              }
+            }
+          }
+          bar.max = 100;
+          bar.value = 50;
+          await waitFor(() => parseFloat(track.style.getPropertyValue('--progress-reveal')) > 0);
+          const reveal = parseFloat(track.style.getPropertyValue('--progress-reveal'));
+          assert(reveal >= 40 && reveal <= 50 && !track.classList.contains('indeterminate'), 'Dotted fill is not synchronized to the native progress value');
+          bar.value = 100;
+          await waitFor(() => track.style.getPropertyValue('--progress-reveal') === '100%');
+        };
+        const originalRead = host.FileReader.prototype.readAsText;
+        let resumeRead;
+        host.FileReader.prototype.readAsText = function(file) { resumeRead = () => originalRead.call(this, file); };
+        try {
+          const importing = app.handleFiles([jsonFile(collection([point({ name: 'Progress fixture' })]), 'shared-progress.geojson')]);
+          await waitFor(() => !!resumeRead);
+          await check(doc.getElementById('importProgress'));
+          resumeRead();
+          await importing;
+          assert(doc.getElementById('importProgress').hidden, 'Import progress did not close');
+        } finally { host.FileReader.prototype.readAsText = originalRead; }
+        const target = app.state.active;
+        const source = app.createLayer({ name: 'Mask boundary', features: [host.turf.bboxPolygon([148, -36, 150, -34])] });
+        const originalRun = host.BackgroundTasks.run;
+        let maskStarted = false;
+        host.BackgroundTasks.run = (task, data, options) => {
+          if (task !== 'mask') return originalRun(task, data, options);
+          maskStarted = true;
+          return new Promise((resolve, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }));
+        };
+        try {
+          doc.querySelector(`[data-layer-id="${target.id}"] button[title="Mask layer"]`).click();
+          doc.querySelector('#dlgBody select').value = String(source.id);
+          doc.getElementById('dlgOk').click();
+          doc.getAnimations().forEach(animation => animation.finish());
+          await waitFor(() => maskStarted);
+          await check(doc.getElementById('maskProgressDlg'));
+          doc.getElementById('btnCancelMask').click();
+          await waitFor(() => !doc.getElementById('maskProgressDlg').open);
+          assert(app.state.layers.length === 2, 'Cancelling shared mask progress created a partial copy');
+        } finally { host.BackgroundTasks.run = originalRun; }
+        const originalSave = host.SessionStore.prototype.save;
+        let finishSave;
+        host.SessionStore.prototype.save = function(snapshot) {
+          return new Promise((resolve, reject) => { finishSave = () => originalSave.call(this, snapshot).then(resolve, reject); });
+        };
+        try {
+          doc.getElementById('btnSession').click();
+          await waitFor(() => doc.getElementById('dlg').open);
+          doc.querySelector('#dlgBody input[value="save"]').checked = true;
+          doc.getElementById('dlgOk').click();
+          doc.getAnimations().forEach(animation => animation.finish());
+          await waitFor(() => !!finishSave);
+          const dialog = doc.getElementById('sessionProgressDlg');
+          assert(dialog.open && !doc.getElementById('sessionProgressBar').hasAttribute('value') && dialog.querySelector('.progress-track').classList.contains('indeterminate'), 'Unknown session duration is not shown as indeterminate');
+          const cancelEvent = new host.Event('cancel', { cancelable: true });
+          dialog.dispatchEvent(cancelEvent);
+          assert(cancelEvent.defaultPrevented && dialog.open && !dialog.classList.contains('closing') && !dialog.querySelector('button[value="cancel"], button[value="close"], .progress-cancel'), 'Busy session progress became dismissible');
+          await check(dialog);
+          finishSave();
+          await waitFor(() => !dialog.open && !doc.getElementById('btnSession').disabled);
+          assert(dialog.returnValue === 'ok' && !dialog.classList.contains('closing'), 'Completed session progress did not close normally');
+          assert(await new host.SessionStore().load(), 'Session save failed after shared progress');
+        } finally { host.SessionStore.prototype.save = originalSave; }
+      }));
+      await test('New layer uploads show progress even for small fast files', () => withEditor(async (host, doc) => {
+        const progress = doc.getElementById('importProgress');
+        const input = doc.getElementById('fileInput');
+        const transfer = new host.DataTransfer();
+        const file = jsonFile(collection([point()]), 'small-upload.geojson');
+        transfer.items.add(file);
+        assert(file.size < 1024 * 1024, 'Regression file is not small');
+        let picked = false;
+        let visible = false;
+        const observer = new host.MutationObserver(() => {
+          if (!progress.hidden && doc.getElementById('mapWrap').getAttribute('aria-busy') === 'true') visible = true;
+        });
+        observer.observe(progress, { attributes: true, attributeFilter: ['hidden'] });
+        const originalClick = input.click;
+        input.click = () => {
+          picked = true;
+          input.files = transfer.files;
+          input.dispatchEvent(new host.Event('change', { bubbles: true }));
+        };
+        try {
+          doc.getElementById('btnNewLayer').click();
+          doc.querySelector('#dlgBody input[value="upload"]').click();
+          doc.getElementById('dlgOk').click();
+          doc.getAnimations().forEach(animation => animation.finish());
+          for (let attempt = 0; attempt < 500; attempt++) {
+            if (picked && host.__geoEditor.state.layers.length && progress.hidden) break;
+            await new Promise(resolve => host.setTimeout(resolve, 20));
+          }
+          assert(picked, 'New layer did not open the upload picker');
+          assert(visible, 'Small upload never showed progress');
+          const layer = host.__geoEditor.state.layers[0];
+          assert(layer && !layer.importing && layer.group.getLayers().length === 1, 'Small upload did not finish');
+          assert(progress.hidden && !doc.getElementById('mapWrap').hasAttribute('aria-busy'), 'Progress did not close after upload');
+        } finally {
+          input.click = originalClick;
+          observer.disconnect();
+        }
+      }));
+      await test('Imports disable cancellation during synchronous steps and restore it after errors', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        const button = doc.getElementById('btnCancelImport');
+        const prepare = host.ImportCore.prepare;
+        const reinit = host.L.PM.reInitLayer;
+        const fire = host.L.FeatureGroup.prototype.fire;
+        const parse = host.DOMParser.prototype.parseFromString;
+        let preparations = 0;
+        let finalizations = 0;
+        let construction = 0;
+        let kmlParses = 0;
+        let clicks = 0;
+        const countClick = () => { clicks++; };
+        button.addEventListener('click', countClick);
+        const checkDisabled = () => {
+          assert(button.disabled && button.title.includes('unavailable'), 'Synchronous import work left Cancel enabled');
+          const style = host.getComputedStyle(button);
+          assert(style.opacity === '0.4' && style.cursor === 'not-allowed', 'Unavailable Cancel does not look disabled');
+          button.click();
+        };
+        host.ImportCore.prepare = function(data, format) {
+          preparations++;
+          checkDisabled();
+          if (data.features[0].properties.fail) throw new Error('Deliberate preparation failure');
+          return prepare.call(this, data, format);
+        };
+        host.DOMParser.prototype.parseFromString = function(text, type) {
+          if (type === 'text/xml' && !doc.getElementById('importProgress').hidden) {
+            kmlParses++;
+            checkDisabled();
+          }
+          return parse.call(this, text, type);
+        };
+        host.L.PM.reInitLayer = function(layer) {
+          if (app.state.layers.some(item => item.group === layer)) {
+            finalizations++;
+            checkDisabled();
+          }
+          return reinit.call(this, layer);
+        };
+        host.L.FeatureGroup.prototype.fire = function(type, ...args) {
+          if (type === 'layeradd' && app.state.layers.some(item => item.group === this)) {
+            construction++;
+            assert(!button.disabled && button.title === 'Cancel import', 'Cancel was not restored during interruptible construction');
+          }
+          return fire.call(this, type, ...args);
+        };
+        try {
+          await app.handleFiles([
+            jsonFile(collection([point({ fail: true })]), 'failed-preparation.geojson'),
+            jsonFile(collection([point({ name: 'Recovered' })]), 'recovered-preparation.geojson'),
+            await zipFile('disabled-worker.kmz', [{ name: 'doc.kml', data: kml }]),
+          ]);
+          assert(preparations === 2 && finalizations === 2 && construction === 2 && kmlParses === 0, 'Import did not keep KML parsing in the worker and disable local synchronous stages');
+          assert(clicks === 0 && app.state.layers.length === 2 && app.state.layers[0].name === 'recovered-preparation', 'Disabled Cancel dispatched a click or recovery failed');
+          assert(doc.getElementById('importProgress').hidden, 'Progress remained visible after recovery');
+        } finally {
+          host.ImportCore.prepare = prepare;
+          host.L.PM.reInitLayer = reinit;
+          host.DOMParser.prototype.parseFromString = parse;
+          if (fire === host.L.Evented.prototype.fire) delete host.L.FeatureGroup.prototype.fire;
+          else host.L.FeatureGroup.prototype.fire = fire;
+          button.removeEventListener('click', countClick);
+        }
+      }));
       await test('Imports defer full display scans until construction finishes', () => withEditor(async host => {
         const app = host.__geoEditor;
         const original = host.L.GeoJSON.prototype.getLayers;
@@ -1024,10 +2201,22 @@
         const app = host.__geoEditor;
         const original = host.L.FeatureGroup.prototype.fire;
         let requested = false;
+        let constructed = 0;
+        let pointerTarget = false;
         host.L.FeatureGroup.prototype.fire = function(type, ...args) {
-          if (!requested && type === 'layeradd' && app.state.layers.some(layer => layer.group === this && layer.name === 'cancel-performance')) {
-            requested = true;
-            host.setTimeout(() => doc.getElementById('btnCancelImport').click(), 0);
+          if (type === 'layeradd' && app.state.layers.some(layer => layer.group === this && layer.name === 'cancel-performance')) {
+            constructed++;
+            const started = host.performance.now();
+            while (host.performance.now() - started < 2) {}
+            if (!requested) {
+              requested = true;
+              host.setTimeout(() => {
+                const button = doc.getElementById('btnCancelImport');
+                const bounds = button.getBoundingClientRect();
+                pointerTarget = doc.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2)?.closest('button') === button;
+                button.click();
+              }, 0);
+            }
           }
           return original.call(this, type, ...args);
         };
@@ -1040,6 +2229,8 @@
           await pending;
           await queued;
           assert(requested, 'Test never reached partial layer construction');
+          assert(constructed <= 20, `Cancel waited for ${constructed} expensive features before the browser could respond`);
+          assert(pointerTarget, 'Cancel import was not reachable by a pointer');
           assert(app.state.layers.map(layer => layer.name).join() === 'completed-performance,queued-performance', 'Cancellation removed completed data or kept the partial file');
           assert(app.state.layers.every(layer => !layer.importing), 'Import state did not recover');
           assert(doc.getElementById('importProgress').hidden, 'Progress remained open');
@@ -1052,7 +2243,7 @@
         for (const name of ['styled.kmz', 'styled.zip']) {
           const file = await zipFile(name, [{ name: 'nested/doc.kml', data: kml }]);
           const output = await runJob({ file });
-          assert(output.layers[0].features.length === 1 && output.kmlConversions === 1, 'Archive import failed');
+          assert(output.layers[0].features.length === 1 && output.kmlConversions === 0, 'Archive import did not convert KML fully in the worker');
         }
       });
       const parts = ShapefileWriter.writeShapefiles('parts', [point({ name: 'Canberra', count: 7 })], ['name', 'count'], { name: 'string', count: 'number' }).files;
@@ -1079,7 +2270,7 @@
         }
       });
       await test('Malformed JSON and unsupported archives surface errors', async () => {
-        for (const file of [new File(['{invalid'], 'bad.json'), await zipFile('empty.zip', [])]) {
+        for (const file of [new File(['{invalid'], 'bad.json'), new File(['<kml><Document><name>Broken</Document></kml>'], 'bad.kml'), await zipFile('empty.zip', [])]) {
           let rejected = false;
           try { await runJob({ file }); } catch { rejected = true; }
           assert(rejected, 'Invalid input accepted');

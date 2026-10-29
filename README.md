@@ -1,6 +1,6 @@
 # Geo Editor
 
-**Version 1.0 | October 2026**
+**Version 3.0 | October 2026**
 
 A browser-based editor for geospatial files. Load shapefiles, KML, KMZ or GeoJSON, edit shapes and attribute data on a map, then export the result — including QGIS-ready shapefiles with customisable, toggleable symbol styles.
 
@@ -14,11 +14,12 @@ See [FLOWCHART.md](./FLOWCHART.md) for diagrams of how the app works.
 - Zipped shapefiles (`.zip`), loose `.shp` / `.shx` / `.dbf` / `.prj` / `.cpg` files, `.kml`, `.kmz`, `.geojson` and `.json`.
 - Choose **New layer → Upload layer**, click or tap the empty map's import prompt, or drag and drop files anywhere on the page.
 - Multiple files and multiple layers per file are supported.
-- Large files (at least 1 MB), or imports taking more than one second, show a dotted loading bar with a file count ("1 file" or "1 of 2 files") and the current filename. Features are added in batches so the browser can repaint progress. **Cancel** stops the remaining files in that import and removes layers from the unfinished file, while keeping existing layers and files already completed. Active file reads are aborted and background workers are terminated; fallback processing stops at its next cancellation checkpoint.
-- When served over HTTP/HTTPS, large files, ZIP/KMZ archives and loose shapefile components use one background Web Worker for reading, decompression, GeoJSON/shapefile parsing, coordinate projection and feature preparation. Transfers are limited to 1,000 features at a time. Geometry is built in 100-feature batches, yielding after roughly 8 milliseconds or each transferred batch. Full display sampling and editing-group setup wait until construction finishes, avoiding repeated scans of a growing layer. KML XML conversion, Leaflet geometry construction and editing remain on the main thread. Small plain files and browsers without worker support use the existing import path.
+- Every upload, including small files selected through **New layer → Upload layer**, immediately shows a dotted loading bar with a file count ("1 file" or "1 of 2 files") and the current filename. Layer construction checks its time budget after each feature and yields about every 8ms so the browser can repaint and handle **Cancel**, rather than waiting for a fixed-size batch. **Cancel** stops the remaining files in that import and removes layers from the unfinished file, while keeping existing layers and files already completed. Active file reads are aborted and background workers are terminated; fallback processing stops at its next cancellation checkpoint. A single complex feature or synchronous parsing step must finish before the browser can handle a click.
+- When served over HTTP/HTTPS, large files, all KML files, ZIP/KMZ archives and loose shapefile components use a background Web Worker for reading, decompression, XML/GeoJSON/shapefile parsing, coordinate projection and feature preparation. KML conversion runs entirely in the worker using locally bundled xmldom 0.9.8 and toGeoJSON. Transfers are limited to 1,000 features at a time. Leaflet geometry construction stays on the main thread and checks its 8ms yield budget after each feature. Full display sampling and editing-group setup wait until construction finishes. Small JSON files and browsers without worker support retain the local path. Cancel is visibly disabled during non-interruptible local parsing, preparation and finalization, with a paint opportunity before work starts; it remains available for file reads, worker processing and time-sliced construction.
+- Import worker URLs include their protocol version, and startup checks compatibility before sending files. An incompatible cached worker is terminated and the import falls back locally rather than exchanging unsupported messages.
 - Multi-part geometry collections are split into separate features; features without geometry are skipped, with a notice.
 - Coordinates must be longitude/latitude (WGS84). A shapefile in a projected CRS needs its `.prj` file included.
-- KML/KMZ folders appear as nested, collapsible groups under their imported layer, with feature counts, visibility checkboxes and zoom controls. Nested, duplicate-name and empty folders are retained; hiding a folder does not delete its editable features.
+- KML/KMZ folders appear as nested, collapsible groups under their imported layer, with feature counts, visibility checkboxes and zoom controls. Collapsed descendants load on expansion rather than building every folder control during import. Counts and source visibility are retained, including initially hidden folders. Nested, duplicate-name and empty folders are retained; hiding a folder does not delete its editable features.
 - Named KML point placemarks display permanent text labels, including letters and numbers over polygons. Single-character polygon names and polygons with an explicit label style also display labels. KML label colour, opacity and scale are honoured; zero-scale labels stay hidden. Single-character point labels and zero-scale icons use text rather than a replacement dot. Labels follow geometry edits.
 - Clicking a feature or its map name opens its attributes and a readable description when present. Plain-text line breaks and sanitized HTML formatting, tables and links are supported, including structured KML descriptions. Scripts, embedded content and unsafe links are removed from the display without changing stored data. The description source remains editable in a collapsible multiline field. DOMPurify is bundled locally; no CDN is required.
 - Single-character letters and numbers appear only at zoom 10 or closer, when their polygon (or a nearby displayed polygon in the same layer) is at least 48 screen pixels across. Point labels must be inside or within 24 screen pixels of the polygon's bounds. These labels use regular-weight text capped at 12 pixels and 18% of the polygon's smaller dimension; unreadably small labels remain hidden.
@@ -30,19 +31,45 @@ Drag a layer's grip handle to change its drawing order; the top layer in the lis
 - Automatic WebGL rendering through PixiJS for layer points, lines and polygons, with retained geometry between updates. Canvas is used automatically if WebGL is unavailable; Leaflet's native SVG guides preserve drawing-tool interactions.
 - Large layers have per-layer display limits: 1,000 units at zoom 0-5, 2,000 at 6-8, 10,000 at 9-14, and 20,000 above 14. For layers with folders, each feature-bearing folder counts as one unit, including its nested contents; container-only folders are traversed to reach their child groups. Polygons, lines and points in a chosen folder that intersect the uncovered map area are rendered together, so folders can contain more features than the numeric limit. Ungrouped features each count as one unit. Layers without folders retain feature-based sampling, prioritizing polygons before lines and points.
 - Geometry entirely outside the uncovered map area, including behind the sidebar or attribute table, is deferred even when the layer is below its display limit. Panning, zooming, panel resizing/collapse and viewport changes refresh the display. Partially intersecting geometries remain intact; deferred members appear when uncovered. Selecting or editing an eligible feature prioritizes its folder without forcing covered geometry to render. Folder and feature visibility are respected, and label zoom/collision rules still apply. Sampling does not remove data from the editable layer or exports; the attribute table continues to follow its group and text filters.
+- Layers with at least 2,000 features use a retained RBush 3.0.1 spatial index in a background worker for subsequent viewport searches. Compact feature bounds are uploaded only when the index changes; pan/zoom queries return ordered feature indices. Initial display and small layers retain their immediate local path. Edits invalidate the index, stale results are ignored, and hiding/removing layers releases cached worker data. Folder selection, label placement and Leaflet updates stay on the main thread. Blocked workers use the same local spatial index.
 - The initial view frames Australia in the uncovered map area. Layer, feature and import zooms account for the sidebar and table panel too.
-- Layer list with show/hide, colour, rename, zoom-to-layer, per-layer download and delete.
+- Layer list with show/hide, colour, rename, zoom-to-layer, analysis, per-layer download and delete. Drag grips, folder chevrons and folder zoom controls remain unboxed on hover, with keyboard focus and mobile hit targets preserved.
 - Collapse or expand the Layers panel to make more room for the map. Resize the attribute table with the divider above it.
+- Panel drags update size at most once per animation frame. Full geometry sampling and label placement wait until release, cancellation or focus loss, then refresh for the final uncovered map area instead of repeatedly scanning loaded layers during the drag.
+- At viewport widths of 1200px and up, drag the Layers panel's right edge to resize it, with a 330px minimum and at least 480px left for the workspace. Double-click the edge to fit the longest layer name; exceptionally long names wrap instead of being clipped. The focused resize edge also supports Left/Right, Home for minimum width, and End for auto-fit. The chosen width is included in saved sessions.
+- Folder chevrons and zoom controls are unboxed glyphs, retaining their accessible names, keyboard focus rings and desktop/mobile click targets.
 - Draw points, lines, rectangles and polygons, and edit, drag, cut or remove shapes with the toolbar.
 - New shapes go into the active layer. Choose **New layer → Blank layer** to set a name, geometry type and starting fields.
-- On mobile, hold the current drawing or editing tool to reveal the other tools in its group. Pinch to zoom; the desktop zoom buttons are hidden.
+- In compact and mobile layouts, hold the current drawing or editing tool to reveal the other tools in its group. Additional controls slide and fade open, then contract when dismissed; a newly selected tool slides into the compact slot. Reduced-motion mode makes these changes immediate. Pinch to zoom; the desktop zoom buttons are hidden.
 - The map scale moves to suit the uncovered area and stays readable over either theme.
+
+### Polygon masks
+- Choose the mask-glyph **Mask layer** action on the target layer. Draw a polygon, use the currently selected polygon, or choose another layer; all polygons in that layer are combined into one mask, including hidden features.
+- Enter an output layer name. Drawing a mask does not add it to the target layer; cancel the drawing tool to abandon it.
+- **Retain inside mask** is the default: the new layer contains geometry inside or on the mask boundary. **Exclude inside mask** keeps the outside geometry instead. Points are filtered and lines/polygons are clipped, including multipart geometry and polygon holes. The original target and mask layers are unchanged.
+- Attributes, field types, styles and KML folder membership are retained. Only folders containing surviving elements and their ancestor folders are kept, preserving hierarchy and folder settings. The copy is editable and exports the clipped geometry. All stored target features are processed, not only the current map sample or filtered table rows.
+- Processing shows progress and supports cancellation before creating the copy. An empty intersection creates no layer. Clipping uses locally bundled Turf.js 7.2.0 and requires no external geometry service.
+- Over HTTP/HTTPS, mask union and clipping run in a background worker. Cancel terminates the worker without creating a partial output layer. Browsers without worker support retain the time-sliced main-thread path.
+
+### Layer analysis
+- Choose **Analyze layer** to check every stored feature, including hidden and unsampled geometry. A cancellable worker computes coordinate/geometry validity, polygon self-intersections, geometry counts, polygon area in square metres, line length in metres, bounds, and numeric attribute counts/minimums/maximums/means. Source data is not changed or repaired.
+- The results dialog previews the summary, the first 50 numeric fields and the first 20 issues. **Download report** includes all numeric fields and up to 1,000 issues; the report flags truncation. These checks use Turf.js and are not a full GIS topology certification.
+- Cancellation terminates the worker. If workers cannot start, the same analysis runs locally with time-sliced progress; an individual complex geometry calculation can still block briefly in fallback mode.
+
+### Saved session
+- Choose **Session → Save current session** to save one browser-local snapshot. **Replace saved session** overwrites that same snapshot; there are no additional slots or saved versions.
+- Refreshing or reopening the app at the same site address automatically restores the last saved snapshot. **Session → Restore saved session** can also replace the current workspace after confirmation.
+- The snapshot retains all layer features, edited geometry and attributes, styles, layer order/visibility, KML folders, active/selected features, table filter/sort/page and column widths, map center/zoom/basemap, theme, and panel layout. Undo history and unfinished drawing operations are not saved.
+- **Delete saved session** removes only the stored copy, not the current workspace. Saves are manual; changes made after saving are not included until you replace the snapshot.
+- Storage uses IndexedDB on this browser and device, without uploading data. Browser storage limits, private browsing and clearing site data can remove or prevent saved sessions. Failed writes leave the previous snapshot intact. Download exports for portable backups.
+- Session serialization, DEFLATE compression, decompression/JSON parsing, and pre-restore schema/geometry checks run in workers. Feature extraction and Leaflet reconstruction are time-sliced on the main thread. New snapshots use a compressed archive in the same single IndexedDB slot; existing uncompressed snapshots still load. Failed compression preserves the previous save, and failed restore validation leaves the open workspace unchanged. Worker startup failures use the shared local implementations.
 
 ### Attribute table
 - Edit cells directly; edits are validated against each column's type (text, number, true/false).
 - Click a column name to rename it or change its type; use the adjacent sort button to sort ascending or descending; add or delete columns. **Undo** reverses recent cell edits and field changes.
 - Drag a column edge to resize it, double-click it to fit its contents, or focus the resize handle and use the arrow keys. Widths are remembered per layer for the current session.
 - Filter rows with the desktop search field. On mobile, open the filter dialog; **Apply** updates the search, **Cancel** preserves it, and **Clear filter** immediately restores all rows. Clear filter appears only when there is something to clear.
+- Layers with at least 2,000 features use a background worker when text filtering, sorting, or folder filtering is active. Only attribute data and folder membership are sent; ordered row indices come back for rendering. New queries and layer changes cancel obsolete work, preventing stale results from replacing the current table. Smaller tables stay synchronous to avoid worker startup overhead.
 - Page through large layers (200 rows per page), with feature counts showing the filtered and total number of rows.
 - Each row includes a geometry thumbnail and controls to zoom to, download or delete that feature.
 - Selecting a row highlights the feature on the map, and clicking a feature selects its row.
@@ -78,6 +105,8 @@ To export just one feature, use its row's download icon. It uses the current for
 
 Shapefile limits: mixed layers are split into one shapefile per geometry type (`_points`, `_lines`, `_polygons`); column names are limited to 10 ASCII characters; text values to 254 bytes.
 
+Export workers generate shapefile binaries, category styles, CSV, KML and GeoJSON, and compress KMZ/ZIP archives. Binary results are transferred back without another buffer copy. Options, Leaflet geometry snapshots, edited QGIS XML merging and the final browser download remain on the main thread. Unsupported or startup-blocked workers fall back to local processing. Workers are created on demand and terminated after completion, cancellation or failure, rather than kept in a permanent pool.
+
 ### Shapefile export options
 Choosing **Shapefile (.zip)** opens an options dialog for each exported layer:
 
@@ -106,14 +135,13 @@ Legend ordering changes only the legend. It does not change the map's drawing or
 4. If it does not, open **Layer Properties → Symbology → Style → Load Style** and select the `.qml`.
 5. Expand the layer in the Layers panel and tick or untick categories.
 
-### Interface, help and feedback
+### Interface and help
 - Light and dark themes with a remembered preference, compact tooltips, and responsive icon-only controls when space is limited.
+- Import, masking and session progress share the same dotted bar, typography and theme-aware styling. Session operations show indeterminate progress until a total is known; import and mask cancellation remain available. Reduced motion stops the indeterminate animation, and forced-colors mode uses native progress bars.
 - Animated panel changes, radio selection and notifications respect reduced-motion preferences. Radio buttons and layer checkboxes retain native controls in forced-colors mode.
 - Delete actions use red states; the help button uses a yellow hover state. Enabled header, Layers and table-bar buttons have a subtle shadow in light mode or glow in dark mode.
 - Open **How to edit** with the Layers panel's question-mark button for a short guide to the main tasks.
-- Click **Geo Editor** in the header to open About: Australia-facing globe, "Imagineered by Joseph Malicdem", Version 1.0, and October 2026. Close with the top-right button or Escape.
-- **Send feedback** opens an email draft to `joseph.malicdem@team.telstra.com` with subject **Geo Editor Feedback**; it does not send automatically.
-- The browser tab uses the title **Geo Editor** and the same Australia-facing globe as its favicon.
+- The browser tab uses the title **Geo Editor** and an Australia-facing globe as its favicon.
 
 ## Running the app
 
@@ -142,6 +170,8 @@ Open [tests/gpu-renderer.test.html](./tests/gpu-renderer.test.html) for renderin
 
 Open [tests/import-worker.test.html](./tests/import-worker.test.html) through the local server for import and display checks: preparation parity, bounded transfers and acknowledgment, GeoJSON, KML styles and text labels, nested folder controls and visibility, zoom-level display caps, viewport sampling, selection, full export counts, KMZ, zipped/loose shapefiles, multiple collections and invalid input.
 
+The same suite also checks masking/export/table worker output parity, actual downloads with edited QGIS symbols, archive filenames, missing or blocked worker fallback, error cleanup, cancellation, and stale large-table query rejection. Additional checks cover worker-side KML conversion, lazy expansion of large folder trees, cached spatial queries and index cleanup, geometry analysis reports and downloads, compressed and legacy sessions, validation failures, and shared progress states. Label assertions bring their target geometry into the viewport before checking its rendered tooltip.
+
 ## Project structure
 
 | Path | Purpose |
@@ -152,6 +182,11 @@ Open [tests/import-worker.test.html](./tests/import-worker.test.html) through th
 | [js/gpu-renderer.js](./js/gpu-renderer.js) | WebGL drawing backend with Leaflet interactions and automatic Canvas fallback |
 | [js/import-core.js](./js/import-core.js) | Shared feature normalization, field inference and coordinate validation |
 | [js/import-worker.js](./js/import-worker.js) | Background import processing with acknowledged feature batches |
+| [js/background-tasks.js](./js/background-tasks.js) | Worker startup, fallback, cancellation and cleanup for processing jobs |
+| [js/processing-worker.js](./js/processing-worker.js) | Background masking, export generation/compression, and table queries |
+| [js/layer-mask.js](./js/layer-mask.js) | Shared mask union and geometry clipping for workers and local fallback |
+| [js/export-core.js](./js/export-core.js) | Shared export serialization, shapefile generation and archive compression |
+| [js/table-core.js](./js/table-core.js) | Shared folder/text filtering and stable attribute sorting |
 | [js/shapefile-writer.js](./js/shapefile-writer.js) | Writes SHP, SHX, DBF, PRJ and CPG files and builds the category `.qml` |
 | [js/qgis-style.js](./js/qgis-style.js) | Reads, validates, merges and edits QGIS `.qml` symbol styles |
 | [tests/shapefile-writer.test.html](./tests/shapefile-writer.test.html) | Browser-based tests |
@@ -172,9 +207,9 @@ Open [tests/import-worker.test.html](./tests/import-worker.test.html) through th
 
 ## Limitations
 - Undo covers table cell and field changes, not drawing, geometry changes or feature/layer deletions. Bulk deletion cannot be undone.
-- No saved projects or automatic persistence; work lives only in the open tab.
+- Session saving is manual and limited to one browser-local snapshot; there are no portable project files or automatic saving of later edits.
 - Shapefile export is always WGS84 (EPSG:4326).
-- Very large files are limited by browser memory. A worker still holds a parsed collection in memory, and every editable feature still needs a Leaflet object on the main thread. This is one background CPU worker, not a multi-core renderer or an unlimited-size streaming parser.
+- Very large files are limited by browser memory. Import and processing workers still hold data in memory, and transferring geometry or attributes has a cost. Every editable feature still needs a Leaflet object on the main thread; geometry snapshots, layer construction and DOM updates can still take time. Workers offload CPU calculations, not the whole interface or unlimited-size streaming.
 - Zoom limits reduce displayed feature counts, not the vertex count of an individual complex geometry. Features outside the display sample cannot be clicked on the map; select them in the attribute table to reveal them.
 - KML text labels use Leaflet overlays rather than WebGL, so very dense label sets can still affect performance. Arbitrary KML image icons and advanced label placement are not reproduced.
 - WebGL accelerates drawing, not file parsing, coordinate projection or attribute processing. Hardware acceleration depends on browser settings and graphics-driver support; browsers may use software WebGL. Canvas fallback preserves functionality but not GPU rendering performance.

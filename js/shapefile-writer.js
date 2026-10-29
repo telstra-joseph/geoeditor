@@ -375,4 +375,4 @@
   }
 
   global.ShapefileWriter = { writeShapefiles };
-})(window);
+})(globalThis);

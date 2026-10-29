@@ -19,6 +19,11 @@ flowchart LR
         App["app.js<br/>layers, import, table, undo,<br/>filtering, bulk delete, export"]
         Writer["shapefile-writer.js<br/>SHP, SHX, DBF, PRJ, CPG, category QML"]
         Style["qgis-style.js<br/>read, validate, merge, edit QML"]
+        Tasks["background-tasks.js<br/>start, cancel, terminate or fall back"]
+        Processing["processing-worker.js<br/>mask union/clipping, export generation,<br/>archive compression, table queries"]
+        AnalysisSession["Geometry analysis and session tasks<br/>measurements, reports, compression,<br/>decompression and validation"]
+        Spatial["spatial-queries.js and spatial-worker.js<br/>retained RBush indexes<br/>and viewport queries"]
+        ImportWorker["import-worker.js<br/>read, parse and prepare imports"]
         State[("In-memory layers, selection,<br/>table state and undo history<br/>lost on refresh")]
     end
 
@@ -32,6 +37,12 @@ flowchart LR
     App <--> State
     App --> Writer
     App --> Style
+    App --> Tasks
+    Tasks <--> Processing
+    Processing --> AnalysisSession
+    App <--> Spatial
+    App <--> ImportWorker
+    Processing --> Writer
     Writer --> Style
     App --> Libs
     Libs -.-> Tiles
@@ -49,10 +60,11 @@ flowchart TD
     Blank --> Active["Create and activate an empty layer"]
     Source -->|"upload"| Picker["Choose local files"]
     Import(["Empty-map import prompt<br/>or drag and drop"]) --> Picker
-    Picker --> B{"File type?"}
+    Picker --> Progress["Show import progress immediately<br/>including small uploads"]
+    Progress --> B{"File type?"}
 
     B -->|".geojson or .json"| C["Parse JSON into features"]
-    B -->|".kml"| D["Parse XML and convert with toGeoJSON"]
+    B -->|".kml"| D["Worker: parse XML with xmldom<br/>and convert with toGeoJSON"]
     B -->|".kmz or .zip"| E["Open archive with JSZip"]
     B -->|"loose .shp .shx .dbf .prj .cpg"| F["Bundle the parts into a zip"]
     B -->|"other"| X["Show unsupported file error"]
@@ -77,6 +89,8 @@ flowchart TD
     M -->|"yes"| N["Create layer, add to map,<br/>assign colour"]
     N --> O["Make it active, fit all loaded layers<br/>inside the uncovered map area,<br/>show attribute table"]
 ```
+
+Folder metadata, counts and source visibility are retained during import. The sidebar indexes parent-child relationships once and builds collapsed descendants only when expanded, avoiding eager creation of every folder control in large KML/KMZ files.
 
 ## 3. Editing
 
@@ -225,7 +239,7 @@ flowchart TD
     G -->|"several"| I["Bundle in a ZIP"] --> J(["Download the ZIP"])
 ```
 
-Cancelling any export dialog stops the download without changing layers or the current selection. Per-feature exports use the clicked feature for filename values; all other features remain untouched.
+Cancelling any export dialog stops the download without changing layers or the current selection. Per-feature exports use the clicked feature for filename values; all other features remain untouched. Export serialization, shapefile generation and ZIP/KMZ compression use background workers when available. Options, Leaflet snapshots, edited QGIS XML merging and downloads remain on the main thread; unsupported or startup-blocked workers use the local fallback.
 
 ## 8. Filtering rows
 
@@ -238,10 +252,50 @@ flowchart TD
     Action -->|"Apply"| Apply
     Action -->|"Clear filter"| Clear["Clear and apply immediately<br/>close the dialog"]
     Action -->|"Cancel"| Keep(["Keep the existing filter"])
-    Apply --> Render["Refresh rows and filtered/total counts<br/>update active-filter indicator"]
-    Clear --> Render
+    Apply --> Size{"At least 2000 features<br/>and an active query?"}
+    Clear --> Size
+    Size -->|"yes"| Worker["Cancel the previous query<br/>filter and sort attributes in a worker"]
+    Size -->|"no"| Local["Filter and sort locally"]
+    Worker --> Latest{"Still the latest request<br/>and the same active layer?"}
+    Latest -->|"no"| Ignore(["Discard obsolete result"])
+    Latest -->|"yes"| Render["Render returned row indices<br/>refresh rows and filtered/total counts<br/>update active-filter indicator"]
+    Local --> Render
     Render --> Note["Filtering does not delete features<br/>bulk deletion still uses the whole layer"]
 ```
+
+Workers return the same folder filtering, stable natural/numeric sorting and empty-value ordering as the local path. Missing worker support or a startup failure falls back to local query processing. Table DOM rendering remains on the main thread.
+
+## Background Processing Lifecycle
+
+```mermaid
+flowchart TD
+    Request(["Mask, export, geometry analysis,<br/>session processing or large-table query"]) --> Snapshot["Collect plain data on the main thread<br/>keep Leaflet and DOM objects in the tab"]
+    Snapshot --> Support{"Worker supported over HTTP/HTTPS?"}
+    Support -->|"yes"| Start["Start a processing worker<br/>load only that task's dependencies"]
+    Start --> Ready{"Startup succeeds?"}
+    Support -->|"no"| Fallback["Run the shared local implementation<br/>masking yields between batches"]
+    Ready -->|"no"| Fallback
+    Ready -->|"yes"| Task{"Task"}
+    Task -->|"mask"| Mask["Combine mask polygons and clip features<br/>report progress"]
+    Task -->|"export"| Export["Generate files or compress archives<br/>transfer binary result buffers"]
+    Task -->|"table"| Table["Filter and sort attribute rows<br/>return ordered indices"]
+    Task -->|"geometry"| Geometry["Validate geometry and coordinates<br/>calculate measurements and numeric summaries"]
+    Task -->|"session"| Session["Compress/decompress snapshots<br/>validate schema and geometry before restore"]
+    Mask --> Result["Return result and terminate worker"]
+    Export --> Result
+    Table --> Result
+    Geometry --> Result
+    Session --> Result
+    Result --> Finish(["Create output layer, download files<br/>or render current table rows"])
+    Fallback --> Finish
+    Cancel(["Cancel mask/analysis or supersede table query"]) --> Stop["Terminate worker and discard result<br/>no partial output or stale table"]
+```
+
+Large layers also use a retained spatial worker: build an RBush index from compact bounds once, send viewport queries without resending geometry, return ordered indices, then apply folder budgets and labels on the main thread. Edits invalidate bounds; revision checks discard obsolete results. Hiding/removing layers releases indexes, and the worker terminates when no indexes remain. Initial display and small layers remain synchronous; worker startup failures use the local index.
+
+Session snapshots are collected in time-sliced Leaflet reads, serialized and compressed in a worker, then written atomically to the single IndexedDB slot. Loads decompress in a worker, accept legacy raw snapshots, and validate before replacing the workspace. Analysis returns a non-destructive report with measurements, numeric summaries and bounded issue previews/downloads.
+
+Import overlays and mask/session/analysis progress dialogs share `.progress-*` styling and `bindProgressView`. The binding observes native progress values and totals to reveal dotted columns; a missing value shows indeterminate progress. Each operation disconnects its observers when closing. Import, mask and analysis cancellation retain their existing behavior; busy session dialogs remain non-dismissible. Local non-interruptible import steps paint a disabled Cancel state before computing. Reduced-motion mode stops the indeterminate animation, and forced-colors mode restores the native bar.
 
 ## 9. Responsive interface, help and About
 
@@ -252,6 +306,9 @@ flowchart TD
     Layout -->|"wide"| Wide["Labelled header/table actions<br/>full map toolbars and zoom buttons"]
     Layout -->|"compact or mobile"| Compact["Icon-only actions where needed<br/>mobile tools open with a hold<br/>mobile filter dialog and pinch zoom"]
     Sidebar(["Layers toggle"]) --> Panels["Animate collapse or expansion<br/>keep help accessible"]
+    Resize(["Drag Layers edge or table divider"]) --> Frame["Batch size writes once per animation frame<br/>update panel offsets without geometry scans"]
+    Frame --> Release["Release, cancel or lose focus<br/>flush the latest size and refresh geometry<br/>and labels for the final uncovered area"]
+    Folder(["Folder chevron or zoom glyph"]) --> FolderAction["Expand or collapse children, or zoom to folder<br/>no button box; preserve focus and hit targets"]
     Help(["Question-mark button"]) --> Guide["Short editing guide<br/>warn about deletions and unsaved work"]
     Title(["Geo Editor heading"]) --> About["About dialog<br/>Australia-facing globe and app heading<br/>Imagined by Joseph Malicdem<br/>Version 1.0 / October 2026"]
     About --> Feedback["Send feedback<br/>open email draft to<br/>joseph.malicdem@team.telstra.com<br/>subject: Geo Editor Feedback"]

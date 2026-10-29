@@ -107,7 +107,7 @@ button:disabled { opacity: .48; cursor: not-allowed; box-shadow: none; transform
 }
 #topbar h1 { font-family: 'Doto', var(--font-ui); font-size: 17px; margin: 0 12px 0 0; font-weight: 900; word-spacing: -3px; color: var(--navy); }
 #btnAbout { font: inherit; color: inherit; padding: 0; border: 0; background: transparent; box-shadow: none; white-space: nowrap; }
-#btnAbout { -webkit-text-stroke: .5px #000; paint-order: stroke fill; }
+#btnAbout, #aboutDlg h1 { -webkit-text-stroke: .3px currentColor; paint-order: stroke fill; }
 #topbar #btnAbout:hover { color: var(--accent-dark); }
 #headerActions { display: flex; flex: 1 1 auto; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; margin-left: auto; }
 #headerActions > button { flex-shrink: 0; white-space: nowrap; }
@@ -117,9 +117,9 @@ button:disabled { opacity: .48; cursor: not-allowed; box-shadow: none; transform
 #topbar .fmt { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #48566b; }
 #topbar select { min-height: 28px; font-size: 13px; padding: 4px var(--select-end-padding, 36px) 4px 8px; }
 
-#main { flex: 1 1 auto; display: flex; min-height: 0; position: relative; isolation: isolate; overflow: hidden; --panel-left: 290px; --panel-top: 0px; --panel-bottom: 38%; }
+#main { flex: 1 1 auto; display: flex; min-height: 0; position: relative; isolation: isolate; overflow: hidden; --panel-left: 330px; --panel-top: 0px; --panel-bottom: 38%; }
 #sidebar {
-  flex: 0 0 290px; background: var(--panel-glass); border-right: 1px solid rgba(17, 26, 52, .12);
+  flex: 0 0 330px; background: var(--panel-glass); border-right: 1px solid rgba(17, 26, 52, .12);
   padding: 10px; overflow: auto; position: relative; z-index: 2;
   transition: flex-basis 320ms cubic-bezier(.22, 1, .36, 1);
   -webkit-backdrop-filter: blur(20px) saturate(180%); backdrop-filter: blur(20px) saturate(180%);
@@ -135,6 +135,19 @@ button:disabled { opacity: .48; cursor: not-allowed; box-shadow: none; transform
 #sidebar.collapsed #btnEditHelp { margin-left: 0; }
 #sidebar.collapsed #btnToggleLayers { order: -1; }
 #sidebar.collapsed h2 { display: none; }
+#sidebarSplitter { appearance: none; display: none; position: absolute; top: 0; bottom: 0; left: calc(var(--panel-left) - 3px); width: 6px; height: 100%; padding: 0; margin: 0; border: 0; border-radius: 0; background: transparent; z-index: 5; cursor: col-resize; touch-action: none; }
+#sidebarSplitter::-webkit-slider-thumb { appearance: none; width: 0; height: 0; }
+#sidebarSplitter::-moz-range-thumb { width: 0; height: 0; border: 0; }
+#sidebarSplitter::-moz-range-track { background: transparent; }
+#sidebarSplitter:hover, #sidebarSplitter:focus-visible, .resizing-sidebar #sidebarSplitter { background: var(--accent); }
+#sidebarSplitter:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#main.resizing-sidebar, #main.resizing-sidebar * { cursor: col-resize !important; user-select: none !important; }
+#main.resizing-sidebar #sidebar { transition: none; }
+@media (min-width: 1200px) {
+  #sidebar:not(.collapsed) { flex-basis: var(--sidebar-width, 330px); }
+  #sidebar:not(.collapsed) + #sidebarSplitter { display: block; }
+  .sidebar-fit-names #layerList .lname { white-space: normal; overflow-wrap: anywhere; text-overflow: clip; }
+}
 .hint { color: #6b7280; font-size: 13px; }
 .help { margin-top: 14px; font-size: 13px; color: #374151; }
 .help summary { cursor: pointer; font-weight: 600; }
@@ -143,16 +156,17 @@ button:disabled { opacity: .48; cursor: not-allowed; box-shadow: none; transform
 
 #layerList { list-style: none; margin: 0; padding: 0; }
 #layerList li {
-  display: grid; grid-template-columns: auto auto auto minmax(0, 1fr); gap: 4px 8px; align-items: center;
+  display: grid; grid-template-columns: auto auto auto minmax(0, 1fr) auto; gap: 4px 8px; align-items: center;
   padding: 8px; margin-bottom: 6px; border: 1px solid var(--line); border-radius: 6px; cursor: pointer;
   transition: background-color var(--ease-ui), border-color var(--ease-ui), box-shadow var(--ease-ui), transform 180ms cubic-bezier(.22, 1, .36, 1), opacity 140ms ease;
 }
 #layerList li:hover:not(.active) { background: rgba(245, 247, 250, .65); border-color: #bccbd5; }
 #layerList li.active { border-color: var(--accent); background: rgba(237, 245, 255, .65); box-shadow: 0 0 0 1px var(--accent) inset; }
 #layerList .layer-reorder { width: 22px; height: 24px; min-height: 24px; padding: 2px; border: 0; background: transparent; box-shadow: none; cursor: grab; touch-action: none; }
+#layerList .layer-reorder:enabled, #layerList .layer-reorder:hover:not(:disabled) { background: transparent; box-shadow: none; }
 #layerList .layer-reorder:active { cursor: grabbing; }
 #layerList .layer-reorder svg { width: 16px; height: 16px; }
-#layerList > li:only-child { grid-template-columns: auto auto minmax(0, 1fr); }
+#layerList > li:only-child { grid-template-columns: auto auto minmax(0, 1fr) auto; }
 #layerList > li:only-child .layer-reorder { display: none; }
 #layerList li.layer-dragging { position: relative; z-index: 4; opacity: .95; scale: 1.02; pointer-events: none; background: var(--surface); box-shadow: 0 8px 20px rgba(16, 26, 58, .22); transition: box-shadow 140ms ease, opacity 140ms ease; }
 #layerList li.drop-before { box-shadow: 0 -3px 0 var(--accent); }
@@ -175,13 +189,14 @@ button:disabled { opacity: .48; cursor: not-allowed; box-shadow: none; transform
 #layerList .lmeta { grid-column: 1 / -1; display: flex; align-items: center; gap: 4px; font-size: 12px; color: #6b7280; }
 #layerList .lmeta .spacer { flex: 1; }
 #layerList .layer-actions { display: flex; align-items: center; gap: 4px; }
-#layerList .lmeta button { width: 28px; height: 28px; min-height: 28px; flex: 0 0 28px; padding: 0; font-size: 13px; }
-#layerList .lmeta button svg { width: 16.2624px; height: 16.2624px; flex: 0 0 16.2624px; vertical-align: middle; }
+#layerList .lmeta button, #layerList .layer-rename { width: 28px; height: 28px; min-height: 28px; flex: 0 0 28px; padding: 0; font-size: 13px; }
+#layerList .lmeta button svg, #layerList .layer-rename svg { width: 16.2624px; height: 16.2624px; flex: 0 0 16.2624px; vertical-align: middle; }
 #layerList input[type=color] { width: 24px; height: 24px; padding: 0; border: 1px solid #cbd5e1; border-radius: 4px; background: none; }
 
 #layerList .kml-folder-tree { grid-column: 1 / -1; min-width: 0; border-top: 1px solid var(--line); padding-top: 4px; }
 #layerList .kml-folder-row { display: grid; grid-template-columns: 24px 16px minmax(0, 1fr) auto 24px; gap: 5px; align-items: center; min-height: 28px; }
-#layerList .kml-folder-row button { width: 24px; min-height: 24px; height: 24px; padding: 3px; border: 0; background: transparent; }
+#layerList .kml-folder-row button { width: 24px; min-height: 24px; height: 24px; padding: 3px; border: 0; background: transparent; box-shadow: none; }
+#layerList .kml-folder-row button:hover:not(:disabled) { background: transparent; color: var(--accent-dark); }
 #layerList .kml-folder-row button svg { width: 16px; height: 16px; }
 #layerList .kml-folder-name { font-size: 12px; overflow-wrap: anywhere; }
 #layerList .kml-folder-count { font-size: 11px; color: var(--muted); }
@@ -233,10 +248,10 @@ button:disabled { opacity: .48; cursor: not-allowed; box-shadow: none; transform
   background-color: var(--surface-soft); color: var(--muted); cursor: not-allowed;
 }
 #map .leaflet-pm-toolbar .leaflet-pm-actions-container {
-  display: flex; flex-wrap: wrap; gap: 4px; left: calc(100% + 5px); top: -1px;
-  width: max-content; max-width: min(320px, calc(100vw - 72px)); padding: 4px;
-  border: 1px solid var(--line); border-radius: 8px; background: var(--surface);
-  box-shadow: 0 12px 28px rgba(16, 26, 58, .16);
+  display: flex; flex-wrap: wrap; gap: 4px; left: calc(100% + 5px); top: 0;
+  width: max-content; max-width: min(320px, calc(100vw - 72px)); padding: 0;
+  border: 0; border-radius: 8px; background: var(--surface);
+  box-shadow: 0 0 0 1px var(--line), 0 12px 28px rgba(16, 26, 58, .16);
   opacity: 0; visibility: hidden; pointer-events: none; transform: translateX(-4px);
   transition: opacity 240ms cubic-bezier(.22, 1, .36, 1), transform 240ms cubic-bezier(.22, 1, .36, 1), visibility 240ms;
 }
@@ -256,7 +271,7 @@ button:disabled { opacity: .48; cursor: not-allowed; box-shadow: none; transform
   background-color: var(--hover-fill); color: var(--navy);
 }
 button[value="cancel"]:hover:not(:disabled),
-#btnCancelImport:hover:not(:disabled),
+.progress-cancel:hover:not(:disabled),
 #map .leaflet-pm-toolbar .leaflet-pm-actions-container .leaflet-pm-action.action-cancel:hover:not(.leaflet-disabled):not(.pm-disabled):not([aria-disabled="true"]) {
   background: #dc2626; border-color: #dc2626; color: #fff;
 }
@@ -302,13 +317,20 @@ button[value="cancel"]:hover:not(:disabled),
 #map.compact-controls .leaflet-control-layers-expanded::after { top: 0; right: 100%; width: 4px; height: 100%; }
 #map.compact-controls .leaflet-pm-toolbar { display: flex; touch-action: none; user-select: none; -webkit-touch-callout: none; }
 #map.compact-controls .leaflet-pm-toolbar > .mobile-tool-current { order: -1; }
-#map.compact-controls .leaflet-pm-toolbar:not(.mobile-tools-open) > .button-container:not(.mobile-tool-current) { display: none; }
+#map.compact-controls .leaflet-pm-toolbar > .button-container:not(.mobile-tool-current) { max-width: 44px; overflow: hidden; opacity: 1; transform: translateX(0); visibility: visible; }
+#map.compact-controls .leaflet-pm-toolbar:not(.mobile-tools-open) > .button-container:not(.mobile-tool-current) { max-width: 0; opacity: 0; transform: translateX(-8px); visibility: hidden; pointer-events: none; }
 #map.compact-controls .leaflet-pm-toolbar .button-container > a { border-radius: 0; border-bottom: 0; border-right: 1px solid var(--line); }
 #map.compact-controls .leaflet-pm-toolbar .button-container:first-child > a { border-radius: 5px 0 0 5px; }
 #map.compact-controls .leaflet-pm-toolbar .button-container:last-child > a { border-radius: 0 5px 5px 0; border-right: 0; }
 #map.compact-controls .leaflet-pm-toolbar .leaflet-pm-actions-container { top: calc(100% + 5px); left: 0; max-width: min(260px, calc(100vw - 120px)); }
 #map.compact-controls .leaflet-pm-toolbar:not(.mobile-tools-open) > .mobile-tool-current > a { border-radius: 5px; border-right: 0; }
-#map.compact-controls .leaflet-pm-toolbar:not(.mobile-tools-open) .leaflet-pm-actions-container { top: -1px; left: calc(100% + 5px); max-width: calc(100vw - 100px); }
+#map.compact-controls .leaflet-pm-toolbar:not(.mobile-tools-open) .leaflet-pm-actions-container { top: 0; left: calc(100% + 5px); max-width: calc(100vw - 100px); }
+@media (prefers-reduced-motion: no-preference) {
+  #map.compact-controls .leaflet-pm-toolbar > .button-container:not(.mobile-tool-current) {
+    transition: max-width 220ms cubic-bezier(.22, 1, .36, 1), opacity 180ms ease, transform 220ms cubic-bezier(.22, 1, .36, 1), visibility 0s linear 220ms;
+  }
+  #map.compact-controls .leaflet-pm-toolbar.mobile-tools-open > .button-container:not(.mobile-tool-current) { transition-delay: 0s; }
+}
 #emptyState {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
   left: var(--panel-left); top: var(--panel-top); bottom: var(--panel-bottom);
@@ -335,23 +357,37 @@ button[value="cancel"]:hover:not(:disabled),
   padding: 16px; background: var(--panel-glass); text-align: center;
 }
 #importProgress[hidden] { display: none; }
-.import-progress-content { width: 280px; max-width: 100%; min-width: 0; max-height: 100%; overflow: auto; }
-.import-progress-title, #importProgressStatus { font-family: 'Doto', var(--font-ui); font-weight: 900; color: var(--ink); }
-.import-progress-title { font-size: 20px; line-height: 1.2; margin-bottom: 10px; }
-#importProgressTrack {
-  --import-fill: #168a50; --import-reveal: 0%; position: relative; width: 100%; height: 24px;
+.progress-content { width: 280px; max-width: 100%; min-width: 0; max-height: 100%; overflow: auto; }
+.progress-title, .progress-status { font-family: 'Doto', var(--font-ui); font-weight: 900; color: var(--ink); }
+.progress-title { font-size: 20px; line-height: 1.2; margin: 0 0 10px; overflow-wrap: anywhere; }
+.progress-track {
+  --progress-fill: #168a50; --progress-reveal: 0%; position: relative; width: 100%; height: 24px; overflow: hidden;
   padding: 2px; border: 2px solid var(--ink); border-radius: 2px; background: var(--surface);
 }
-#importProgressTrack::before {
+.progress-track::before {
   content: ''; display: block; width: 100%; height: 100%;
-  background: radial-gradient(circle, var(--import-fill) 1.5px, transparent 2px) 0 0 / 6px 6px round;
-  clip-path: inset(0 calc(100% - var(--import-reveal)) 0 0);
+  background: radial-gradient(circle, var(--progress-fill) 1.5px, transparent 2px) 0 0 / 6px 6px round;
+  clip-path: inset(0 calc(100% - var(--progress-reveal)) 0 0);
 }
-#importProgressBar { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; pointer-events: none; }
-:root[data-theme="dark"] #importProgressTrack { --import-fill: #55e698; }
-#importProgressStatus { display: block; min-height: 20px; margin-top: 6px; font-size: 14px; }
-#importProgressFile { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 28px; margin-top: 4px; color: var(--muted); font-size: 11px; line-height: 14px; overflow-wrap: anywhere; }
-#btnCancelImport { width: 32px; height: 32px; min-height: 32px; padding: 0; margin-top: 6px; border-radius: 50%; }
+.progress-track.indeterminate::before { clip-path: inset(0 60% 0 0); animation: progress-indeterminate 1200ms ease-in-out infinite alternate; }
+@keyframes progress-indeterminate { from { transform: translateX(0); } to { transform: translateX(60%); } }
+.progress-track progress { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; pointer-events: none; }
+:root[data-theme="dark"] .progress-track { --progress-fill: #55e698; }
+.progress-status { display: block; min-height: 20px; margin: 6px 0 0; font-size: 14px; overflow-wrap: anywhere; }
+.progress-detail { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 28px; margin-top: 4px; color: var(--muted); font-size: 11px; line-height: 14px; overflow-wrap: anywhere; }
+.progress-cancel { width: 32px; height: 32px; min-height: 32px; padding: 0; margin-top: 6px; border-radius: 50%; }
+.progress-cancel:disabled { background: var(--line); border-color: var(--line); color: var(--muted); opacity: .4; cursor: not-allowed; }
+dialog.progress-dialog { min-width: 0; width: min(330px, calc(100vw - 24px)); padding: 24px; text-align: center; background: var(--panel-glass); -webkit-backdrop-filter: blur(20px) saturate(180%); backdrop-filter: blur(20px) saturate(180%); }
+dialog.progress-dialog .progress-content { margin: 0 auto; }
+dialog.analysis-complete { width: min(600px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto; text-align: left; }
+dialog.analysis-complete h3 { overflow-wrap: anywhere; }
+.analysis-summary { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px 12px; }
+.analysis-summary dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+.analysis-fields { max-height: 240px; overflow: auto; }
+.analysis-fields table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.analysis-fields th, .analysis-fields td { padding: 6px; border-bottom: 1px solid var(--line); text-align: right; overflow-wrap: anywhere; }
+.analysis-fields th:first-child, .analysis-fields td:first-child { text-align: left; }
+.analysis-issues { max-height: 160px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
 
 #splitter { flex: 0 0 6px; background: rgba(203, 213, 225, .75); cursor: row-resize; transition: background-color var(--ease-ui); position: relative; z-index: 3; pointer-events: auto; }
 #splitter:hover { background: #94a3b8; }
@@ -561,7 +597,7 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
   #tableTitle, dialog p, dialog output, #aboutDlg p { font-size: 16px; }
   #filter, dialog :is(input, textarea, select), .popup-form :is(input, textarea) { font-size: 16px; }
   button .action-icon,
-  #layerList .layer-reorder svg, #layerList .lmeta button svg, #layerList .kml-folder-row button svg,
+  #layerList .layer-reorder svg, #layerList .layer-rename svg, #layerList .lmeta button svg, #layerList .kml-folder-row button svg,
   #tableBar button svg, table.attrs button svg, #aboutDlg .action-icon,
   #map .leaflet-control-zoom svg, #map .leaflet-pm-toolbar svg, #map .leaflet-control-layers-toggle svg {
     width: 24px; height: 24px; flex: 0 0 24px;
@@ -570,16 +606,17 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
   #btnTheme, #btnToggleLayers, #btnEditHelp { width: 44px; height: 44px; flex-basis: 44px; }
   #headerActions > button { width: 44px; height: 44px; padding: 0; }
   #headerActions .button-label { display: none; }
-  #btnCancelImport, #aboutDlg .about-close { width: 44px; height: 44px; }
+  .progress-cancel, #aboutDlg .about-close { width: 44px; height: 44px; }
   #aboutDlg .about-feedback { min-height: 44px; }
   dialog menu { flex-wrap: wrap; }
-  #layerList .layer-reorder, #layerList .lmeta button, #layerList .kml-folder-row button { width: 44px; height: 44px; min-height: 44px; flex-basis: 44px; }
+  #layerList .layer-reorder, #layerList .layer-rename, #layerList .lmeta button, #layerList .kml-folder-row button { width: 44px; height: 44px; min-height: 44px; flex-basis: 44px; }
   #layerList > li > .layer-reorder, #layerList > li > input { grid-row: 1 / span 2; }
-  #layerList > li > .lname { grid-column: -2 / -1; grid-row: 1; align-self: end; }
+  #layerList > li > .lname { grid-column: -3 / -2; grid-row: 1; align-self: end; }
+  #layerList > li > .layer-rename { grid-column: -2 / -1; grid-row: 1 / span 2; }
   #layerList .lmeta { display: contents; }
-  #layerList .lmeta > span:first-child { grid-column: -2 / -1; grid-row: 2; align-self: start; min-width: 0; overflow-wrap: anywhere; }
+  #layerList .lmeta > span:first-child { grid-column: -3 / -2; grid-row: 2; align-self: start; min-width: 0; overflow-wrap: anywhere; }
   #layerList .lmeta .spacer { display: none; }
-  #layerList .layer-actions { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, 44px); gap: 8px; margin-top: 4px; }
+  #layerList .layer-actions { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(5, 44px); gap: 4px; margin-top: 4px; }
   #layerList input[type=checkbox], #layerList input[type=color] { width: 36px; height: 36px; }
   #layerList input[type=checkbox]::after { width: 7px; height: 13px; border-width: 0 3px 3px 0; }
   #layerList .kml-folder-row { grid-template-columns: 36px 36px minmax(0, 1fr) auto 44px; min-height: 44px; }
@@ -614,8 +651,8 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
 
 @media (max-width: 760px) {
   #emptyState { padding: 0 48px 32px; }
-  #emptyUpload { width: min(240px, 100%); padding: 10px 12px; gap: 2px; border-radius: 8px; font-size: 15px; }
-  #emptyState .big { font-size: 18px; margin-bottom: 2px; }
+  #emptyUpload { width: min(240px, 100%); padding: 10px 12px; gap: 2px; border-radius: 8px; font-size: 14px; }
+  #emptyState .big { font-size: 16px; margin-bottom: 2px; }
   #emptyUpload .empty-upload-desktop { display: none; }
   #emptyUpload .empty-upload-mobile { display: block; }
   #dlg { min-width: 0; width: min(560px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto; }
@@ -684,6 +721,7 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .progress-track.indeterminate::before { animation: none; }
   #layerList li.layer-dragging { scale: 1; }
   button, select, #sidebar, #layerList li, #splitter, table.attrs tbody tr, .toast, dialog[open],
   #map .leaflet-bar a, #map .leaflet-control-layers-toggle,
@@ -696,6 +734,8 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
 }
 
 @media (forced-colors: active) {
+  .progress-track::before { display: none; }
+  .progress-track progress { opacity: 1; }
   #layerList input[type=checkbox] { appearance: auto; }
   #layerList input[type=checkbox]::after { display: none; }
   dialog .radio-options input { appearance: auto; accent-color: auto; }

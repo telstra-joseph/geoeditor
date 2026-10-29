@@ -43,8 +43,12 @@ async function readShapefile(buffer, name) {
 }
 
 async function readKml(text, name, format) {
-  const converted = await exchange({ type: 'kml', text, name });
-  await streamCollection(converted.collection, converted.name, format);
+  const dom = new DOMParser({ onError(level) { if (level !== 'warning') throw new Error('Not a valid KML document.'); } }).parseFromString(text, 'text/xml');
+  if (!dom.documentElement || dom.documentElement.localName !== 'kml') throw new Error('Not a valid KML document.');
+  const collection = ImportCore.fromKml(dom, toGeoJSON);
+  const document = dom.getElementsByTagName('Document')[0];
+  const title = document && [...document.childNodes].find(node => node.localName === 'name');
+  await streamCollection(collection, title?.textContent.trim() || name, format);
 }
 
 async function run(job) {
@@ -106,4 +110,9 @@ self.onmessage = event => {
   }
 };
 
-postMessage({ type: 'ready' });
+import('../lib/xmldom.mjs').then(xml => {
+  self.DOMParser = xml.DOMParser;
+  self.XMLSerializer = xml.XMLSerializer;
+  importScripts('../lib/togeojson.js');
+  postMessage({ type: 'ready', protocol: 2 });
+}).catch(error => { throw error; });

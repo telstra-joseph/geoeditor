@@ -43,6 +43,7 @@
     <button id="btnDlLayer" title="Download the active layer"><i data-lucide="download" class="action-icon" aria-hidden="true"></i> Active layer</button>
     <button id="btnDlAll" class="primary" title="Download every layer"><i data-lucide="download" class="action-icon" aria-hidden="true"></i> All layers</button>
     <button id="btnDownload" type="button" class="primary" title="Download layers" aria-label="Download" aria-haspopup="dialog" disabled><i data-lucide="download" class="action-icon" aria-hidden="true"></i><span class="button-label">Download</span></button>
+    <button id="btnSession" type="button" title="Session" aria-label="Session" aria-haspopup="dialog" disabled><i data-lucide="save" class="action-icon" aria-hidden="true"></i><span class="button-label">Session</span></button>
     <button id="btnTheme" type="button" title="Switch theme" aria-label="Switch theme" aria-pressed="false"><i data-lucide="moon" class="action-icon" aria-hidden="true"></i></button>
     </div>
   </header>
@@ -68,11 +69,13 @@
           <li><b>Download:</b> choose the active layer or all layers, then a format. A row's download icon exports just that feature. Selected-feature values can be used as filenames.</li>
           <li><b>QGIS styles:</b> shapefile export includes column, category, symbol and legend options. Keep each .qml beside its matching .shp. Exports use WGS84; mixed layers split by geometry type.</li>
           <li><b>Delete carefully:</b> bulk deletion affects the whole active layer, including hidden rows. Deletions cannot be undone.</li>
-          <li><b>Save your work:</b> download before refreshing or closing the tab. Layers are not saved automatically.</li>
+          <li><b>Save your work:</b> choose Session to save locally before refreshing or closing the tab. Only one session is stored; saving replaces it. The saved session restores automatically. Download files for a portable backup.</li>
         </ul>
       </details>
       </div>
     </aside>
+
+    <input id="sidebarSplitter" type="range" min="330" max="330" value="330" step="1" aria-label="Resize Layers panel" aria-controls="sidebar" title="Resize Layers panel">
 
     <section id="workspace">
       <div id="mapWrap">
@@ -85,14 +88,14 @@
           </button>
         </div>
         <div id="importProgress" hidden>
-          <div class="import-progress-content">
-            <div class="import-progress-title">Adding layer</div>
-            <div id="importProgressTrack">
+          <div class="import-progress-content progress-content">
+            <div class="import-progress-title progress-title">Adding layer</div>
+            <div id="importProgressTrack" class="progress-track">
               <progress id="importProgressBar" max="100" value="0" aria-label="Import progress"></progress>
             </div>
-            <output id="importProgressStatus" aria-live="polite"></output>
-            <div id="importProgressFile"></div>
-            <button id="btnCancelImport" type="button" aria-label="Cancel import" title="Cancel import"><i data-lucide="x" class="action-icon" aria-hidden="true"></i></button>
+            <output id="importProgressStatus" class="progress-status" aria-live="polite"></output>
+            <div id="importProgressFile" class="progress-detail"></div>
+            <button id="btnCancelImport" class="progress-cancel" type="button" aria-label="Cancel import" title="Cancel import"><i data-lucide="x" class="action-icon" aria-hidden="true"></i></button>
           </div>
         </div>
       </div>
@@ -135,7 +138,7 @@
       <h1 id="aboutTitle" tabindex="-1">Geo Editor</h1>
       <p>Imagineered by Joseph Malicdem</p>
       <div class="about-details">
-        <p>Version 2.0</p>
+        <p>Version 3.0</p>
         <p>October 2026</p>
       </div>
       <a class="about-feedback" href="mailto:joseph.malicdem@team.telstra.com?subject=Geo%20Editor%20Feedback"><i data-lucide="mail" class="action-icon" aria-hidden="true"></i>Send feedback</a>
@@ -247,6 +250,43 @@
     </form>
   </dialog>
 
+  <dialog id="sessionProgressDlg" class="progress-dialog" aria-labelledby="sessionProgressTitle">
+    <div class="progress-content">
+      <h3 id="sessionProgressTitle" class="progress-title">Session</h3>
+      <div class="progress-track">
+        <progress id="sessionProgressBar" max="1" value="0" aria-label="Session progress"></progress>
+      </div>
+      <output id="sessionProgressStatus" class="progress-status" aria-live="polite"></output>
+    </div>
+  </dialog>
+
+  <dialog id="maskProgressDlg" class="progress-dialog" aria-labelledby="maskProgressTitle">
+    <div class="progress-content">
+      <h3 id="maskProgressTitle" class="progress-title">Mask layer</h3>
+      <div class="progress-track">
+        <progress id="maskProgressBar" max="1" value="0" aria-label="Mask progress"></progress>
+      </div>
+      <output id="maskProgressStatus" class="progress-status" aria-live="polite"></output>
+      <button id="btnCancelMask" class="progress-cancel" type="button" aria-label="Cancel mask" title="Cancel mask"><i data-lucide="x" class="action-icon" aria-hidden="true"></i></button>
+    </div>
+  </dialog>
+
+  <dialog id="analysisDlg" class="progress-dialog" aria-labelledby="analysisProgressTitle">
+    <div id="analysisProgress" class="progress-content">
+      <h3 id="analysisProgressTitle" class="progress-title">Analyzing layer</h3>
+      <div class="progress-track"><progress id="analysisProgressBar" max="1" value="0" aria-label="Analysis progress"></progress></div>
+      <output id="analysisProgressStatus" class="progress-status" aria-live="polite"></output>
+      <button id="btnCancelAnalysis" class="progress-cancel" type="button" aria-label="Cancel analysis" title="Cancel analysis"><i data-lucide="x" class="action-icon" aria-hidden="true"></i></button>
+    </div>
+    <section id="analysisResults" hidden aria-labelledby="analysisResultTitle">
+      <h3 id="analysisResultTitle">Layer analysis</h3>
+      <dl id="analysisSummary" class="analysis-summary"></dl>
+      <div class="analysis-fields"><table id="analysisFields"><caption>Numeric attributes</caption><thead><tr><th>Field</th><th>Count</th><th>Min</th><th>Max</th><th>Mean</th></tr></thead><tbody></tbody></table></div>
+      <pre id="analysisIssues" class="analysis-issues"></pre>
+      <menu><button id="btnDownloadAnalysis" type="button"><i data-lucide="download" class="action-icon" aria-hidden="true"></i>Download report</button><button id="btnCloseAnalysis" type="button"><i data-lucide="x" class="action-icon" aria-hidden="true"></i>Close</button></menu>
+    </section>
+  </dialog>
+
   <script src="lib/leaflet.js"></script>
   <script src="lib/pixi.min.js"></script>
   <script src="js/gpu-renderer.js"></script>
@@ -259,6 +299,17 @@
   <script src="lib/lucide.js"></script>
   <script src="js/import-core.js"></script>
   <script src="lib/purify.min.js"></script>
+  <script src="lib/turf.min.js"></script>
+  <script src="js/layer-mask.js"></script>
+  <script src="js/geometry-core.js"></script>
+  <script src="js/session-core.js"></script>
+  <script src="js/session-store.js"></script>
+  <script src="js/background-tasks.js"></script>
+  <script src="js/export-core.js"></script>
+  <script src="js/table-core.js"></script>
+  <script src="lib/rbush.js"></script>
+  <script src="js/spatial-core.js"></script>
+  <script src="js/spatial-queries.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>

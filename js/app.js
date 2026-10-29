@@ -6,6 +6,9 @@
   const PALETTE = ['#2563eb', '#dc2626', '#16a34a', '#d97706', '#9333ea', '#0891b2', '#db2777', '#65a30d'];
   const PAGE_SIZE = 200;
   const columnWidths = new WeakMap();
+  const sessionStore = new SessionStore();
+  let sessionBusy = false;
+  let sessionStartupPending = true;
   const MIN_COLUMN_WIDTH = 120;
   const GEOM_LABEL = { Mixed: 'Mixed', Point: 'Points', Line: 'Lines', Polygon: 'Polygons' };
 
@@ -251,7 +254,8 @@
   const imagery = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
     maxZoom: 19, attribution: 'Tiles &copy; Esri',
   });
-  const basemapControl = L.control.layers({ OpenStreetMap: osm, Satellite: imagery, Blank: L.layerGroup() }, null, { position: 'topright' }).addTo(map);
+  const blank = L.layerGroup();
+  const basemapControl = L.control.layers({ OpenStreetMap: osm, Satellite: imagery, Blank: blank }, null, { position: 'topright' }).addTo(map);
   const basemapToggle = basemapControl.getContainer().querySelector('.leaflet-control-layers-toggle');
   basemapToggle.replaceChildren(actionIcon('Layers'));
   basemapToggle.title = 'Choose basemap';
@@ -307,7 +311,10 @@
       heldButton = null;
       suppressUntil = 0;
       toolbar.classList.remove('mobile-tools-open');
-      tools.forEach(tool => tool.querySelector('.leaflet-buttons-control-button').removeAttribute('aria-expanded'));
+      tools.forEach(tool => {
+        tool.inert = compactMapControls && tool !== current;
+        tool.querySelector('.leaflet-buttons-control-button').removeAttribute('aria-expanded');
+      });
       if (compactMapControls) current.querySelector('.leaflet-buttons-control-button').setAttribute('aria-expanded', 'false');
     };
     const cancelHold = () => {
@@ -315,6 +322,7 @@
       pointerStart = null;
     };
     const openTools = () => {
+      tools.forEach(tool => { tool.inert = false; });
       toolbar.classList.add('mobile-tools-open');
       current.querySelector('.leaflet-buttons-control-button').setAttribute('aria-expanded', 'true');
     };
@@ -353,10 +361,19 @@
         return;
       }
       heldButton = null;
+      const previousBounds = button.getBoundingClientRect();
+      const changed = !current.contains(button);
       current.classList.remove('mobile-tool-current');
       current = button.closest('.button-container');
       current.classList.add('mobile-tool-current');
       closeTools();
+      if (changed && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        const bounds = button.getBoundingClientRect();
+        button.animate([
+          { transform: `translate(${previousBounds.left - bounds.left}px, ${previousBounds.top - bounds.top}px)` },
+          { transform: 'translate(0, 0)' },
+        ], { duration: 220, easing: 'cubic-bezier(.22, 1, .36, 1)' });
+      }
     }, true);
     toolbar.addEventListener('keydown', (event) => {
       if (!compactMapControls) return;
@@ -643,7 +660,8 @@
   }
 
   function folderDisplaySelection(lyr, all, limit, bounds) {
-    const featureFolders = new Set(all.map(leaf => leaf.feature?.kml?.folderIds?.at(-1)).filter(Boolean));
+    const featureFolders = lyr.spatialCache?.version === lyr.spatialVersion ? lyr.spatialCache.featureFolders :
+      new Set(all.map(leaf => leaf.feature?.kml?.folderIds?.at(-1)).filter(Boolean));
     const groups = new Map();
     all.forEach(leaf => {
       if (!kmlLeafVisible(lyr, leaf) || !leafIntersectsBounds(leaf, bounds)) return;
@@ -662,9 +680,49 @@
     return new Set([...chosen].flatMap(group => group.leaves));
   }
 
-  function syncLayerDisplay(lyr) {
+  async function requestSpatialDisplay(lyr) {
+    const request = lyr.spatialRequest = (lyr.spatialRequest || 0) + 1;
+    const version = lyr.spatialVersion;
+    try {
+      let cache = lyr.spatialCache;
+      if (!cache || cache.version !== version) {
+        const leaves = leavesOf(lyr);
+        const records = [];
+        const featureFolders = new Set();
+        let started = performance.now();
+        for (const [index, leaf] of leaves.entries()) {
+          const folder = leaf.feature?.kml?.folderIds?.at(-1);
+          if (folder) featureFolders.add(folder);
+          const bounds = leaf.getBounds ? leaf.getBounds() : L.latLngBounds(leaf.getLatLng(), leaf.getLatLng());
+          if (bounds.isValid()) records.push({ index, minX: bounds.getWest(), minY: bounds.getSouth(), maxX: bounds.getEast(), maxY: bounds.getNorth() });
+          if (performance.now() - started >= 8) {
+            await new Promise(resolve => setTimeout(resolve, 0));
+            if (request !== lyr.spatialRequest || version !== lyr.spatialVersion || !map.hasLayer(lyr.group)) return;
+            started = performance.now();
+          }
+        }
+        cache = { version, leaves, records, featureFolders };
+        lyr.spatialCache = cache;
+      }
+      const bounds = uncoveredMapBounds();
+      const indices = await SpatialQueries.query(lyr.id, cache.records, bounds && {
+        minX: bounds.getWest(), minY: bounds.getSouth(), maxX: bounds.getEast(), maxY: bounds.getNorth(),
+      });
+      if (request !== lyr.spatialRequest || version !== lyr.spatialVersion || panelResizeActive || !map.hasLayer(lyr.group) || !state.layers.includes(lyr)) return;
+      syncLayerDisplay(lyr, indices.map(index => cache.leaves[index]));
+    } catch (error) {
+      if (request === lyr.spatialRequest && map.hasLayer(lyr.group)) syncLayerDisplay(lyr, leavesOf(lyr));
+    }
+  }
+
+  function syncLayerDisplay(lyr, indexed = null) {
     if (!map.hasLayer(lyr.group) || lyr.importing) return;
-    const all = leavesOf(lyr);
+    if (!indexed && lyr.featureCount >= 2000) {
+      const cached = !!lyr.spatialCache;
+      requestSpatialDisplay(lyr);
+      if (cached) return;
+    }
+    const all = indexed || leavesOf(lyr);
     const limit = displayLimit();
     const grouped = lyr.kmlFolders.length > 0;
     const bounds = uncoveredMapBounds();
@@ -735,25 +793,34 @@
   }
 
   let displayRefreshTimer = null;
+  let panelResizeActive = false;
   function scheduleMapDisplay() {
+    if (panelResizeActive) return;
     if (displayRefreshTimer !== null) return;
     displayRefreshTimer = setTimeout(() => {
       displayRefreshTimer = null;
-      state.layers.forEach(syncLayerDisplay);
+      state.layers.forEach(lyr => syncLayerDisplay(lyr));
     }, 32);
   }
   map.on('moveend zoomend resize', scheduleMapDisplay);
 
   function configureLayerDisplay(lyr) {
     const group = lyr.group;
+    lyr.featureCount = Object.keys(group._layers).length;
+    lyr.spatialVersion = 0;
     group.onAdd = () => syncLayerDisplay(lyr);
     group.onRemove = () => {
+      lyr.spatialRequest = (lyr.spatialRequest || 0) + 1;
+      lyr.spatialCache = null;
+      SpatialQueries.release(lyr.id);
       lyr.displayed.forEach(leaf => map.removeLayer(leaf));
       lyr.displayed.clear();
     };
     group.addLayer = function(leaf) {
       if (this.hasLayer(leaf)) return this;
       lyr.sitePolygons = null;
+      lyr.spatialVersion++;
+      lyr.featureCount++;
       leaf.addEventParent(this);
       this._layers[L.stamp(leaf)] = leaf;
       this.fire('layeradd', { layer: leaf });
@@ -763,6 +830,7 @@
     const removeLayer = group.removeLayer;
     group.removeLayer = function(leaf) {
       lyr.sitePolygons = null;
+      if (this.hasLayer(leaf)) { lyr.spatialVersion++; lyr.featureCount--; }
       lyr.displayed.delete(typeof leaf === 'number' ? this.getLayer(leaf) : leaf);
       const result = removeLayer.call(this, leaf);
       scheduleMapDisplay();
@@ -821,9 +889,15 @@
 
   function wireLeaf(lyr, leaf) {
     leaf._glayer = lyr;
+    leaf.on('pm:edit pm:dragend pm:markerdragend move edit', () => {
+      lyr.spatialVersion++;
+      lyr.sitePolygons = null;
+      scheduleMapDisplay();
+    });
     if (!leaf.feature) leaf.feature = { type: 'Feature', properties: {}, geometry: null };
     if (!leaf.feature.properties) leaf.feature.properties = {};
     leaf.on('click', (ev) => {
+      if (pendingMask) return;
       L.DomEvent.stopPropagation(ev);
       selectLeaf(leaf, { fromMap: true });
       if (!pmBusy()) openPopup(leaf, ev.latlng);
@@ -890,6 +964,215 @@
   function zoomToLayer(lyr) {
     fitVisibleBounds(lyr.group.getBounds());
   }
+
+  let pendingMask = null;
+
+  async function collectLayerFeatures(lyr, signal) {
+    const features = [];
+    let started = performance.now();
+    for (const leaf of leavesOf(lyr)) {
+      signal.throwIfAborted();
+      features.push(leaf.toGeoJSON(false));
+      if (performance.now() - started >= 8) {
+        await paintImport(signal);
+        started = performance.now();
+      }
+    }
+    return features;
+  }
+
+  let analysisBusy = false;
+  async function analyzeLayer(lyr) {
+    if (analysisBusy) return;
+    analysisBusy = true;
+    const dialog = $('analysisDlg');
+    const bar = $('analysisProgressBar');
+    const status = $('analysisProgressStatus');
+    const button = $('btnCancelAnalysis');
+    const controller = new AbortController();
+    const cancel = event => { event?.preventDefault(); controller.abort(); button.disabled = true; };
+    let completed = false;
+    dialog.classList.remove('analysis-complete');
+    dialog.setAttribute('aria-labelledby', 'analysisProgressTitle');
+    $('analysisProgress').hidden = false;
+    $('analysisResults').hidden = true;
+    bar.max = lyr.featureCount || 1;
+    bar.value = 0;
+    status.textContent = 'Preparing features';
+    button.disabled = false;
+    button.addEventListener('click', cancel);
+    dialog.addEventListener('cancel', cancel, true);
+    const view = bindProgressView(dialog);
+    dialog.showModal();
+    try {
+      await paintImport(controller.signal);
+      const features = await collectLayerFeatures(lyr, controller.signal);
+      const onProgress = value => { bar.value = value; status.textContent = `${value} of ${features.length} features`; };
+      const report = await BackgroundTasks.run('geometry', { features }, {
+        signal: controller.signal, onProgress,
+        fallback: () => GeometryCore.analyze(features, { signal: controller.signal, onProgress }),
+      });
+      controller.signal.throwIfAborted();
+      const format = value => typeof value === 'number' ? value.toLocaleString(undefined, { maximumFractionDigits: 3 }) : value;
+      const summary = $('analysisSummary');
+      summary.replaceChildren();
+      const metrics = [['Features', report.featureCount], ['Valid', report.validFeatures], ['Invalid', report.invalidFeatures],
+        ['Empty', report.emptyFeatures], ['Polygon area (m²)', report.areaSquareMetres], ['Line length (m)', report.lineLengthMetres],
+        ...Object.entries(report.geometryTypes)];
+      metrics.forEach(([name, value]) => {
+        const term = document.createElement('dt');
+        const detail = document.createElement('dd');
+        term.textContent = name;
+        detail.textContent = format(value);
+        summary.append(term, detail);
+      });
+      const body = $('analysisFields').tBodies[0];
+      body.replaceChildren();
+      report.numericFields.slice(0, 50).forEach(field => {
+        const row = body.insertRow();
+        [field.name, field.count, field.min, field.max, field.mean].forEach(value => { row.insertCell().textContent = format(value); });
+      });
+      $('analysisFields').hidden = !report.numericFields.length;
+      $('analysisIssues').textContent = report.issues.slice(0, 20).map(issue => `Feature ${issue.feature}: ${issue.message}`).join('\n');
+      $('analysisResultTitle').textContent = lyr.name;
+      $('btnDownloadAnalysis').onclick = () => saveBlob(new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' }), `${lyr.name}-analysis.json`);
+      $('analysisProgress').hidden = true;
+      $('analysisResults').hidden = false;
+      dialog.classList.add('analysis-complete');
+      dialog.setAttribute('aria-labelledby', 'analysisResultTitle');
+      $('btnCloseAnalysis').focus();
+      completed = true;
+    } catch (error) {
+      if (!controller.signal.aborted) toast(`Analysis failed: ${error.message}`, 'error');
+    } finally {
+      view.disconnect();
+      button.removeEventListener('click', cancel);
+      dialog.removeEventListener('cancel', cancel, true);
+      if (!completed) await closeDialog(dialog);
+      analysisBusy = false;
+    }
+  }
+  $('btnCloseAnalysis').addEventListener('click', () => closeDialog($('analysisDlg')));
+
+  function maskPolygons(lyr) {
+    const polygons = [];
+    turf.flattenEach(lyr.group.toGeoJSON(false), feature => {
+      if (feature.geometry?.type === 'Polygon') polygons.push(feature);
+    });
+    return polygons;
+  }
+
+  async function applyLayerMask(lyr, polygons, name, exclude = false) {
+    const dialog = $('maskProgressDlg');
+    const progress = $('maskProgressBar');
+    const status = $('maskProgressStatus');
+    const cancelButton = $('btnCancelMask');
+    const controller = new AbortController();
+    let cancelled = false;
+    const cancel = event => {
+      event.preventDefault();
+      cancelled = true;
+      controller.abort();
+      cancelButton.disabled = true;
+      status.textContent = 'Cancelling…';
+    };
+    dialog.addEventListener('cancel', cancel);
+    cancelButton.addEventListener('click', cancel);
+    cancelButton.disabled = false;
+    progress.value = 0;
+    progress.max = 1;
+    status.textContent = 'Preparing mask…';
+    const progressView = bindProgressView(dialog);
+    dialog.showModal();
+    try {
+      await new Promise(resolve => setTimeout(resolve, 0));
+      if (cancelled) return null;
+      const source = lyr.group.toGeoJSON(false).features;
+      progress.max = source.length || 1;
+      const report = count => {
+        progress.value = count;
+        status.textContent = `${count} / ${source.length} ${source.length === 1 ? 'feature' : 'features'}`;
+      };
+      const features = await BackgroundTasks.run('mask', { polygons, features: source, exclude }, {
+        signal: controller.signal, onProgress: report,
+        fallback: async () => {
+          const mask = LayerMask.combine(polygons);
+          const result = [];
+          let sliceStart = performance.now();
+          for (let index = 0; index < source.length; index++) {
+            controller.signal.throwIfAborted();
+            const clipped = LayerMask.clip(source[index], mask, exclude);
+            if (clipped) result.push(clipped);
+            if (performance.now() - sliceStart >= 8 || index === source.length - 1) {
+              report(index + 1);
+              await new Promise(resolve => setTimeout(resolve, 0));
+              sliceStart = performance.now();
+            }
+          }
+          return result;
+        },
+      });
+      if (cancelled || !state.layers.includes(lyr)) return null;
+      if (!features.length) {
+        toast(exclude ? 'No features remain outside the mask. No layer was created.' : 'No features intersect the mask. No layer was created.', 'warn');
+        return null;
+      }
+      const folderIds = new Set(features.flatMap(feature => feature.kml?.folderIds || []));
+      for (const id of folderIds) {
+        const parentId = lyr.kmlFolderMap.get(id)?.parentId;
+        if (parentId != null) folderIds.add(parentId);
+      }
+      const result = createLayer({ name, features, fields: lyr.fields, types: lyr.types,
+        geomType: lyr.geomType, format: lyr.format, kmlFolders: lyr.kmlFolders.filter(folder => folderIds.has(folder.id)) });
+      result.color = lyr.color;
+      leavesOf(result).forEach(leaf => restyle(leaf));
+      setActive(result);
+      fitVisibleBounds(result.group.getBounds());
+      toast(`Created “${name}” with ${features.length} ${features.length === 1 ? 'feature' : 'features'}.`);
+      return result;
+    } catch (error) {
+      if (cancelled) return null;
+      toast(`Unable to mask layer: ${error.message}`, 'warn', 8000);
+      return null;
+    } finally {
+      dialog.removeEventListener('cancel', cancel);
+      cancelButton.removeEventListener('click', cancel);
+      await closeDialog(dialog, cancelled ? 'cancel' : 'ok');
+      progressView.disconnect();
+    }
+  }
+
+  async function maskLayer(lyr) {
+    const selected = state.selected instanceof L.Polygon ? state.selected.toGeoJSON(false) : null;
+    const sources = state.layers.filter(layer => layer !== lyr && leavesOf(layer).some(leaf => leaf instanceof L.Polygon));
+    const options = [['draw', 'Draw a polygon']];
+    if (selected) options.push(['selected', 'Selected polygon']);
+    sources.forEach(layer => options.push([String(layer.id), `Layer: ${layer.name}`]));
+    const values = await askForm('Mask layer', [
+      { key: 'source', label: 'Mask polygon', type: 'select', options, value: selected ? 'selected' : 'draw' },
+      { key: 'name', label: 'Output layer name', value: `${lyr.name} (masked)`, required: true },
+      { key: 'mode', label: 'Mask operation', type: 'select', value: 'retain',
+        options: [['retain', 'Retain inside mask'], ['exclude', 'Exclude inside mask']] },
+    ], { okLabel: 'Continue' });
+    if (!values || !values.name.trim()) return;
+    const name = values.name.trim();
+    const exclude = values.mode === 'exclude';
+    if (values.source === 'draw') {
+      map.closePopup();
+      map.pm.disableDraw();
+      if (map.pm.globalEditModeEnabled()) map.pm.disableGlobalEditMode();
+      if (map.pm.globalDragModeEnabled()) map.pm.disableGlobalDragMode();
+      if (map.pm.globalRemovalModeEnabled()) map.pm.disableGlobalRemovalMode();
+      if (map.pm.globalCutModeEnabled()) map.pm.disableGlobalCutMode();
+      pendingMask = { lyr, name, exclude };
+      map.pm.enableDraw('Polygon', { snappable: true });
+      return;
+    }
+    const source = sources.find(layer => String(layer.id) === values.source);
+    await applyLayerMask(lyr, selected && values.source === 'selected' ? [selected] : maskPolygons(source), name, exclude);
+  }
+
+  map.on('pm:drawend', () => { pendingMask = null; });
 
   function fitVisibleBounds(bounds, maxZoom = 17) {
     if (!bounds.isValid()) return;
@@ -1054,6 +1337,12 @@
   map.on('pm:create', (e) => {
     const leaf = e.layer;
     map.removeLayer(leaf);
+    if (pendingMask) {
+      const { lyr, name, exclude } = pendingMask;
+      pendingMask = null;
+      applyLayerMask(lyr, [leaf.toGeoJSON(false)], name, exclude);
+      return;
+    }
     leaf.options.renderer = vectorRenderer;
     let lyr = state.active;
     if (!lyr) {
@@ -1284,6 +1573,164 @@
     $('emptyState').classList.toggle('hidden', state.layers.length > 0);
     $('layerHint').style.display = state.layers.length ? 'none' : '';
   }
+
+  async function sessionSnapshot() {
+    const center = map.getCenter();
+    const selectedLayer = state.layers.indexOf(state.selected?._glayer);
+    const layers = [];
+    const signal = new AbortController().signal;
+    for (const lyr of state.layers) {
+      $('sessionProgressStatus').textContent = `Saving “${lyr.name}”…`;
+      layers.push({
+        name: lyr.name, fields: lyr.fields.slice(), types: { ...lyr.types }, geomType: lyr.geomType,
+        format: lyr.format, color: lyr.color, visible: lyr.visible,
+        kmlFolders: structuredClone(lyr.kmlFolders), features: await collectLayerFeatures(lyr, signal),
+        widths: [...(columnWidths.get(lyr) || new Map())],
+      });
+    }
+    return {
+      version: 1, savedAt: new Date().toISOString(),
+      layers,
+      active: state.layers.indexOf(state.active),
+      selected: selectedLayer < 0 ? null : { layer: selectedLayer, feature: leavesOf(state.layers[selectedLayer]).indexOf(state.selected) },
+      page: state.page, filter: state.filter, sort: state.sort ? { ...state.sort } : null, colorIdx: state.colorIdx,
+      view: {
+        center: [center.lat, center.lng], zoom: map.getZoom(),
+        basemap: map.hasLayer(osm) ? 'OpenStreetMap' : map.hasLayer(imagery) ? 'Satellite' : 'Blank',
+        collapsed: $('sidebar').classList.contains('collapsed'), tableBasis: $('tablePanel').style.flexBasis,
+        sidebarWidth: parseFloat($('main').style.getPropertyValue('--sidebar-width')) || 330,
+        sidebarFitNames: $('main').classList.contains('sidebar-fit-names'),
+        theme: document.documentElement.dataset.theme,
+      },
+    };
+  }
+
+  async function restoreSession(saved) {
+    await BackgroundTasks.run('session', { operation: 'validate', session: saved }, { fallback: () => SessionCore.validate(saved) });
+    const previous = { ...state, layers: state.layers.slice() };
+    const staged = [];
+    const signal = new AbortController().signal;
+    const progress = $('sessionProgressBar');
+    let restored = false;
+    try {
+      map.closePopup();
+      map.pm.disableDraw();
+      progress.max = saved.layers.reduce((count, lyr) => count + lyr.features.length, 0) || 1;
+      let completed = 0;
+      for (const data of saved.layers) {
+        const lyr = createLayer({ ...data, features: [], importing: true });
+        staged.push(lyr);
+        lyr.color = data.color;
+        lyr.visible = data.visible !== false;
+        columnWidths.set(lyr, new Map(data.widths || []));
+        $('sessionProgressStatus').textContent = `Restoring “${lyr.name}”…`;
+        await appendImportFeatures(lyr, data.features, fraction => {
+          progress.value = completed + fraction * data.features.length;
+        }, { signal });
+        completed += data.features.length;
+      }
+      staged.forEach(lyr => {
+        if (!lyr.visible) map.removeLayer(lyr.group);
+        lyr.importing = false;
+        lyr.group.options.pmIgnore = false;
+        L.PM.reInitLayer(lyr.group);
+      });
+      previous.layers.forEach(lyr => map.removeLayer(lyr.group));
+      state.layers = staged;
+      state.active = staged[saved.active] || staged[0] || null;
+      state.selected = saved.selected ? staged[saved.selected.layer]?.group.getLayers()[saved.selected.feature] || null : null;
+      state.filter = typeof saved.filter === 'string' ? saved.filter : '';
+      state.sort = saved.sort || null;
+      state.page = Number.isInteger(saved.page) ? Math.max(0, saved.page) : 0;
+      state.colorIdx = Number.isInteger(saved.colorIdx) ? saved.colorIdx : staged.length;
+      state.undo = [];
+      $('btnUndo').disabled = true;
+      $('btnUndo').title = 'Undo last table edit';
+      $('filter').value = state.filter;
+      if (state.active) $('fmt').value = state.active.format;
+      const base = { OpenStreetMap: osm, Satellite: imagery, Blank: blank };
+      [osm, imagery, blank].forEach(layer => map.removeLayer(layer));
+      (base[saved.view.basemap] || osm).addTo(map);
+      if (saved.view.theme === 'dark' || saved.view.theme === 'light') applyTheme(saved.view.theme);
+      setSidebarWidth(Number.isFinite(saved.view.sidebarWidth) ? saved.view.sidebarWidth : 330, !!saved.view.sidebarFitNames);
+      if ($('sidebar').classList.contains('collapsed') !== !!saved.view.collapsed) $('btnToggleLayers').click();
+      $('sidebar').getAnimations().forEach(animation => animation.finish());
+      $('tablePanel').style.flexBasis = saved.view.tableBasis || '';
+      initialMapViewPending = false;
+      map.invalidateSize({ pan: false });
+      map.setView(saved.view.center, saved.view.zoom, { animate: false });
+      syncLayerOrder();
+      renderAll();
+      if (state.selected) restyle(state.selected);
+      restored = true;
+    } finally {
+      if (!restored) {
+        staged.forEach(lyr => map.removeLayer(lyr.group));
+        Object.assign(state, previous);
+        previous.layers.filter(lyr => lyr.visible).forEach(lyr => lyr.group.addTo(map));
+        syncLayerOrder();
+        renderAll();
+      }
+    }
+  }
+
+  async function runSessionTask(label, action) {
+    if (sessionBusy) return;
+    sessionBusy = true;
+    $('btnSession').disabled = true;
+    const dialog = $('sessionProgressDlg');
+    const preventCancel = event => event.preventDefault();
+    dialog.addEventListener('cancel', preventCancel, true);
+    $('sessionProgressBar').removeAttribute('value');
+    $('sessionProgressStatus').textContent = label;
+    const progressView = bindProgressView(dialog);
+    dialog.showModal();
+    try {
+      await new Promise(resolve => setTimeout(resolve, 0));
+      await action();
+      $('sessionProgressBar').value = $('sessionProgressBar').max;
+    } catch (error) {
+      toast(`Session failed: ${error.message}. Your previous saved copy is unchanged.`, 'warn', 9000);
+    } finally {
+      dialog.removeEventListener('cancel', preventCancel, true);
+      await closeDialog(dialog, 'ok');
+      progressView.disconnect();
+      sessionBusy = false;
+      $('btnSession').disabled = false;
+    }
+  }
+
+  $('btnSession').addEventListener('click', async () => {
+    if (sessionBusy) return;
+    if (state.layers.some(lyr => lyr.importing) || $('maskProgressDlg').open) {
+      toast('Wait for the current operation to finish before managing the session.', 'warn');
+      return;
+    }
+    try {
+      await importQueue;
+      const saved = await sessionStore.load();
+      const options = [['save', saved ? 'Replace saved session' : 'Save current session']];
+      if (saved) options.push(['restore', 'Restore saved session'], ['clear', 'Delete saved session']);
+      const result = await askForm('Session', [{ key: 'action', label: 'Session action', type: 'radio', value: 'save', options }], {
+        message: saved ? `Saved ${new Date(saved.savedAt).toLocaleString()}` : 'No saved session.', okLabel: 'Continue',
+      });
+      if (!result) return;
+      if (result.action === 'save') {
+        await runSessionTask('Saving session…', async () => {
+          await importQueue;
+          await sessionStore.save(await sessionSnapshot());
+          toast('Session saved in this browser.');
+        });
+      } else if (result.action === 'restore') {
+        if (state.layers.length && !await confirmBox('Restore session', 'Replace the current workspace with the saved session? Unsaved edits will be discarded.', 'Restore', true)) return;
+        await runSessionTask('Restoring session…', async () => { await importQueue; await restoreSession(saved); });
+      } else if (await confirmBox('Delete saved session', 'Delete the saved copy from this browser? The current workspace will not change.', 'Delete', true)) {
+        await runSessionTask('Deleting saved session…', async () => { await sessionStore.clear(); toast('Saved session deleted.'); });
+      }
+    } catch (error) {
+      toast(`Session storage is unavailable: ${error.message}`, 'warn', 9000);
+    }
+  });
 
   function iconButton(icon, title, onClick) {
     const b = document.createElement('button');
@@ -1563,6 +2010,11 @@
       name.className = 'lname';
       name.textContent = lyr.name;
       name.title = lyr.name;
+      const renameButton = iconButton('Pencil', 'Rename layer', async () => {
+        const r = await askForm('Rename layer', [{ key: 'name', label: 'Layer name', value: lyr.name, required: true }], { okLabel: 'Rename' });
+        if (r && r.name.trim()) { lyr.name = r.name.trim(); renderLayers(); renderTable(); }
+      });
+      renameButton.classList.add('layer-rename');
 
       const meta = document.createElement('div');
       meta.className = 'lmeta';
@@ -1575,16 +2027,14 @@
       const actions = document.createElement('div');
       actions.className = 'layer-actions';
       actions.append(
-        iconButton('Pencil', 'Rename layer', async () => {
-          const r = await askForm('Rename layer', [{ key: 'name', label: 'Layer name', value: lyr.name, required: true }], { okLabel: 'Rename' });
-          if (r && r.name.trim()) { lyr.name = r.name.trim(); renderLayers(); renderTable(); }
-        }),
         iconButton('Search', 'Zoom to layer', () => zoomToLayer(lyr)),
+        iconButton('VenetianMask', 'Mask layer', () => maskLayer(lyr)),
+        iconButton('ChartNoAxesCombined', 'Analyze layer', () => analyzeLayer(lyr)),
         downloadButton,
         iconButton('Trash2', 'Delete layer', () => deleteLayer(lyr))
       );
       meta.append(info, sp, actions);
-      li.append(layerReorderHandle(lyr, li), vis, color, name, meta);
+      li.append(layerReorderHandle(lyr, li), vis, color, name, renameButton, meta);
       if (lyr.kmlFolders.length) li.appendChild(renderKmlFolders(lyr));
       ul.appendChild(li);
     });
@@ -1598,8 +2048,13 @@
     tree.addEventListener('click', event => event.stopPropagation());
     const members = new Map(lyr.kmlFolders.map(folder => [folder.id, []]));
     leavesOf(lyr).forEach(leaf => (leaf.feature?.kml?.folderIds || []).forEach(id => members.get(id)?.push(leaf)));
+    const foldersByParent = new Map();
+    lyr.kmlFolders.forEach(folder => {
+      if (!foldersByParent.has(folder.parentId)) foldersByParent.set(folder.parentId, []);
+      foldersByParent.get(folder.parentId).push(folder);
+    });
     function appendFolders(parent, parentId) {
-      lyr.kmlFolders.filter(folder => folder.parentId === parentId).forEach(folder => {
+      (foldersByParent.get(parentId) || []).forEach(folder => {
         const branch = document.createElement('div');
         branch.className = 'kml-folder-branch';
         const row = document.createElement('div');
@@ -1608,9 +2063,16 @@
         children.className = 'kml-folder-children';
         children.id = `kml-${lyr.id}-${folder.id}`;
         children.hidden = !folder.expanded;
+        let populated = false;
+        const populate = () => {
+          if (populated) return;
+          populated = true;
+          appendFolders(children, folder.id);
+        };
         const disclosureTitle = () => `${folder.expanded ? 'Collapse' : 'Expand'} folder ${folder.name}`;
         const disclosure = iconButton(folder.expanded ? 'ChevronDown' : 'ChevronRight', disclosureTitle(), () => {
           folder.expanded = !folder.expanded;
+          if (folder.expanded) populate();
           children.hidden = !folder.expanded;
           disclosure.replaceChildren(actionIcon(folder.expanded ? 'ChevronDown' : 'ChevronRight'));
           disclosure.title = disclosureTitle();
@@ -1642,7 +2104,7 @@
         });
         zoom.disabled = !members.get(folder.id).length;
         row.append(disclosure, visible, name, count, zoom);
-        appendFolders(children, folder.id);
+        if (folder.expanded) populate();
         branch.append(row, children);
         parent.appendChild(branch);
       });
@@ -1664,29 +2126,16 @@
     return all.filter((leaf) => lyr.fields.some((f) => display(leaf.feature.properties[f]).toLowerCase().includes(q)));
   }
 
-  function sortedLeaves(lyr) {
-    const items = filteredLeaves(lyr);
-    if (!state.sort || !lyr.fields.includes(state.sort.field)) return items;
-    const { field, direction } = state.sort;
-    const type = lyr.types[field] || 'string';
-    return items.map((leaf, index) => ({ leaf, index })).sort((a, b) => {
-      const aValue = a.leaf.feature.properties[field];
-      const bValue = b.leaf.feature.properties[field];
-      const aEmpty = aValue === null || aValue === undefined || aValue === '';
-      const bEmpty = bValue === null || bValue === undefined || bValue === '';
-      if (aEmpty !== bEmpty) return aEmpty ? 1 : -1;
-      if (aEmpty) return a.index - b.index;
-      let result;
-      if (type === 'number') result = Number(aValue) - Number(bValue);
-      else if (type === 'boolean') result = Number(Boolean(aValue)) - Number(Boolean(bValue));
-      else result = String(aValue).localeCompare(String(bValue), undefined, { numeric: true, sensitivity: 'base' });
-      return result ? result * (direction === 'asc' ? 1 : -1) : a.index - b.index;
-    }).map(({ leaf }) => leaf);
-  }
+  let tableController = null;
+  let tableRequest = 0;
 
   function renderTable() {
+    const request = ++tableRequest;
+    tableController?.abort();
+    tableController = null;
     const lyr = state.active;
     const wrap = $('tableWrap');
+    wrap.removeAttribute('aria-busy');
     wrap.replaceChildren();
     $('btnAddField').disabled = !lyr;
     $('btnBulkDelete').disabled = !lyr || !lyr.fields.length || !leavesOf(lyr).length;
@@ -1704,7 +2153,48 @@
       wrap.appendChild(d);
       return;
     }
-    const items = sortedLeaves(lyr);
+    const leaves = leavesOf(lyr);
+    const job = {
+      rows: leaves.map((leaf, index) => ({ index, properties: leaf.feature.properties, folderIds: leaf.feature.kml?.folderIds })),
+      fields: lyr.fields, types: lyr.types, filter: state.filter, sort: state.sort,
+      folders: lyr.kmlFolders.map(folder => ({ id: folder.id, visible: folder.visible })),
+    };
+    const background = leaves.length >= 2000 && (state.filter.trim() || state.sort || lyr.kmlFolders.some(folder => folder.visible));
+    if (!background) {
+      renderTableRows(lyr, TableCore.query(job).map(index => leaves[index]));
+      return;
+    }
+    const controller = new AbortController();
+    tableController = controller;
+    wrap.setAttribute('aria-busy', 'true');
+    $('tableTitle').textContent = lyr.name;
+    $('tableCount').textContent = '';
+    $('pgPrev').disabled = true;
+    $('pgNext').disabled = true;
+    const pending = document.createElement('div');
+    pending.className = 'empty';
+    pending.setAttribute('role', 'status');
+    pending.textContent = 'Updating table...';
+    wrap.appendChild(pending);
+    BackgroundTasks.run('table', job, { signal: controller.signal, fallback: () => TableCore.query(job) }).then(indices => {
+      if (controller.signal.aborted || request !== tableRequest || state.active !== lyr) return;
+      wrap.replaceChildren();
+      renderTableRows(lyr, indices.map(index => leaves[index]));
+    }).catch(error => {
+      if (controller.signal.aborted || request !== tableRequest || state.active !== lyr) return;
+      toast(`Background table processing failed: ${error.message}. Using the local fallback.`, 'warn');
+      wrap.replaceChildren();
+      renderTableRows(lyr, TableCore.query(job).map(index => leaves[index]));
+    }).finally(() => {
+      if (request === tableRequest) {
+        tableController = null;
+        wrap.removeAttribute('aria-busy');
+      }
+    });
+  }
+
+  function renderTableRows(lyr, items) {
+    const wrap = $('tableWrap');
     const pages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
     state.page = Math.min(state.page, pages - 1);
     $('tableTitle').textContent = lyr.name;
@@ -1911,7 +2401,8 @@
 
   /* ---------- import ---------- */
   let importQueue = Promise.resolve();
-  let importWorkersEnabled = typeof Worker === 'function' && /^https?:$/.test(location.protocol);
+  const IMPORT_WORKER_PROTOCOL = 2;
+  let importWorkersEnabled = typeof Worker === 'function' && /^https?:$/.test(new URL(document.baseURI).protocol);
   const paintImport = async (signal) => {
     signal.throwIfAborted();
     await new Promise(resolve => setTimeout(resolve, 0));
@@ -1929,42 +2420,77 @@
     finally { signal.removeEventListener('abort', abort); }
   }
 
+  async function blockingImportStep(work, context) {
+    context.setCancellable(false);
+    try {
+      await new Promise(resolve => {
+        let frame;
+        const finish = () => {
+          clearTimeout(fallback);
+          cancelAnimationFrame(frame);
+          resolve();
+        };
+        const fallback = setTimeout(finish, 100);
+        frame = requestAnimationFrame(() => setTimeout(finish, 0));
+      });
+      context.signal.throwIfAborted();
+      return work();
+    } finally { context.setCancellable(true); }
+  }
+
+  function bindProgressView(root) {
+    const bar = root.querySelector('progress');
+    const track = root.querySelector('.progress-track');
+    let columns = 1;
+    const reveal = () => {
+      const indeterminate = !bar.hasAttribute('value');
+      track.classList.toggle('indeterminate', indeterminate);
+      const fraction = Math.max(0, Math.min(1, bar.value / bar.max));
+      track.style.setProperty('--progress-reveal', `${Math.floor(fraction * columns) / columns * 100}%`);
+    };
+    const columnObserver = new ResizeObserver(([entry]) => {
+      columns = Math.max(1, Math.round(entry.contentRect.width / 6));
+      reveal();
+    });
+    const valueObserver = new MutationObserver(reveal);
+    columnObserver.observe(track);
+    valueObserver.observe(bar, { attributes: true, attributeFilter: ['value', 'max'] });
+    reveal();
+    return {
+      disconnect() {
+        columnObserver.disconnect();
+        valueObserver.disconnect();
+      },
+    };
+  }
+
   function startImportProgress(files) {
     document.querySelector('.import-progress-title').textContent = files.length > 1 ? 'Adding layers' : 'Adding layer';
     const controller = new AbortController();
     const button = $('btnCancelImport');
     const cancel = () => controller.abort();
     button.disabled = false;
+    button.title = 'Cancel import';
     button.addEventListener('click', cancel);
     let completed = 0;
     let currentProgress = 0;
     let percent = 0;
-    let columns = 1;
-    const track = $('importProgressTrack');
-    const revealColumns = () => {
-      track.style.setProperty('--import-reveal', `${Math.floor(percent * columns / 100) / columns * 100}%`);
-    };
-    const columnObserver = new ResizeObserver(([entry]) => {
-      columns = Math.max(1, Math.round(entry.contentRect.width / 6));
-      revealColumns();
-    });
-    columnObserver.observe(track);
-    revealColumns();
-    const show = () => {
-      $('importProgress').hidden = false;
-      $('mapWrap').classList.add('importing');
-    };
-    const timer = setTimeout(show, 1000);
+    $('importProgressBar').value = 0;
+    const progressView = bindProgressView($('importProgress'));
+    $('importProgress').hidden = false;
+    $('mapWrap').classList.add('importing');
     $('mapWrap').setAttribute('aria-busy', 'true');
-    if (files.some(file => file.size >= 1024 * 1024)) show();
     return {
       signal: controller.signal,
+      setCancellable(enabled) {
+        button.disabled = !enabled;
+        button.title = enabled ? 'Cancel import' : 'Cancellation unavailable during this step';
+      },
       update(index, name, fraction, stage, count = 1) {
         controller.signal.throwIfAborted();
         if (index !== completed) { completed = index; currentProgress = 0; }
         currentProgress = Math.max(currentProgress, fraction);
         percent = Math.floor((index + currentProgress * count) / files.length * 100);
-        revealColumns();
         const label = files.length === 1 ? '1 file' : `${index + 1} of ${files.length} files`;
         $('importProgressBar').value = percent;
         $('importProgressBar').setAttribute('aria-valuetext', `${percent}% - ${label}`);
@@ -1973,8 +2499,7 @@
         $('importProgressFile').title = name;
       },
       close() {
-        clearTimeout(timer);
-        columnObserver.disconnect();
+        progressView.disconnect();
         button.removeEventListener('click', cancel);
         $('importProgress').hidden = true;
         $('mapWrap').classList.remove('importing');
@@ -2003,14 +2528,14 @@
 
   async function appendImportFeatures(lyr, features, report, context) {
     let sliceStart = performance.now();
-    for (let offset = 0; offset < features.length; offset += 100) {
+    for (let offset = 0; offset < features.length; offset++) {
       context.signal.throwIfAborted();
-      const batch = L.geoJSON(features.slice(offset, offset + 100), {
+      const batch = L.geoJSON(features[offset], {
         renderer: vectorRenderer, pointToLayer: lyr.group.options.pointToLayer,
       });
       batch.eachLayer(leaf => { wireLeaf(lyr, leaf); lyr.group.addLayer(leaf); });
-      report(Math.min(offset + 100, features.length) / features.length);
-      if (performance.now() - sliceStart >= 8 || offset + 100 >= features.length) {
+      if (performance.now() - sliceStart >= 8 || offset + 1 >= features.length) {
+        report((offset + 1) / features.length);
         await paintImport(context.signal);
         sliceStart = performance.now();
       }
@@ -2040,7 +2565,7 @@
   function loadImportWorker(job, report, context) {
     if (!importWorkersEnabled) return Promise.resolve(null);
     let worker;
-    try { worker = new Worker(new URL('js/import-worker.js', document.baseURI)); }
+    try { worker = new Worker(new URL(`js/import-worker.js?protocol=${IMPORT_WORKER_PROTOCOL}`, document.baseURI)); }
     catch { importWorkersEnabled = false; return Promise.resolve(null); }
     return new Promise((resolve, reject) => {
       let ready = false;
@@ -2079,6 +2604,11 @@
           const data = event.data;
           let value;
           if (data.type === 'ready') {
+            if (data.protocol !== IMPORT_WORKER_PROTOCOL) {
+              importWorkersEnabled = false;
+              finish(null, null);
+              return;
+            }
             ready = true;
             clearTimeout(startupTimer);
             worker.postMessage({ ...job, type: 'import' });
@@ -2088,10 +2618,7 @@
           if (data.type === 'warning') { toast(data.message, data.kind, 9000); return; }
           if (data.type === 'error') { finish(new Error(data.message)); return; }
           if (data.type === 'done') { finish(null, { layer: last }); return; }
-          if (data.type === 'kml') {
-            await paintImport(context.signal);
-            value = parseKmlCollection(data.text, data.name);
-          } else if (data.type === 'layer') {
+          if (data.type === 'layer') {
             metadata = data.metadata;
             current = createLayer({ name: data.name, format: data.format, ...metadata, importing: true });
             context.layers.add(current);
@@ -2099,7 +2626,7 @@
             await appendImportFeatures(current, data.features,
               fraction => report(data.start + (data.end - data.start) * fraction, 'Building layer'), context);
           } else if (data.type === 'layer-end') {
-            finishImportedLayer(current, metadata);
+            await blockingImportStep(() => finishImportedLayer(current, metadata), context);
             last = current;
             current = null;
           }
@@ -2113,7 +2640,7 @@
   async function addFromFeatureCollection(fc, name, format, report, context) {
     report(.55, 'Preparing features');
     await paintImport(context.signal);
-    const prep = ImportCore.prepare(fc, format);
+    const prep = await blockingImportStep(() => ImportCore.prepare(fc, format), context);
     if (!prep.features.length) { toast(`“${name}” contains no features with geometry.`, 'warn'); return null; }
     if (!ImportCore.lonLatLooksValid(prep.features)) {
       toast(`“${name}”: coordinates are not longitude/latitude. A shapefile in a projected CRS needs its .prj file included.`, 'error', 9000);
@@ -2128,21 +2655,21 @@
       state.layers = state.layers.filter(layer => layer !== lyr);
       throw error;
     }
-    finishImportedLayer(lyr, prep);
+    await blockingImportStep(() => finishImportedLayer(lyr, prep), context);
     return lyr;
   }
 
   async function loadKmlText(text, fallbackName, format, report, context) {
     report(.35, 'Parsing KML');
     await paintImport(context.signal);
-    const converted = parseKmlCollection(text, fallbackName);
+    const converted = await blockingImportStep(() => parseKmlCollection(text, fallbackName), context);
     return addFromFeatureCollection(converted.collection, converted.name, format, report, context);
   }
 
   async function loadShapefileBuffer(buf, fallbackName, report, context) {
     report(.35, 'Parsing shapefile');
     await paintImport(context.signal);
-    const result = await importStep(() => shp(buf), context.signal);
+    const result = await importStep(() => blockingImportStep(() => shp(buf), context), context.signal);
     const collections = [].concat(result);
     let last = null;
     for (const [index, fc] of collections.entries()) {
@@ -2156,7 +2683,7 @@
     const signal = context.signal;
     const ext = (file.name.split('.').pop() || '').toLowerCase();
     const name = baseName(file.name);
-    if (file.size >= 1024 * 1024 || ext === 'zip' || ext === 'kmz') {
+    if (file.size >= 1024 * 1024 || ext === 'zip' || ext === 'kmz' || ext === 'kml') {
       const threaded = await loadImportWorker({ file }, report, context);
       if (threaded) return threaded.layer;
     }
@@ -2165,7 +2692,7 @@
       const text = await readImportFile(file, false, report, signal);
       report(.3, 'Parsing GeoJSON');
       await paintImport(signal);
-      const gj = JSON.parse(text);
+      const gj = await blockingImportStep(() => JSON.parse(text), context);
       const fc = gj.type === 'FeatureCollection' ? gj : gj.type === 'Feature' ? { features: [gj] } : { features: [{ type: 'Feature', properties: {}, geometry: gj }] };
       return addFromFeatureCollection(fc, name, 'geojson', report, context);
     }
@@ -2186,6 +2713,10 @@
   }
 
   function handleFiles(fileList) {
+    if (sessionBusy) {
+      toast('Wait for the session operation to finish before importing files.', 'warn');
+      return Promise.resolve();
+    }
     const files = [...fileList];
     const pending = importQueue.then(() => importFiles(files));
     importQueue = pending.catch(() => {});
@@ -2197,7 +2728,7 @@
     const loose = files.filter((f) => /\.(shp|shx|dbf|prj|cpg)$/i.test(f.name));
     const rest = files.filter((f) => !loose.includes(f));
     const progress = startImportProgress(files);
-    const context = { signal: progress.signal, layers: new Set() };
+    const context = { signal: progress.signal, layers: new Set(), setCancellable: progress.setCancellable };
     let lastLayer = null;
     try {
       for (const [index, file] of rest.entries()) {
@@ -2240,7 +2771,8 @@
         report(1, 'Files processed');
       }
       context.signal.throwIfAborted();
-      $('btnCancelImport').disabled = true;
+      progress.setCancellable(false);
+      await paintImport(context.signal);
       if (lastLayer) {
         setActive(lastLayer);
         const b = L.featureGroup(state.layers.map((l) => l.group)).getBounds();
@@ -2457,94 +2989,21 @@
     });
   }
 
-  function layerToCsv(lyr) {
-    const cell = (value) => {
-      const text = value === null || value === undefined ? '' : String(value);
-      return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-    };
-    const rows = [lyr.fields.map(cell).join(',')];
-    leavesOf(lyr).forEach((leaf) => {
-      rows.push(lyr.fields.map((field) => cell(leaf.feature.properties[field])).join(','));
-    });
-    return '\uFEFF' + rows.join('\r\n');
-  }
-
-  const xmlEsc = (s) => String(s).replace(/[<>&"']/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' }[c]));
-
-  // KML colours are aabbggrr.
-  function kmlColor(hex, opacity) {
-    const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || ''));
-    const h = m ? m[1] : '2563eb';
-    const a = Math.round(255 * Math.min(1, Math.max(0, isNaN(Number(opacity)) ? 1 : Number(opacity)))).toString(16).padStart(2, '0');
-    return a + h.slice(4, 6) + h.slice(2, 4) + h.slice(0, 2);
-  }
-
-  const kmlCoords = (c) => c.map((p) => p.slice(0, 3).join(',')).join(' ');
-  const kmlPolygon = (rings) =>
-    '<Polygon>' + rings.map((r, i) => `<${i ? 'inner' : 'outer'}BoundaryIs><LinearRing><coordinates>${kmlCoords(r)}</coordinates></LinearRing></${i ? 'inner' : 'outer'}BoundaryIs>`).join('') + '</Polygon>';
-
-  function kmlGeometry(g) {
-    switch (g.type) {
-      case 'Point': return `<Point><coordinates>${g.coordinates.slice(0, 3).join(',')}</coordinates></Point>`;
-      case 'LineString': return `<LineString><coordinates>${kmlCoords(g.coordinates)}</coordinates></LineString>`;
-      case 'Polygon': return kmlPolygon(g.coordinates);
-      case 'MultiLineString': return '<MultiGeometry>' + g.coordinates.map((l) => kmlGeometry({ type: 'LineString', coordinates: l })).join('') + '</MultiGeometry>';
-      case 'MultiPolygon': return '<MultiGeometry>' + g.coordinates.map((p) => kmlPolygon(p)).join('') + '</MultiGeometry>';
-      default: return '';
-    }
-  }
-
-  function layerToKml(lyr) {
-    const styles = new Map();
-    const placemarks = cleanFeatures(lyr).map((f) => {
-      const st = { stroke: lyr.color, fill: lyr.color, ...f.style, 'marker-color': f.style['marker-color'] || f.style['icon-color'] || lyr.color };
-      let styleXml;
-      if (f.geometry.type === 'Point') {
-        styleXml = `<IconStyle><color>${kmlColor(st['marker-color'], 1)}</color><scale>1</scale><Icon><href>http://maps.google.com/mapfiles/kml/pushpin/wht-pushpin.png</href></Icon></IconStyle>`;
-      } else {
-        styleXml = `<LineStyle><color>${kmlColor(st.stroke, st['stroke-opacity'])}</color><width>${Number(st['stroke-width']) || 2}</width></LineStyle>`;
-        if (/Polygon/.test(f.geometry.type)) styleXml += `<PolyStyle><color>${kmlColor(st.fill, st['fill-opacity'] === undefined ? 0.4 : st['fill-opacity'])}</color></PolyStyle>`;
-      }
-      if (!styles.has(styleXml)) styles.set(styleXml, 's' + (styles.size + 1));
-      const val = (k) => (f.properties[k] === null || f.properties[k] === undefined ? '' : String(f.properties[k]));
-      const extra = lyr.fields.filter((k) => k !== 'name' && k !== 'description' && val(k) !== '');
-      return '<Placemark>' +
-        (val('name') ? `<name>${xmlEsc(val('name'))}</name>` : '') +
-        (val('description') ? `<description>${xmlEsc(val('description'))}</description>` : '') +
-        `<styleUrl>#${styles.get(styleXml)}</styleUrl>` +
-        (extra.length ? '<ExtendedData>' + extra.map((k) => `<Data name="${xmlEsc(k)}"><value>${xmlEsc(val(k))}</value></Data>`).join('') + '</ExtendedData>' : '') +
-        kmlGeometry(f.geometry) + '</Placemark>';
-    });
-    const styleXml = [...styles].map(([xml, id]) => `<Style id="${id}">${xml}</Style>`).join('');
-    return '<?xml version="1.0" encoding="UTF-8"?>\n<kml xmlns="http://www.opengis.net/kml/2.2"><Document>' +
-      `<name>${xmlEsc(lyr.name)}</name>${styleXml}${placemarks.join('')}</Document></kml>`;
-  }
-
-
   async function exportLayerFiles(lyr, fmt, base, shapefileOptions) {
-    const warnings = [];
-    if (fmt === 'shp') {
-      const feats = cleanFeatures(lyr);
-      if (!feats.length) { warnings.push(`“${lyr.name}” has no features, so no shapefile was written.`); return { files: [], warnings }; }
-      const fields = shapefileOptions ? shapefileOptions.fields : lyr.fields;
-      const out = ShapefileWriter.writeShapefiles(base, feats, fields, lyr.types, {
-        categoryField: shapefileOptions ? shapefileOptions.categoryField : null,
-        includeStyle: shapefileOptions ? shapefileOptions.includeStyle : false,
-        styles: shapefileOptions ? shapefileOptions.styles : {},
-        legendSort: shapefileOptions ? shapefileOptions.legendSort : null,
+    const layer = { name: lyr.name, fields: lyr.fields, types: lyr.types, color: lyr.color, features: cleanFeatures(lyr) };
+    const options = shapefileOptions ? { ...shapefileOptions, styles: undefined } : null;
+    const job = { layer, format: fmt, base, options };
+    const output = await BackgroundTasks.run('export', job, { fallback: () => ExportCore.generate(job) });
+    if (fmt === 'shp' && shapefileOptions?.styles) {
+      const decoder = new TextDecoder();
+      const encoder = new TextEncoder();
+      output.files.filter(file => file.name.endsWith('.qml')).forEach(file => {
+        const xml = decoder.decode(file.data);
+        const family = QgisStyle.read(xml).family;
+        if (shapefileOptions.styles[family]) file.data = encoder.encode(QgisStyle.merge(xml, shapefileOptions.styles[family], shapefileOptions.categoryField));
       });
-      return { files: out.files, warnings: out.warnings.map((w) => `${lyr.name}: ${w}`) };
     }
-    if (fmt === 'kml') return { files: [{ name: base + '.kml', data: layerToKml(lyr) }], warnings };
-    if (fmt === 'kmz') {
-      const zip = new JSZip();
-      zip.file('doc.kml', layerToKml(lyr));
-      const data = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
-      return { files: [{ name: base + '.kmz', data }], warnings };
-    }
-    if (fmt === 'csv') return { files: [{ name: base + '.csv', data: layerToCsv(lyr) }], warnings };
-    const fc = { type: 'FeatureCollection', features: cleanFeatures(lyr).map(({ type, properties, geometry }) => ({ type, properties, geometry })) };
-    return { files: [{ name: base + '.geojson', data: JSON.stringify(fc, null, 2) }], warnings };
+    return output;
   }
 
   async function exportBaseName(lyr, feature = null) {
@@ -2611,9 +3070,8 @@
       const type = fmt === 'csv' ? 'text/csv;charset=utf-8' : 'application/octet-stream';
       return saveBlob(new Blob([f.data], { type }), f.name);
     }
-    const zip = new JSZip();
-    files.forEach((f) => zip.file(f.name, f.data));
-    saveBlob(await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' }), stamp + '.zip');
+    const archive = await BackgroundTasks.run('export', { operation: 'zip', files }, { fallback: () => ExportCore.pack(files) });
+    saveBlob(new Blob([archive], { type: 'application/zip' }), stamp + '.zip');
     toast(`Downloaded ${stamp}.zip`);
   }
 
@@ -2635,6 +3093,7 @@
       closeDialog(dialog, event.submitter?.value ?? '');
     });
     dialog.addEventListener('cancel', event => {
+      if (event.defaultPrevented) return;
       event.preventDefault();
       closeDialog(dialog);
     });
@@ -2742,7 +3201,114 @@
 
   // Resizable table panel
   let initialMapViewPending = true;
+  const resizableSidebar = window.matchMedia('(min-width: 1200px)');
+  const minimumSidebarWidth = 330;
+  let sidebarDrag = null;
+  let sidebarResizeFrame = null;
+
+  function beginPanelResize() {
+    panelResizeActive = true;
+    if (displayRefreshTimer !== null) {
+      clearTimeout(displayRefreshTimer);
+      displayRefreshTimer = null;
+    }
+  }
+
+  function endPanelResize() {
+    panelResizeActive = false;
+    scheduleMapDisplay();
+  }
+
+  function maximumSidebarWidth() {
+    return Math.max(minimumSidebarWidth, $('main').clientWidth - 480);
+  }
+
+  function setSidebarWidth(width, fitNames = false) {
+    const maximum = maximumSidebarWidth();
+    const limit = resizableSidebar.matches ? maximum : Infinity;
+    const size = Math.max(minimumSidebarWidth, Math.min(limit, width));
+    $('main').style.setProperty('--sidebar-width', `${size}px`);
+    $('main').classList.toggle('sidebar-fit-names', fitNames);
+    $('sidebarSplitter').max = String(maximum);
+    $('sidebarSplitter').value = String(Math.round(size));
+    $('sidebarSplitter').setAttribute('aria-valuetext', `${Math.round(size)} pixels`);
+  }
+
+  function fitSidebarNames() {
+    if (!resizableSidebar.matches || $('sidebar').classList.contains('collapsed')) return;
+    const context = document.createElement('canvas').getContext('2d');
+    const width = $('sidebar').getBoundingClientRect().width;
+    let desired = minimumSidebarWidth;
+    document.querySelectorAll('#layerList > li > .lname').forEach(label => {
+      const style = getComputedStyle(label);
+      context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+      desired = Math.max(desired, Math.ceil(context.measureText(label.textContent).width + width - label.getBoundingClientRect().width + 2));
+    });
+    setSidebarWidth(desired, true);
+  }
+
+  function finishSidebarResize() {
+    if (!sidebarDrag) return;
+    const pointerId = sidebarDrag.pointerId;
+    if (sidebarResizeFrame !== null) {
+      cancelAnimationFrame(sidebarResizeFrame);
+      sidebarResizeFrame = null;
+      setSidebarWidth(sidebarDrag.nextWidth);
+      $('sidebar').getBoundingClientRect();
+    }
+    sidebarDrag = null;
+    $('main').classList.remove('resizing-sidebar');
+    if ($('sidebarSplitter').hasPointerCapture(pointerId)) $('sidebarSplitter').releasePointerCapture(pointerId);
+    endPanelResize();
+  }
+
+  $('sidebarSplitter').addEventListener('pointerdown', event => {
+    if (event.button !== 0 || !resizableSidebar.matches || $('sidebar').classList.contains('collapsed')) return;
+    event.preventDefault();
+    sidebarDrag = { pointerId: event.pointerId, start: event.clientX, width: $('sidebar').getBoundingClientRect().width };
+    beginPanelResize();
+    $('main').classList.add('resizing-sidebar');
+    setSidebarWidth(sidebarDrag.width);
+    $('sidebarSplitter').setPointerCapture(event.pointerId);
+  });
+  $('sidebarSplitter').addEventListener('pointermove', event => {
+    if (!sidebarDrag || event.pointerId !== sidebarDrag.pointerId) return;
+    sidebarDrag.nextWidth = sidebarDrag.width + event.clientX - sidebarDrag.start;
+    if (sidebarResizeFrame !== null) return;
+    sidebarResizeFrame = requestAnimationFrame(() => {
+      sidebarResizeFrame = null;
+      if (sidebarDrag) setSidebarWidth(sidebarDrag.nextWidth);
+    });
+  });
+  ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(type => $('sidebarSplitter').addEventListener(type, finishSidebarResize));
+  $('sidebarSplitter').addEventListener('input', event => setSidebarWidth(Number(event.target.value)));
+  $('sidebarSplitter').addEventListener('dblclick', event => { event.preventDefault(); fitSidebarNames(); });
+  $('sidebarSplitter').addEventListener('keydown', event => {
+    if (!resizableSidebar.matches || $('sidebar').classList.contains('collapsed')) return;
+    const step = event.shiftKey ? 64 : 16;
+    const width = $('sidebar').getBoundingClientRect().width;
+    if (event.key === 'ArrowLeft') setSidebarWidth(width - step);
+    else if (event.key === 'ArrowRight') setSidebarWidth(width + step);
+    else if (event.key === 'Home') setSidebarWidth(minimumSidebarWidth);
+    else if (event.key === 'End') fitSidebarNames();
+    else return;
+    event.preventDefault();
+  });
+  resizableSidebar.addEventListener('change', finishSidebarResize);
+  window.addEventListener('blur', finishSidebarResize);
+
+  function fitInitialMapView() {
+    if (!initialMapViewPending || sessionStartupPending) return;
+    initialMapViewPending = false;
+    if (!state.layers.length) fitVisibleBounds(L.latLngBounds([[-44, 112], [-10, 154]]));
+  }
   const panelObserver = new ResizeObserver(() => {
+    const preferredWidth = parseFloat($('main').style.getPropertyValue('--sidebar-width')) || minimumSidebarWidth;
+    if (resizableSidebar.matches && preferredWidth > maximumSidebarWidth()) {
+      setSidebarWidth(preferredWidth, $('main').classList.contains('sidebar-fit-names'));
+    }
+    $('sidebarSplitter').max = String(maximumSidebarWidth());
+    $('sidebarSplitter').value = String(Math.round(parseFloat($('main').style.getPropertyValue('--sidebar-width')) || minimumSidebarWidth));
     const main = $('main').getBoundingClientRect();
     const sidebar = $('sidebar').getBoundingClientRect();
     const table = $('tablePanel').getBoundingClientRect();
@@ -2765,10 +3331,7 @@
     }
     const scalePosition = visibleWidth < 800 || visibleHeight < 440 ? 'bottomright' : 'bottomleft';
     if (scaleControl.getPosition() !== scalePosition) scaleControl.setPosition(scalePosition);
-    if (initialMapViewPending) {
-      initialMapViewPending = false;
-      if (!state.layers.length) fitVisibleBounds(L.latLngBounds([[-44, 112], [-10, 154]]));
-    }
+    fitInitialMapView();
     scheduleMapDisplay();
   });
   [$('main'), $('sidebar'), $('tablePanel')].forEach(panel => panelObserver.observe(panel));
@@ -2776,13 +3339,30 @@
   $('splitter').addEventListener('mousedown', (e) => {
     e.preventDefault();
     const total = $('workspace').getBoundingClientRect();
+    let frame = null;
+    let nextHeight;
+    beginPanelResize();
     const move = (ev) => {
-      const h = Math.min(total.height - 140, Math.max(80, total.bottom - ev.clientY));
-      $('tablePanel').style.flexBasis = h + 'px';
+      nextHeight = Math.min(total.height - 140, Math.max(80, total.bottom - ev.clientY));
+      if (frame !== null) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        $('tablePanel').style.flexBasis = nextHeight + 'px';
+      });
     };
-    const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); };
+    const up = () => {
+      if (frame !== null) {
+        cancelAnimationFrame(frame);
+        $('tablePanel').style.flexBasis = nextHeight + 'px';
+      }
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+      window.removeEventListener('blur', up);
+      endPanelResize();
+    };
     window.addEventListener('mousemove', move);
     window.addEventListener('mouseup', up);
+    window.addEventListener('blur', up);
   });
 
   window.addEventListener('beforeunload', (e) => {
@@ -2791,6 +3371,22 @@
 
   renderAll();
 
+  const sessionReady = (async () => {
+    try {
+      const saved = await sessionStore.load();
+      await importQueue;
+      if (saved && !state.layers.length && !document.querySelector('dialog[open]')) {
+        await runSessionTask('Restoring session…', () => restoreSession(saved));
+      }
+    } catch (error) {
+      toast(`Could not open the saved session: ${error.message}`, 'warn', 9000);
+    } finally {
+      sessionStartupPending = false;
+      fitInitialMapView();
+      $('btnSession').disabled = false;
+    }
+  })();
+
   // Exposed for debugging / automated tests.
-  window.__geoEditor = { state, map, handleFiles, createLayer, downloadLayers };
+  window.__geoEditor = { state, map, handleFiles, createLayer, downloadLayers, sessionReady };
 })();

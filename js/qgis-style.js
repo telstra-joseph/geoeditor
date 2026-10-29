@@ -643,4 +643,4 @@
   }
 
   global.QgisStyle = { symbolXml, singleStyle, read, merge, serialize, renderEditor, applyBulk, copySymbol };
-})(window);
+})(globalThis);
