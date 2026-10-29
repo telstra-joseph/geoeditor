@@ -48,7 +48,7 @@
     </div>
   </header>
 
-  <main id="main">
+  <main id="main" class="no-layers">
     <aside id="sidebar">
       <div id="sidebarHeader">
         <h2>Layers</h2>
@@ -62,7 +62,7 @@
         <summary>How to edit</summary>
         <ul>
           <li><b>Start:</b> choose New layer to create a blank layer or upload files. You can also drop files onto the page.</li>
-          <li><b>Draw:</b> select a layer, then use the map tools. On mobile, hold a tool to see more choices.</li>
+          <li><b>Draw:</b> select a layer, then use the map tools. On mobile, double-tap the current tool to open or close its group.</li>
           <li><b>Edit shapes:</b> use the edit, drag, cut or remove tools.</li>
           <li><b>Edit data:</b> change table cells or use Field to add a column. Click a column name to rename it or change its type. Undo reverses recent cell and field edits.</li>
           <li><b>Find rows:</b> filter or sort the table. On mobile, use the filter button; Clear filter restores all rows. Drag column edges to resize them.</li>
@@ -142,6 +142,7 @@
         <p>October 2026</p>
       </div>
       <a class="about-feedback" href="mailto:joseph.malicdem@team.telstra.com?subject=Geo%20Editor%20Feedback"><i data-lucide="mail" class="action-icon" aria-hidden="true"></i>Send feedback</a>
+      <label class="modal-focus-setting"><input id="toggleModalFocus" type="checkbox">Show modal focus indicators</label>
     </div>
   </dialog>
 
@@ -308,6 +309,7 @@
   <script src="js/export-core.js"></script>
   <script src="js/table-core.js"></script>
   <script src="lib/rbush.js"></script>
+  <script src="lib/vanilla-colorful.js"></script>
   <script src="js/spatial-core.js"></script>
   <script src="js/spatial-queries.js"></script>
   <script src="js/app.js"></script>

@@ -26,6 +26,151 @@
 
   const $ = (id) => document.getElementById(id);
 
+  const modalFocusToggle = $('toggleModalFocus');
+  const applyModalFocus = enabled => {
+    document.documentElement.dataset.modalFocus = String(enabled);
+    modalFocusToggle.checked = enabled;
+  };
+  let modalFocusEnabled = false;
+  try { modalFocusEnabled = localStorage.getItem('geoeditor-modal-focus') === 'true'; } catch {}
+  applyModalFocus(modalFocusEnabled);
+  modalFocusToggle.addEventListener('change', () => {
+    applyModalFocus(modalFocusToggle.checked);
+    try { localStorage.setItem('geoeditor-modal-focus', String(modalFocusToggle.checked)); } catch {}
+  });
+
+  const colourPopover = document.createElement('div');
+  colourPopover.id = 'colourPopover';
+  colourPopover.setAttribute('popover', 'manual');
+  colourPopover.setAttribute('role', 'dialog');
+  colourPopover.setAttribute('aria-label', 'Choose colour');
+  colourPopover.hidden = true;
+  const colourHeading = document.createElement('div');
+  colourHeading.className = 'colour-picker-heading';
+  const colourTitle = document.createElement('span');
+  colourTitle.textContent = 'Colour';
+  const closeColour = document.createElement('button');
+  closeColour.type = 'button';
+  closeColour.title = 'Close colour selector';
+  closeColour.setAttribute('aria-label', closeColour.title);
+  closeColour.appendChild(actionIcon('X'));
+  colourHeading.append(colourTitle, closeColour);
+  const colourPicker = document.createElement('hex-color-picker');
+  const hexLabel = document.createElement('label');
+  hexLabel.textContent = 'Hex';
+  const hexColour = document.createElement('input');
+  hexColour.type = 'text';
+  hexColour.maxLength = 7;
+  hexColour.pattern = '#[0-9a-fA-F]{6}';
+  hexColour.spellcheck = false;
+  hexColour.setAttribute('aria-label', 'Hex colour');
+  hexColour.autocomplete = 'off';
+  hexLabel.appendChild(hexColour);
+  colourPopover.append(colourHeading, colourPicker, hexLabel);
+  let colourInput = null;
+  let initialColour = '';
+  let colourAnimation = null;
+  let colourRevision = 0;
+  const colourMotion = () => !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  async function hideColourPicker(restoreFocus = false) {
+    if (!colourInput) return;
+    const input = colourInput;
+    colourInput = null;
+    const revision = ++colourRevision;
+    colourAnimation?.cancel();
+    input.setAttribute('aria-expanded', 'false');
+    colourPopover.inert = true;
+    if (input.value !== initialColour) input.dispatchEvent(new Event('change', { bubbles: true }));
+    if (restoreFocus && input.isConnected) input.focus({ preventScroll: true });
+    if (colourMotion() && colourPopover.isConnected) {
+      colourAnimation = colourPopover.animate([
+        { opacity: 1, transform: 'translateY(0) scale(1)' },
+        { opacity: 0, transform: 'translateY(-4px) scale(.97)' },
+      ], { duration: 160, easing: 'cubic-bezier(.4, 0, .2, 1)', fill: 'forwards' });
+      await colourAnimation.finished.catch(() => {});
+    }
+    if (revision !== colourRevision) return;
+    if (colourPopover.hidePopover && colourPopover.matches(':popover-open')) colourPopover.hidePopover();
+    colourPopover.hidden = true;
+    colourAnimation?.cancel();
+    colourAnimation = null;
+  }
+  function showColourPicker(input, keyboard = false) {
+    if (colourInput === input) { hideColourPicker(keyboard); return; }
+    hideColourPicker();
+    ++colourRevision;
+    colourAnimation?.cancel();
+    colourInput = input;
+    initialColour = input.value;
+    hexColour.value = input.value;
+    colourPicker.setAttribute('color', input.value);
+    customElements.whenDefined('hex-color-picker').then(() => {
+      if (colourInput === input) colourPicker.color = input.value;
+    });
+    input.setAttribute('aria-haspopup', 'dialog');
+    input.setAttribute('aria-controls', colourPopover.id);
+    input.setAttribute('aria-expanded', 'true');
+    (input.closest('dialog') || document.body).appendChild(colourPopover);
+    colourPopover.inert = false;
+    colourPopover.hidden = false;
+    if (colourPopover.showPopover && !colourPopover.matches(':popover-open')) colourPopover.showPopover();
+    const anchor = input.getBoundingClientRect();
+    const bounds = colourPopover.getBoundingClientRect();
+    const left = Math.max(8, Math.min(anchor.left, innerWidth - bounds.width - 8));
+    const top = anchor.bottom + bounds.height + 8 <= innerHeight ? anchor.bottom + 8 : Math.max(8, anchor.top - bounds.height - 8);
+    colourPopover.style.left = `${left}px`;
+    colourPopover.style.top = `${top}px`;
+    if (colourMotion()) {
+      colourAnimation = colourPopover.animate([
+        { opacity: 0, transform: 'translateY(-4px) scale(.97)' },
+        { opacity: 1, transform: 'translateY(0) scale(1)' },
+      ], { duration: 220, easing: 'cubic-bezier(.22, 1, .36, 1)' });
+    }
+    if (keyboard) hexColour.focus({ preventScroll: true });
+  }
+  const updateColour = value => {
+    if (!colourInput || !/^#[0-9a-f]{6}$/i.test(value)) return;
+    const input = colourInput;
+    if (input.value.toLowerCase() === value.toLowerCase()) return;
+    input.value = value;
+    hexColour.value = input.value;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  colourPicker.addEventListener('color-changed', event => updateColour(event.detail.value));
+  hexColour.addEventListener('input', () => {
+    if (!/^#[0-9a-f]{6}$/i.test(hexColour.value)) return;
+    updateColour(hexColour.value);
+    if (customElements.get('hex-color-picker')) colourPicker.color = hexColour.value;
+  });
+  closeColour.addEventListener('click', () => hideColourPicker(true));
+  document.addEventListener('click', event => {
+    const input = event.target.closest('input[type="color"]');
+    if (input && !input.disabled) {
+      event.preventDefault();
+      event.stopPropagation();
+      showColourPicker(input);
+    } else if (colourInput && !colourPopover.contains(event.target)) hideColourPicker();
+  }, true);
+  document.addEventListener('keydown', event => {
+    const input = event.target.closest('input[type="color"]');
+    if (input && !input.disabled && ['Enter', ' ', 'ArrowDown'].includes(event.key)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      showColourPicker(input, true);
+    } else if (colourInput && (event.key === 'Escape' || event.key === 'Enter' && colourPopover.contains(event.target))) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      hideColourPicker(true);
+    }
+  }, true);
+  document.addEventListener('close', event => {
+    if (colourInput && event.target.contains(colourInput)) hideColourPicker();
+  }, true);
+  window.addEventListener('resize', () => hideColourPicker());
+  window.addEventListener('scroll', event => {
+    if (colourInput && !colourPopover.contains(event.target)) hideColourPicker();
+  }, true);
+
   const tooltip = document.createElement('div');
   tooltip.id = 'appTooltip';
   tooltip.setAttribute('role', 'tooltip');
@@ -260,6 +405,30 @@
   basemapToggle.replaceChildren(actionIcon('Layers'));
   basemapToggle.title = 'Choose basemap';
   basemapToggle.setAttribute('aria-label', 'Choose basemap');
+  const basemapContainer = basemapControl.getContainer();
+  const updateBasemapExpanded = () => basemapToggle.setAttribute('aria-expanded', String(basemapContainer.classList.contains('leaflet-control-layers-expanded')));
+  L.DomEvent.off(basemapContainer, 'mouseenter', basemapControl._expandSafely, basemapControl);
+  L.DomEvent.off(basemapContainer, 'mouseleave', basemapControl.collapse, basemapControl);
+  L.DomEvent.off(basemapToggle, 'click keydown');
+  const toggleBasemap = event => {
+    L.DomEvent.stop(event);
+    if (basemapContainer.classList.contains('leaflet-control-layers-expanded')) basemapControl.collapse();
+    else basemapControl.expand();
+    updateBasemapExpanded();
+  };
+  basemapToggle.addEventListener('click', toggleBasemap);
+  basemapToggle.addEventListener('keydown', event => {
+    if (event.key === 'Enter' || event.key === ' ') toggleBasemap(event);
+  });
+  basemapContainer.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    L.DomEvent.stop(event);
+    basemapControl.collapse();
+    updateBasemapExpanded();
+    basemapToggle.focus();
+  });
+  new MutationObserver(updateBasemapExpanded).observe(basemapContainer, { attributes: true, attributeFilter: ['class'] });
+  updateBasemapExpanded();
   const scaleControl = L.control.scale().addTo(map);
 
   map.pm.addControls({
@@ -302,14 +471,11 @@
   map.getContainer().querySelectorAll('.leaflet-pm-toolbar').forEach((toolbar) => {
     const tools = [...toolbar.children];
     let current = tools[0];
-    let holdTimer;
-    let pointerStart;
-    let heldButton;
-    let suppressUntil = 0;
+    let tapTimer;
     current.classList.add('mobile-tool-current');
     const closeTools = () => {
-      heldButton = null;
-      suppressUntil = 0;
+      clearTimeout(tapTimer);
+      tapTimer = null;
       toolbar.classList.remove('mobile-tools-open');
       tools.forEach(tool => {
         tool.inert = compactMapControls && tool !== current;
@@ -317,36 +483,12 @@
       });
       if (compactMapControls) current.querySelector('.leaflet-buttons-control-button').setAttribute('aria-expanded', 'false');
     };
-    const cancelHold = () => {
-      clearTimeout(holdTimer);
-      pointerStart = null;
-    };
     const openTools = () => {
       tools.forEach(tool => { tool.inert = false; });
       toolbar.classList.add('mobile-tools-open');
       current.querySelector('.leaflet-buttons-control-button').setAttribute('aria-expanded', 'true');
     };
-    toolbar.addEventListener('pointerdown', (event) => {
-      if (!compactMapControls || event.button !== 0) return;
-      const button = event.target.closest('.leaflet-buttons-control-button');
-      if (!button || !current.contains(button)) return;
-      cancelHold();
-      pointerStart = { x: event.clientX, y: event.clientY };
-      holdTimer = setTimeout(() => {
-        openTools();
-        heldButton = button;
-        suppressUntil = Infinity;
-      }, 450);
-    });
-    toolbar.addEventListener('pointermove', (event) => {
-      if (pointerStart && Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) > 10) cancelHold();
-    });
-    toolbar.addEventListener('pointerup', () => {
-      if (heldButton) suppressUntil = performance.now() + 700;
-      cancelHold();
-    });
-    toolbar.addEventListener('pointerleave', cancelHold);
-    toolbar.addEventListener('pointercancel', () => { cancelHold(); closeTools(); });
+    toolbar.addEventListener('pointercancel', closeTools);
     toolbar.addEventListener('contextmenu', (event) => {
       if (compactMapControls) event.preventDefault();
     });
@@ -354,13 +496,24 @@
       if (!compactMapControls) return;
       const button = event.target.closest('.leaflet-buttons-control-button');
       if (!button) return;
-      if (button === heldButton && performance.now() < suppressUntil) {
-        heldButton = null;
-        event.preventDefault();
-        event.stopImmediatePropagation();
+      if (current.contains(button)) {
+        if (event.detail > 0) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          if (tapTimer) {
+            clearTimeout(tapTimer);
+            tapTimer = null;
+            if (toolbar.classList.contains('mobile-tools-open')) closeTools();
+            else openTools();
+          } else {
+            tapTimer = setTimeout(() => {
+              tapTimer = null;
+              button.click();
+            }, 300);
+          }
+        }
         return;
       }
-      heldButton = null;
       const previousBounds = button.getBoundingClientRect();
       const changed = !current.contains(button);
       current.classList.remove('mobile-tool-current');
@@ -375,6 +528,11 @@
         ], { duration: 220, easing: 'cubic-bezier(.22, 1, .36, 1)' });
       }
     }, true);
+    toolbar.addEventListener('dblclick', event => {
+      if (!compactMapControls) return;
+      event.preventDefault();
+      event.stopPropagation();
+    });
     toolbar.addEventListener('keydown', (event) => {
       if (!compactMapControls) return;
       const button = event.target.closest('.leaflet-buttons-control-button');
@@ -392,15 +550,16 @@
       }
     });
     document.addEventListener('pointerdown', (event) => {
-      if (!toolbar.contains(event.target)) { cancelHold(); closeTools(); }
+      if (!toolbar.contains(event.target)) closeTools();
     }, true);
-    mobileControls.addEventListener('change', () => { cancelHold(); closeTools(); });
-    resetMapToolbars.push(() => { cancelHold(); closeTools(); });
+    mobileControls.addEventListener('change', closeTools);
+    resetMapToolbars.push(closeTools);
     closeTools();
   });
 
   const pmBusy = () => ['globalEditModeEnabled', 'globalDragModeEnabled', 'globalRemovalModeEnabled', 'globalDrawModeEnabled', 'globalCutModeEnabled']
     .some((fn) => typeof map.pm[fn] === 'function' && map.pm[fn]());
+  let mapToolsDisabled;
 
   /* ---------- feature / layer model ---------- */
   const isPointLeaf = (leaf) => leaf instanceof L.CircleMarker && !(leaf instanceof L.Circle);
@@ -439,14 +598,15 @@
       const end = map.latLngToContainerPoint(bounds.getSouthEast());
       const distance = point ? Math.hypot(Math.max(start.x - point.x, 0, point.x - end.x), Math.max(start.y - point.y, 0, point.y - end.y)) : 0;
       const size = Math.min(end.x - start.x, end.y - start.y);
+      if (size < 24) return;
       if (distance <= 24 && (distance < bestDistance || (distance === bestDistance && size < best))) {
         best = size;
         bestDistance = distance;
       }
     });
-    if (best < 48) return 0;
+    if (best < 24) return 0;
     const scale = Number(leaf.feature.style?.['label-scale'] ?? 1);
-    const size = Math.min(12, 12 * (Number.isFinite(scale) ? scale : 1), best * .18);
+    const size = Math.min(12, 16 * (Number.isFinite(scale) ? scale : 1), best / 3);
     return size >= 8 ? size : 0;
   }
 
@@ -757,6 +917,7 @@
       if (singleCharacterLabel(leaf)) {
         leaf._kmlLabelSize = polygonLabelSize(leaf, nearby);
         updateKmlLabel(leaf);
+        if (isPointLeaf(leaf) && !leaf._kmlLabelSize) desired.delete(leaf);
       }
     });
     lyr.displayed.forEach(leaf => {
@@ -1179,11 +1340,12 @@
     map.invalidateSize({ pan: false });
     const mapRect = map.getContainer().getBoundingClientRect();
     const workspace = $('workspace').getBoundingClientRect();
-    const splitter = $('splitter').getBoundingClientRect();
+    const splitter = $('splitter');
+    const visibleBottom = splitter.getClientRects().length ? splitter.getBoundingClientRect().top : workspace.bottom;
     map.fitBounds(bounds, {
       maxZoom,
       paddingTopLeft: [Math.max(0, workspace.left - mapRect.left) + 20, Math.max(0, workspace.top - mapRect.top) + 20],
-      paddingBottomRight: [Math.max(0, mapRect.right - workspace.right) + 20, Math.max(0, mapRect.bottom - splitter.top) + 20],
+      paddingBottomRight: [Math.max(0, mapRect.right - workspace.right) + 20, Math.max(0, mapRect.bottom - visibleBottom) + 20],
     });
   }
 
@@ -1567,11 +1729,29 @@
 
   /* ---------- rendering ---------- */
   function renderAll() {
+    const noLayers = state.layers.length === 0;
+    $('main').classList.toggle('no-layers', noLayers);
     renderLayers();
     renderTable();
-    $('btnDownload').disabled = state.layers.length === 0;
-    $('emptyState').classList.toggle('hidden', state.layers.length > 0);
+    $('btnDownload').disabled = noLayers;
+    $('emptyState').classList.toggle('hidden', !noLayers);
     $('layerHint').style.display = state.layers.length ? 'none' : '';
+    if (mapToolsDisabled !== noLayers) {
+      mapToolsDisabled = noLayers;
+      if (noLayers) {
+        map.pm.disableDraw();
+        if (map.pm.globalEditModeEnabled()) map.pm.disableGlobalEditMode();
+        if (map.pm.globalDragModeEnabled()) map.pm.disableGlobalDragMode();
+        if (map.pm.globalRemovalModeEnabled()) map.pm.disableGlobalRemovalMode();
+        if (map.pm.globalCutModeEnabled()) map.pm.disableGlobalCutMode();
+        resetMapToolbars.forEach(reset => reset());
+      }
+      Object.keys(map.pm.Toolbar.getButtons()).forEach(name => map.pm.Toolbar.setButtonDisabled(name, noLayers));
+      map.getContainer().querySelectorAll('.leaflet-pm-toolbar').forEach(toolbar => {
+        toolbar.inert = noLayers;
+        toolbar.setAttribute('aria-disabled', String(noLayers));
+      });
+    }
   }
 
   async function sessionSnapshot() {
@@ -3312,12 +3492,14 @@
     const main = $('main').getBoundingClientRect();
     const sidebar = $('sidebar').getBoundingClientRect();
     const table = $('tablePanel').getBoundingClientRect();
+    const tableTop = state.layers.length ? table.top : main.bottom;
+    const tableGap = state.layers.length ? 6 : 0;
     const stacked = sidebar.width >= main.width - 1;
     $('main').style.setProperty('--panel-left', `${stacked ? 0 : sidebar.width}px`);
     $('main').style.setProperty('--panel-top', `${stacked ? sidebar.height : 0}px`);
-    $('main').style.setProperty('--panel-bottom', `${main.bottom - table.top + 6}px`);
+    $('main').style.setProperty('--panel-bottom', `${main.bottom - tableTop + tableGap}px`);
     const visibleWidth = main.width - (stacked ? 0 : sidebar.width);
-    const visibleHeight = table.top - main.top - (stacked ? sidebar.height : 0) - 6;
+    const visibleHeight = tableTop - main.top - (stacked ? sidebar.height : 0) - tableGap;
     const controlsHeight = Math.max(32, visibleHeight - 4);
     map.getContainer().style.setProperty('--map-controls-height', `${controlsHeight}px`);
     const topLeft = map.getContainer().querySelector('.leaflet-top.leaflet-left');

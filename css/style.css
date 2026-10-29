@@ -148,6 +148,7 @@ button:disabled { opacity: .48; cursor: not-allowed; box-shadow: none; transform
   #sidebar:not(.collapsed) + #sidebarSplitter { display: block; }
   .sidebar-fit-names #layerList .lname { white-space: normal; overflow-wrap: anywhere; text-overflow: clip; }
 }
+#main.no-layers :is(#sidebar, #sidebarSplitter, #tablePanel, #splitter) { display: none; }
 .hint { color: #6b7280; font-size: 13px; }
 .help { margin-top: 14px; font-size: 13px; color: #374151; }
 .help summary { cursor: pointer; font-weight: 600; }
@@ -192,6 +193,18 @@ button:disabled { opacity: .48; cursor: not-allowed; box-shadow: none; transform
 #layerList .lmeta button, #layerList .layer-rename { width: 28px; height: 28px; min-height: 28px; flex: 0 0 28px; padding: 0; font-size: 13px; }
 #layerList .lmeta button svg, #layerList .layer-rename svg { width: 16.2624px; height: 16.2624px; flex: 0 0 16.2624px; vertical-align: middle; }
 #layerList input[type=color] { width: 24px; height: 24px; padding: 0; border: 1px solid #cbd5e1; border-radius: 4px; background: none; }
+
+#colourPopover { position: fixed; inset: auto; margin: 0; width: min(248px, calc(100vw - 16px)); min-width: 0; max-height: calc(100dvh - 16px); overflow: auto; padding: 10px; display: grid; gap: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); box-shadow: 0 12px 28px rgba(16, 26, 58, .2); z-index: 12000; }
+#colourPopover[hidden] { display: none; }
+#colourPopover .colour-picker-heading { display: flex; align-items: center; justify-content: space-between; font-weight: 600; }
+#colourPopover button { display: grid; place-items: center; width: 32px; height: 32px; min-width: 32px; min-height: 32px; padding: 0; }
+#colourPopover hex-color-picker { width: 100%; height: 176px; }
+#colourPopover label { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+#colourPopover input { width: 100%; min-width: 0; height: 32px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--ink); }
+@media (max-width: 1024px) {
+  #colourPopover button { width: 44px; height: 44px; min-width: 44px; min-height: 44px; }
+  #colourPopover input { height: 44px; font-size: 16px; }
+}
 
 #layerList .kml-folder-tree { grid-column: 1 / -1; min-width: 0; border-top: 1px solid var(--line); padding-top: 4px; }
 #layerList .kml-folder-row { display: grid; grid-template-columns: 24px 16px minmax(0, 1fr) auto 24px; gap: 5px; align-items: center; min-height: 28px; }
@@ -462,6 +475,8 @@ table.attrs tr.sel td.rn { background: #d8eaff; }
 .toast.warn { background: #b45309; }
 
 dialog { border: 1px solid var(--line); border-radius: 8px; padding: 18px 20px; min-width: 340px; box-shadow: 0 14px 40px rgba(15, 23, 42, .22); }
+:root:not([data-modal-focus="true"]) dialog :focus { outline: none !important; box-shadow: none !important; }
+:root[data-modal-focus="true"] dialog :focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 2px; }
 #aboutDlg { min-width: 0; width: min(360px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); padding: 12px 16px 24px; overflow: auto; }
 #aboutDlg .about-titlebar { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
 #aboutDlg .about-close { width: 28px; height: 28px; padding: 0; border: 0; background: transparent; box-shadow: none; }
@@ -475,6 +490,8 @@ dialog { border: 1px solid var(--line); border-radius: 8px; padding: 18px 20px; 
 #aboutDlg .about-feedback { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); font-size: 13px; text-decoration: none; transition: background-color var(--ease-ui), border-color var(--ease-ui); }
 #aboutDlg .about-feedback:hover { background: var(--hover-fill); border-color: var(--hover-fill); }
 #aboutDlg .about-feedback:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 2px; }
+#aboutDlg .modal-focus-setting { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; margin-top: 16px; font-size: 13px; cursor: pointer; }
+#aboutDlg .modal-focus-setting input { flex: 0 0 auto; margin: 0; accent-color: var(--accent); }
 #dlg.compact { min-width: 0; width: min(300px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); padding: 16px; overflow: auto; }
 #dlg.compact :is(form, #dlgBody, label, select) { min-width: 0; max-width: 100%; }
 #dlg.compact .radio-options label { overflow-wrap: anywhere; }
@@ -704,7 +721,8 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
 :root[data-theme="dark"] table.attrs .x:hover:not(:disabled),
 :root[data-theme="dark"] table.attrs button[aria-label="Delete feature"]:hover:not(:disabled),
 :root[data-theme="dark"] #layerList button[aria-label="Delete layer"]:hover:not(:disabled) { background: #723b42; color: #ffd1d6; border-color: #723b42; }
-:root[data-theme="dark"] #map .leaflet-control-scale { background: rgba(36, 38, 41, .45); }
+:root[data-theme="dark"] #map .leaflet-control-scale { background: rgba(36, 38, 41, .45); border-color: rgba(237, 240, 244, .18); box-shadow: 0 1px 3px rgba(0, 0, 0, .24); }
+:root[data-theme="dark"] #map .leaflet-control-scale-line { border-color: rgba(237, 240, 244, .65); }
 :root[data-theme="dark"] #map :is(.leaflet-control-layers label:has(input:checked), .leaflet-pm-toolbar .active > .leaflet-buttons-control-button) { background-color: #2b4667; color: #d3e6ff; }
 :root[data-theme="dark"] #emptyState { color: var(--ink); }
 :root[data-theme="dark"] #emptyUpload { background: rgba(36, 38, 41, .92); }

@@ -82,10 +82,14 @@
 
     const groupedKml = '<kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>Grouped labels</name><Style id="label"><IconStyle><scale>0</scale></IconStyle><LabelStyle><color>800000ff</color><scale>1.5</scale></LabelStyle></Style><Style id="none"><LabelStyle><scale>0</scale></LabelStyle></Style><Folder><name>Zones</name><Placemark><name>Footprint</name><Polygon><outerBoundaryIs><LinearRing><coordinates>148,-36 150,-36 150,-34 148,-34 148,-36</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark><Folder><name>Labels</name><Placemark><name>B</name><styleUrl>#label</styleUrl><Point><coordinates>149,-35</coordinates></Point></Placemark><Placemark><name>1</name><MultiGeometry><Point><coordinates>149.5,-35</coordinates></Point><Point><coordinates>149.7,-35</coordinates></Point></MultiGeometry></Placemark></Folder></Folder><Folder><name>Labels</name><visibility>0</visibility><Placemark><name>F</name><Point><coordinates>149,-34.5</coordinates></Point></Placemark></Folder><Folder><name>Empty</name></Folder><Placemark><name>E</name><styleUrl>#none</styleUrl><Point><coordinates>149,-35.5</coordinates></Point></Placemark><Placemark><name>A</name><Polygon><outerBoundaryIs><LinearRing><coordinates>150,-36 151,-36 151,-35 150,-35 150,-36</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark></Document></kml>';
 
-    async function withEditor(run) {
+    async function withEditor(run, viewport) {
       const frame = document.createElement('iframe');
       frame.title = 'Import regression editor';
       frame.style.cssText = 'width:100%;height:600px;border:0';
+      if (viewport) {
+        frame.style.width = `${viewport.width}px`;
+        frame.style.height = `${viewport.height}px`;
+      }
       const databaseName = `geoeditor-regression-${crypto.randomUUID()}`;
       const response = await fetch('../index.html');
       assert(response.ok, 'Could not load editor HTML');
@@ -930,9 +934,13 @@
         frame.style.width = '1920px';
         frame.style.height = '1000px';
         await settle();
-        const first = app.createLayer({ name: 'Sydney metropolitan network infrastructure coverage planning polygons and assets', features: [point()] });
-        const second = app.createLayer({ name: 'Short layer', features: [point()] });
+        await app.handleFiles([
+          jsonFile(collection([point()]), 'Sydney metropolitan network infrastructure coverage planning polygons and assets.geojson'),
+          jsonFile(collection([point()]), 'Short layer.geojson'),
+        ]);
+        const [first, second] = app.state.layers;
         second.group.getLayers()[0].fire('click', { latlng: host.L.latLng(-35, 149) });
+        await settle();
         assert(host.getComputedStyle(slider).display !== 'none' && slider.min === '330', 'Desktop resize control missing or wrong minimum');
         slider.value = '650';
         slider.dispatchEvent(new host.Event('input', { bubbles: true }));
@@ -982,7 +990,84 @@
         assert(Math.abs(Number(slider.value) - sidebar.getBoundingClientRect().width) < 1, 'Accessible width value did not follow the desktop layout');
         assert(app.state.layers.length === 2 && first.group.getLayers().length === 1, 'Resizing changed layer data');
       }));
+      await test('Australia and imported bounds fit the uncovered viewport with or without panels', async () => {
+        for (const width of [1440, 820, 390]) {
+          await withEditor(async (host, doc) => {
+            const app = host.__geoEditor;
+            const checkFit = () => {
+              const mapBounds = doc.getElementById('map').getBoundingClientRect();
+              const workspace = doc.getElementById('workspace').getBoundingClientRect();
+              const splitter = doc.getElementById('splitter');
+              const bottom = splitter.getClientRects().length ? splitter.getBoundingClientRect().top : workspace.bottom;
+              for (const coordinates of [[-44, 112], [-10, 154]]) {
+                const point = app.map.latLngToContainerPoint(coordinates);
+                const left = point.x + mapBounds.left;
+                const top = point.y + mapBounds.top;
+                assert(left >= workspace.left + 19 && left <= workspace.right - 19 && top >= workspace.top + 19 && top <= bottom - 19, `Australia bounds are covered or clipped at width ${width}`);
+              }
+              assert(app.map.getZoom() < 7, 'Australia opened at street-level zoom');
+            };
+            checkFit();
+            const feature = { type: 'Feature', properties: { name: 'Australia bounds' }, geometry: { type: 'Polygon', coordinates: [[[112, -44], [154, -44], [154, -10], [112, -10], [112, -44]]] } };
+            await app.handleFiles([jsonFile(collection([feature]), 'australia.geojson')]);
+            checkFit();
+          }, { width, height: 844 });
+        }
+      });
+      await test('Map drawing controls follow the empty import prompt and cancel modes after deleting the last layer', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        const toolbars = [...doc.querySelectorAll('.leaflet-pm-toolbar')];
+        const draw = doc.querySelector('.leaflet-pm-icon-polygon').closest('a');
+        const checkDisabled = disabled => {
+          assert(toolbars.every(toolbar => toolbar.inert === disabled && toolbar.getAttribute('aria-disabled') === String(disabled)), 'Toolbar interaction does not match the layer state');
+          assert(doc.getElementById('emptyState').classList.contains('hidden') !== disabled, 'Import prompt does not match the layer state');
+          for (const id of ['sidebar', 'tablePanel']) {
+            assert((doc.getElementById(id).getClientRects().length === 0) === disabled, `${id} visibility does not match the layer state`);
+          }
+          if (disabled) {
+            assert(['sidebarSplitter', 'splitter'].every(id => host.getComputedStyle(doc.getElementById(id)).display === 'none'), 'Empty workspace retains a panel resize divider');
+          }
+        };
+        checkDisabled(true);
+        draw.click();
+        assert(!app.map.pm.globalDrawModeEnabled(), 'Drawing started without a layer');
+        for (const width of [1440, 390]) {
+          host.frameElement.style.width = `${width}px`;
+          await new Promise(resolve => host.setTimeout(resolve, 100));
+          await app.handleFiles([jsonFile(collection([point()]), 'drawing-controls.geojson')]);
+          checkDisabled(false);
+          const current = doc.querySelector('.leaflet-pm-draw .mobile-tool-current > a');
+          (width <= 1024 ? current : draw).click();
+          assert(app.map.pm.globalDrawModeEnabled(), 'Drawing did not become available with a layer');
+          doc.querySelector('#layerList button[aria-label="Delete layer"]').click();
+          const dialog = doc.getElementById('dlg');
+          const closed = new Promise(resolve => dialog.addEventListener('close', resolve, { once: true }));
+          dialog.querySelector('button[value="ok"]').click();
+          dialog.getAnimations().forEach(animation => animation.finish());
+          await closed;
+          await new Promise(resolve => host.setTimeout(resolve, 0));
+          checkDisabled(true);
+          assert(!app.map.pm.globalDrawModeEnabled() && !app.map.pm.globalEditModeEnabled() && !app.map.pm.globalDragModeEnabled() && !app.map.pm.globalRemovalModeEnabled() && !app.map.pm.globalCutModeEnabled(), 'A drawing or editing mode remains active without layers');
+          draw.click();
+          assert(!app.map.pm.globalDrawModeEnabled(), 'Disabled drawing control restarted a mode');
+          await new Promise(resolve => host.requestAnimationFrame(() => host.requestAnimationFrame(resolve)));
+          const layout = host.getComputedStyle(doc.getElementById('main'));
+          assert(['--panel-left', '--panel-top', '--panel-bottom'].every(property => parseFloat(layout.getPropertyValue(property)) === 0), 'Hidden panels still reserve map control space');
+        }
+        doc.getElementById('btnNewLayer').click();
+        const dialog = doc.getElementById('dlg');
+        for (let step = 0; step < 2; step++) {
+          const closed = new Promise(resolve => dialog.addEventListener('close', resolve, { once: true }));
+          dialog.querySelector('button[value="ok"]').click();
+          dialog.getAnimations().forEach(animation => animation.finish());
+          await closed;
+          await new Promise(resolve => host.setTimeout(resolve, 0));
+        }
+        assert(app.state.layers.length === 1 && app.state.active.group.getLayers().length === 0, 'Blank layer creation did not complete');
+        checkDisabled(false);
+      }));
       await test('Map action trays match their controls in height and alignment across viewport sizes', () => withEditor(async (host, doc) => {
+        await host.__geoEditor.handleFiles([jsonFile(collection([point()]), 'map-controls.geojson')]);
         for (const width of [1440, 820, 390, 320]) {
           host.frameElement.style.width = `${width}px`;
           host.frameElement.style.height = '1000px';
@@ -1003,11 +1088,13 @@
           control.click();
         }
       }));
-      await test('Compact map tool groups animate holds and selections while respecting reduced motion', () => withEditor(async (host, doc) => {
+      await test('Compact map tool groups animate double-tap toggles and selections while respecting reduced motion', () => withEditor(async (host, doc) => {
+        await host.__geoEditor.handleFiles([jsonFile(collection([point()]), 'compact-controls.geojson')]);
         const reduced = host.matchMedia('(prefers-reduced-motion: reduce)').matches;
         const toolbar = doc.querySelector('.leaflet-pm-icon-polygon').closest('.leaflet-pm-toolbar');
         const tools = [...toolbar.children];
         const frame = () => new Promise(resolve => host.requestAnimationFrame(resolve));
+        const tap = button => button.dispatchEvent(new host.MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }));
         const settle = async () => {
           const animations = toolbar.getAnimations({ subtree: true });
           animations.forEach(animation => animation.finish());
@@ -1021,16 +1108,26 @@
           const current = toolbar.querySelector('.mobile-tool-current > a');
           const extra = tools.find(tool => !tool.contains(current));
           assert(extra.inert && extra.getBoundingClientRect().width === 0, 'Collapsed tools occupy space or accept interaction');
-          current.dispatchEvent(new host.PointerEvent('pointerdown', { button: 0, bubbles: true, clientX: 20, clientY: 20 }));
-          await new Promise(resolve => host.setTimeout(resolve, 470));
+          tap(current);
+          await new Promise(resolve => host.setTimeout(resolve, 350));
+          assert(host.__geoEditor.map.pm.globalDrawModeEnabled() && !toolbar.classList.contains('mobile-tools-open'), 'Single tap no longer activates the current tool');
+          host.__geoEditor.map.pm.disableDraw();
+          tap(current);
+          assert(!toolbar.classList.contains('mobile-tools-open') && !host.__geoEditor.map.pm.globalDrawModeEnabled(), 'First tap activated a tool before the double-tap window ended');
+          tap(current);
           await frame();
-          assert(toolbar.classList.contains('mobile-tools-open') && current.getAttribute('aria-expanded') === 'true' && !extra.inert, 'Holding the current tool did not reveal its group');
+          assert(toolbar.classList.contains('mobile-tools-open') && current.getAttribute('aria-expanded') === 'true' && !extra.inert, 'Double-tapping the current tool did not reveal its group');
           assert(reduced ? extra.getAnimations().length === 0 : extra.getAnimations().length > 0, 'Tool expansion does not follow motion preference');
           await settle();
           assert(host.getComputedStyle(extra).opacity === '1' && extra.getBoundingClientRect().width > 0, 'Expanded tools remain faded or collapsed');
-          current.dispatchEvent(new host.PointerEvent('pointerup', { button: 0, bubbles: true }));
-          current.click();
-          assert(toolbar.classList.contains('mobile-tools-open') && !host.__geoEditor.map.pm.globalDrawModeEnabled(), 'Releasing a hold activated a tool or dismissed the group');
+          tap(current);
+          assert(toolbar.classList.contains('mobile-tools-open'), 'First tap closed the group before a second tap');
+          tap(current);
+          await settle();
+          assert(!toolbar.classList.contains('mobile-tools-open') && !host.__geoEditor.map.pm.globalDrawModeEnabled(), 'Double-tapping without another selection did not close the group or activated drawing');
+          tap(current);
+          tap(current);
+          await settle();
           const selected = extra.querySelector('a');
           const collapsing = tools.find(tool => !tool.contains(current) && tool !== extra);
           selected.click();
@@ -1157,6 +1254,143 @@
         await closed;
         await new Promise(resolve => host.setTimeout(resolve, 0));
         assert(!doc.querySelector('.layer-reorder').getBoundingClientRect().width, 'Reorder handle remains visible after returning to one layer');
+      }));
+      await test('Colour selectors animate and toggle without breaking live layer or modal colour updates', () => withEditor(async (host, doc) => {
+        await host.customElements.whenDefined('hex-color-picker');
+        await host.__geoEditor.handleFiles([jsonFile(collection([point()]), 'colour-picker.geojson')]);
+        const layer = host.__geoEditor.state.active;
+        const swatch = doc.querySelector('#layerList input[type="color"]');
+        let panel;
+        let picker;
+        let hex;
+        const matchMedia = host.matchMedia;
+        const settle = async () => {
+          const animations = panel.getAnimations();
+          animations.forEach(animation => animation.finish());
+          await Promise.all(animations.map(animation => animation.finished));
+          await new Promise(resolve => host.setTimeout(resolve, 0));
+        };
+        let changes = 0;
+        swatch.addEventListener('change', () => { changes++; });
+        try {
+          for (const reduced of [false, true]) {
+            host.matchMedia = query => query === '(prefers-reduced-motion: reduce)' ? { matches: reduced } : matchMedia.call(host, query);
+            host.frameElement.style.width = reduced ? '390px' : '1440px';
+            await new Promise(resolve => host.setTimeout(resolve, 80));
+            swatch.click();
+            panel = doc.getElementById('colourPopover');
+            picker = panel.querySelector('hex-color-picker');
+            hex = panel.querySelector('input');
+            assert(!panel.hidden && panel.parentElement === doc.body && swatch.getAttribute('aria-expanded') === 'true', 'Swatch did not open its selector');
+            assert(picker.shadowRoot.querySelectorAll('[role="slider"]').length >= 2, 'Colour selection surface or keyboard sliders are missing');
+            assert(reduced ? panel.getAnimations().length === 0 : panel.getAnimations().length > 0, 'Opening does not follow motion preference');
+            await settle();
+            const bounds = panel.getBoundingClientRect();
+            assert(bounds.left >= 0 && bounds.right <= host.innerWidth && bounds.top >= 0 && bounds.bottom <= host.innerHeight, 'Colour selector overflows its viewport');
+            hex.value = reduced ? '#dc2626' : '#16a34a';
+            hex.dispatchEvent(new host.Event('input', { bubbles: true }));
+            assert(layer.color === hex.value && layer.group.getLayers()[0].feature.style.fill === hex.value, 'Hex edit did not update the editable layer live');
+            hex.value = '#wrong';
+            hex.dispatchEvent(new host.Event('input', { bubbles: true }));
+            assert(layer.color === swatch.value, 'Invalid hex text changed the source colour');
+            const selectedColour = reduced ? '#d97706' : '#0891b2';
+            picker.dispatchEvent(new host.CustomEvent('color-changed', { detail: { value: selectedColour } }));
+            assert(swatch.value === selectedColour && layer.color === selectedColour, 'Picker gesture did not update the source input');
+            swatch.click();
+            assert(swatch.getAttribute('aria-expanded') === 'false' && panel.inert, 'Second swatch press did not begin dismissal');
+            assert(reduced ? panel.getAnimations().length === 0 : panel.getAnimations().length > 0, 'Closing does not follow motion preference');
+            await settle();
+            assert(panel.hidden && changes === Number(reduced) + 1, 'Closing did not hide the selector or commit the colour once');
+          }
+          const dialog = doc.getElementById('dlg');
+          const modalSwatch = doc.createElement('input');
+          modalSwatch.type = 'color';
+          modalSwatch.value = '#2563eb';
+          dialog.appendChild(modalSwatch);
+          dialog.showModal();
+          modalSwatch.click();
+          assert(panel.parentElement === dialog && !panel.hidden, 'Selector does not open inside a modal');
+          hex.value = '#9333ea';
+          hex.dispatchEvent(new host.Event('input', { bubbles: true }));
+          assert(modalSwatch.value === '#9333ea', 'Modal swatch did not receive live colour updates');
+          hex.dispatchEvent(new host.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+          await settle();
+          assert(panel.hidden && dialog.open && doc.activeElement === modalSwatch, 'Escape closed the host modal or lost source focus');
+          dialog.close();
+          modalSwatch.remove();
+          swatch.dispatchEvent(new host.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+          assert(!panel.hidden && doc.activeElement === hex, 'Keyboard activation did not focus the selector');
+          doc.body.click();
+          await settle();
+          assert(panel.hidden, 'Outside press did not close the selector');
+        } finally { host.matchMedia = matchMedia; }
+      }));
+      await test('Modal focus indicators are opt-in, persistent and do not remove keyboard focus', async () => {
+        const saved = localStorage.getItem('geoeditor-modal-focus');
+        localStorage.removeItem('geoeditor-modal-focus');
+        try {
+          await withEditor(async (host, doc) => {
+            const toggle = doc.getElementById('toggleModalFocus');
+            assert(!toggle.checked && doc.documentElement.dataset.modalFocus === 'false', 'Modal focus indicators are not off by default');
+            for (const dialog of doc.querySelectorAll('dialog')) {
+              const input = doc.createElement('input');
+              input.type = 'text';
+              dialog.appendChild(input);
+              dialog.showModal();
+              input.focus();
+              assert(doc.activeElement === input && dialog.contains(doc.activeElement), `${dialog.id} lost keyboard focus`);
+              assert(host.getComputedStyle(input).outlineStyle === 'none' && host.getComputedStyle(input).boxShadow === 'none', `${dialog.id} still highlights focus by default`);
+              toggle.checked = true;
+              toggle.dispatchEvent(new host.Event('change'));
+              assert(host.getComputedStyle(input).outlineStyle === 'solid', `${dialog.id} does not restore accessible focus indicators`);
+              toggle.checked = false;
+              toggle.dispatchEvent(new host.Event('change'));
+              dialog.close();
+              input.remove();
+            }
+            const outside = doc.createElement('input');
+            doc.body.appendChild(outside);
+            outside.focus();
+            assert(host.getComputedStyle(outside).outlineStyle !== 'none', 'Modal preference suppressed keyboard focus outside dialogs');
+            outside.remove();
+            toggle.checked = true;
+            toggle.dispatchEvent(new host.Event('change'));
+            await withEditor(async (restoredHost, restoredDoc) => {
+              assert(restoredDoc.getElementById('toggleModalFocus').checked && restoredDoc.documentElement.dataset.modalFocus === 'true', 'Modal focus preference was not restored in a new editor');
+            });
+          });
+        } finally {
+          if (saved === null) localStorage.removeItem('geoeditor-modal-focus');
+          else localStorage.setItem('geoeditor-modal-focus', saved);
+        }
+      });
+      await test('Basemap button toggles its pop-up on desktop and phones with keyboard dismissal', () => withEditor(async (host, doc) => {
+        const button = doc.querySelector('.leaflet-control-layers-toggle');
+        const control = button.parentElement;
+        const expanded = () => control.classList.contains('leaflet-control-layers-expanded');
+        const key = (target, value) => target.dispatchEvent(new host.KeyboardEvent('keydown', { key: value, bubbles: true, cancelable: true }));
+        for (const width of [1440, 390]) {
+          host.frameElement.style.width = `${width}px`;
+          await new Promise(resolve => host.setTimeout(resolve, 100));
+          control.dispatchEvent(new host.MouseEvent('mouseenter'));
+          assert(!expanded(), 'Hover opened the basemap menu before its first press');
+          button.click();
+          assert(expanded() && button.getAttribute('aria-expanded') === 'true', 'First basemap press did not open its menu');
+          const blank = [...control.querySelectorAll('label')].find(label => label.textContent.trim() === 'Blank').querySelector('input');
+          blank.click();
+          assert(blank.checked, 'Basemap selection stopped working');
+          button.click();
+          assert(!expanded() && button.getAttribute('aria-expanded') === 'false', 'Second basemap press did not dismiss its menu');
+          key(button, 'Enter');
+          assert(expanded(), 'Enter did not open the basemap menu');
+          key(blank, 'Escape');
+          assert(!expanded() && doc.activeElement === button, 'Escape did not dismiss the menu and restore focus');
+          key(button, ' ');
+          assert(expanded(), 'Space did not open the basemap menu');
+          host.__geoEditor.map.fire('click');
+          await new Promise(resolve => host.setTimeout(resolve, 0));
+          assert(!expanded() && button.getAttribute('aria-expanded') === 'false', 'Map click did not dismiss the menu or update accessibility state');
+        }
       }));
       await test('Dismissible modals animate dismissal while preserving validation and results', () => withEditor(async (host, doc) => {
         for (const dialog of doc.querySelectorAll('dialog:not(.progress-dialog)')) {
@@ -1889,8 +2123,9 @@
         assert(hidden.getTooltip().getContent() === content, 'Unchanged label DOM was recreated');
         assert(layer.group.toGeoJSON().features.length === 6, 'Label layout discarded data');
       }));
-      await test('Single-character labels require close zoom and a large nearby displayed polygon', () => withEditor(async (host, doc) => {
+      await test('Single-character labels require readable nearby polygons and hide at distant zoom', () => withEditor(async (host, doc) => {
         const app = host.__geoEditor;
+        await app.handleFiles([jsonFile(collection([point()]), 'label-layout.geojson')]);
         const settle = () => new Promise(resolve => host.setTimeout(resolve, 80));
         await settle();
         app.map.options.zoomAnimation = false;
@@ -1899,20 +2134,34 @@
           type: 'Feature', properties: { name }, kml: { folderIds: ['zones'] },
           geometry: { type: 'Polygon', coordinates: [[[west, south], [west + size, south], [west + size, south + size], [west, south + size], [west, south]]] },
         });
-        const letter = (name, longitude, latitude) => ({
+        const letter = (name, longitude, latitude, scale = 5) => ({
           ...point({ name }), geometry: { type: 'Point', coordinates: [longitude, latitude] },
-          kml: { folderIds: [] }, style: { 'label-scale': 5 },
+          kml: { folderIds: [] }, style: { 'label-scale': scale },
         });
         const layer = app.createLayer({ name: 'Fitted labels', format: 'kml', fields: ['name'],
           kmlFolders: [{ id: 'zones', parentId: null, name: 'Zones', visible: true, expanded: false }],
-          features: [polygon(148.995, -35.005, .01, 'A'), polygon(149.02, -35.000025, .00005), letter('B', 149, -35), letter('E', 149.0055, -35), letter('F', 149.1, -35), letter('1', 149.020025, -35)],
+          features: [polygon(148.995, -35.005, .01, 'A'), polygon(148.999975, -35.000025, .00005), polygon(149.02, -35.000025, .00005), letter('B', 149, -35), letter('E', 149.0055, -35), letter('F', 149.1, -35), letter('1', 149.020025, -35), letter('K', 149, -35, .6)],
         });
         const leaves = layer.group.getLayers();
         const named = name => leaves.find(leaf => leaf.feature.properties.name === name);
         assert(!named('A').getTooltip() && !app.map.hasLayer(named('B')), 'Single-character labels visible at distant zoom');
+        app.map.setView([-35, 149], 11.5, { animate: false });
+        await settle();
+        assert(!app.map.hasLayer(named('K')), 'Letter appeared on a polygon below the readable size threshold');
+        app.map.setView([-35, 149], 12, { animate: false });
+        await settle();
+        const widerBounds = named('A').getBounds();
+        const widerSize = app.map.latLngToContainerPoint(widerBounds.getSouthEast()).subtract(app.map.latLngToContainerPoint(widerBounds.getNorthWest()));
+        const shortSide = Math.min(widerSize.x, widerSize.y);
+        assert(shortSide >= 24 && shortSide < 32, 'Wider-zoom fixture does not exercise the relaxed polygon threshold');
+        assert(app.map.hasLayer(named('K')) && named('K').getTooltip()?.getContent().style.fontSize === '9.6px', 'Scale-0.6 letter missing at the wider zoom');
+        const widerFont = Number.parseFloat(named('B').getTooltip()?.getContent().style.fontSize);
+        assert(widerFont >= 8 && widerFont <= shortSide / 3 + .01, 'Wider-zoom label is unreadable or oversized for its polygon');
+        assert(!app.map.hasLayer(named('1')) && !app.map.hasLayer(named('F')), 'Wider zoom admitted tiny-polygon or distant labels');
         app.map.setView([-35, 149], 14, { animate: false });
         await settle();
-        assert(app.map.hasLayer(named('B')) && named('B').getTooltip(), 'Nearby letter missing at close zoom');
+        assert(app.map.hasLayer(named('B')) && named('B').getTooltip(), 'Small overlapping polygon suppressed the label on a large polygon');
+        assert(app.map.hasLayer(named('K')) && named('K').getTooltip()?.getContent().style.fontSize === '9.6px', 'GCSTKM2-style label scale 0.6 was suppressed on a large polygon');
         assert(app.map.hasLayer(named('E')), 'Letter immediately outside polygon not associated');
         assert(!app.map.hasLayer(named('F')), 'Distant letter associated with unrelated polygon');
         assert(!app.map.hasLayer(named('1')), 'Letter shown over a tiny polygon');
@@ -1934,7 +2183,7 @@
         await settle();
         assert(app.map.hasLayer(named('B')) && named('B').getTooltip(), 'Large-polygon label missing at zoom 10');
         assert(Number.parseFloat(named('B').getTooltip().getContent().style.fontSize) <= 12, 'Zoom-10 label exceeds size cap');
-        assert(layer.group.toGeoJSON().features.length === 6, 'Label suppression discarded data');
+        assert(layer.group.toGeoJSON().features.length === 8, 'Label suppression discarded data');
       }));
       await test('Geometry previews have a separate column and four-digit row actions fit', () => withEditor(async (host, doc) => {
         const app = host.__geoEditor;
