@@ -1,6 +1,6 @@
 # Geo Editor flowcharts
 
-**Version 1.0 | October 2026**
+**Version 3.7 | October 2026**
 
 Diagrams of how Geo Editor works. They use [Mermaid](https://mermaid.js.org/), which GitHub and VS Code (with a Mermaid extension) render automatically.
 
@@ -310,7 +310,7 @@ flowchart TD
     Frame --> Release["Release, cancel or lose focus<br/>flush the latest size and refresh geometry<br/>and labels for the final uncovered area"]
     Folder(["Folder chevron or zoom glyph"]) --> FolderAction["Expand or collapse children, or zoom to folder<br/>no button box; preserve focus and hit targets"]
     Help(["Question-mark button"]) --> Guide["Short editing guide<br/>warn about deletions and unsaved work"]
-    Title(["Geo Editor heading"]) --> About["About dialog<br/>Australia-facing globe and app heading<br/>Imagined by Joseph Malicdem<br/>Version 1.0 / October 2026"]
+    Title(["Geo Editor heading"]) --> About["About dialog<br/>Australia-facing globe and app heading<br/>Imagined by Joseph Malicdem<br/>Version 3.7 / October 2026"]
     About --> Feedback["Send feedback<br/>open email draft to<br/>joseph.malicdem@team.telstra.com<br/>subject: Geo Editor Feedback"]
     About --> Close["Close button or Escape<br/>return focus to heading"]
 ```
