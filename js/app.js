@@ -472,6 +472,293 @@
   });
   new MutationObserver(updateBasemapExpanded).observe(basemapContainer, { attributes: true, attributeFilter: ['class'] });
   updateBasemapExpanded();
+  const mapContainer = map.getContainer();
+  const fullscreenButton = document.createElement('button');
+  fullscreenButton.type = 'button';
+  fullscreenButton.className = 'map-fullscreen-toggle';
+  fullscreenButton.setAttribute('aria-controls', 'map');
+  basemapContainer.appendChild(fullscreenButton);
+  L.DomEvent.disableClickPropagation(fullscreenButton);
+  const panelAnimations = new WeakMap();
+  let panelMotionCount = 0;
+  const sidebarControlOffsets = () => {
+    const sidebar = $('sidebar').getBoundingClientRect();
+    const stacked = sidebar.width >= $('main').getBoundingClientRect().width - 1;
+    return { left: stacked ? 0 : sidebar.width, top: stacked ? sidebar.height : 0 };
+  };
+  const applySidebarControlOffsets = offsets => {
+    $('main').style.setProperty('--panel-left', `${offsets.left}px`);
+    $('main').style.setProperty('--panel-top', `${offsets.top}px`);
+  };
+  const stopPanelAnimation = panel => {
+    const record = panelAnimations.get(panel);
+    if (!record) return;
+    panelAnimations.delete(panel);
+    record.animation.cancel();
+    record.companionAnimation?.cancel();
+    record.companion?.classList.remove('panel-animating');
+    record.controlAnimations?.forEach(({ element, animation }) => {
+      animation.cancel();
+      element.classList.remove('panel-animating');
+    });
+    panel.classList.remove('panel-animating');
+    panelMotionCount--;
+    if (!panelMotionCount) scheduleMapDisplay();
+  };
+  const animatePanel = (panel, offset, showing, commit = () => {}, hold = false, controls = null) => {
+    const previous = panelAnimations.get(panel);
+    const style = getComputedStyle(panel);
+    const sidebarRailMotion = panel === $('sidebar') && controls;
+    const motionProperty = sidebarRailMotion ? 'clipPath' : 'transform';
+    const start = { [motionProperty]: sidebarRailMotion && style.clipPath === 'none' ? 'inset(0px 0px 0px 0px)' : style[motionProperty] };
+    const sidebarBodyMotion = panel === $('sidebarContent') && mobileControls.matches;
+    const companion = panel === $('tablePanel') ? $('splitter') : sidebarBodyMotion ? $('sidebar') : null;
+    const companionProperty = sidebarBodyMotion ? 'clipPath' : 'transform';
+    const companionStart = companion && previous ? getComputedStyle(companion)[companionProperty] : 'none';
+    stopPanelAnimation(panel);
+    if (showing) commit();
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches || !panel.getClientRects().length || getComputedStyle(panel).visibility === 'hidden') {
+      if (!showing) commit();
+      return Promise.resolve();
+    }
+    const visible = sidebarRailMotion ? { clipPath: 'inset(0px 0px 0px 0px)' } : { transform: 'translate(0, 0)' };
+    const hidden = sidebarRailMotion ? { clipPath: `inset(0px ${Math.max(0, panel.getBoundingClientRect().width - controls.collapsed.left)}px 0px 0px)` } : { transform: offset };
+    if (!panelMotionCount) {
+      if (displayRefreshTimer !== null) {
+        clearTimeout(displayRefreshTimer);
+        displayRefreshTimer = null;
+      }
+      state.layers.forEach(layer => {
+        layer.spatialRequest = (layer.spatialRequest || 0) + 1;
+        cancelLayerDisplay(layer);
+      });
+    }
+    panelMotionCount++;
+    panel.classList.add('panel-animating');
+    const timing = {
+      duration: 360, easing: 'cubic-bezier(.22, 0, .18, 1)', fill: 'both',
+    };
+    const animation = panel.animate([previous ? start : showing ? hidden : start, showing ? visible : hidden], timing);
+    let companionAnimation;
+    if (companion) {
+      let companionVisible = { transform: 'none' };
+      let companionHidden = { transform: `translateY(${panel.getBoundingClientRect().height}px)` };
+      if (sidebarBodyMotion) {
+        const sidebarStyle = getComputedStyle(companion);
+        const headerBottom = $('sidebarHeader').getBoundingClientRect().bottom;
+        const retainedBottom = controls ? companion.getBoundingClientRect().top + controls.collapsed.top : headerBottom + parseFloat(sidebarStyle.paddingBottom) + parseFloat(sidebarStyle.borderBottomWidth);
+        const travel = Math.max(0, companion.getBoundingClientRect().bottom - retainedBottom);
+        companionVisible = { clipPath: 'inset(0px 0px 0px 0px)' };
+        companionHidden = { clipPath: `inset(0px 0px ${travel}px 0px)` };
+      }
+      companion.classList.add('panel-animating');
+      companionAnimation = companion.animate([
+        previous ? { [companionProperty]: companionStart } : showing ? companionHidden : companionVisible,
+        showing ? companionVisible : companionHidden,
+      ], timing);
+      const startTime = document.timeline.currentTime;
+      if (startTime !== null) animation.startTime = companionAnimation.startTime = startTime;
+    }
+    const controlAnimations = [];
+    if (controls) {
+      if (sidebarRailMotion) {
+        const content = $('sidebarContent');
+        content.classList.add('panel-animating');
+        controlAnimations.push({ element: content, animation: content.animate([
+          { transform: previous ? controls.contentStart : showing ? 'translateX(-100%)' : 'none' },
+          { transform: showing ? 'none' : 'translateX(-100%)' },
+        ], timing) });
+        controls.header.forEach(({ element, before, target }) => {
+          const current = element.getBoundingClientRect();
+          const position = bounds => bounds.width ? `translate(${bounds.left - current.left}px, ${bounds.top - current.top}px)` : `translateX(-${current.right}px)`;
+          element.classList.add('panel-animating');
+          controlAnimations.push({ element, animation: element.animate([
+            { transform: position(before) }, { transform: position(target) },
+          ], timing) });
+        });
+      }
+      const style = getComputedStyle($('main'));
+      const base = { left: parseFloat(style.getPropertyValue('--panel-left')) || 0, top: parseFloat(style.getPropertyValue('--panel-top')) || 0 };
+      controls.before.forEach(({ element, left, top }) => {
+        const bounds = element.getBoundingClientRect();
+        const startX = left - bounds.left;
+        const startY = top - bounds.top;
+        const endX = element.classList.contains('leaflet-left') ? controls.target.left - base.left : 0;
+        const endY = element.classList.contains('leaflet-top') ? controls.target.top - base.top : 0;
+        if (Math.abs(startX) + Math.abs(startY) + Math.abs(endX) + Math.abs(endY) < .01) return;
+        element.classList.add('panel-animating');
+        controlAnimations.push({ element, animation: element.animate([
+          { transform: `translate(${startX}px, ${startY}px)` },
+          { transform: `translate(${endX}px, ${endY}px)` },
+        ], timing) });
+      });
+      if (controls.table.before.height > 0) {
+        const table = $('tablePanel');
+        const splitter = $('splitter');
+        const tableLeft = table.getBoundingClientRect().left;
+        const splitterLeft = splitter.getBoundingClientRect().left;
+        const frames = bounds => ({
+          width: `${bounds.width}px`, flexBasis: `${bounds.height}px`,
+          transform: `translateX(${bounds.left - tableLeft}px)`,
+        });
+        table.classList.add('panel-animating');
+        splitter.classList.add('panel-animating');
+        controlAnimations.push({ element: table, animation: table.animate([
+          frames(controls.table.before), frames(controls.table.target),
+        ], timing) });
+        controlAnimations.push({ element: splitter, animation: splitter.animate([
+          { width: `${controls.table.before.width}px`, transform: `translateX(${controls.table.before.left - splitterLeft}px)` },
+          { width: `${controls.table.target.width}px`, transform: `translateX(${controls.table.target.left - splitterLeft}px)` },
+        ], timing) });
+      }
+      const startTime = document.timeline.currentTime;
+      if (startTime !== null) {
+        animation.startTime = startTime;
+        if (companionAnimation) companionAnimation.startTime = startTime;
+        controlAnimations.forEach(control => { control.animation.startTime = startTime; });
+      }
+    }
+    panelAnimations.set(panel, { animation, companion, companionAnimation, controlAnimations });
+    return animation.finished.then(() => {
+      if (panelAnimations.get(panel)?.animation !== animation) return;
+      if (!showing) commit();
+      if (!hold) stopPanelAnimation(panel);
+    }).catch(() => {
+      if (panelAnimations.get(panel)?.animation === animation) stopPanelAnimation(panel);
+    });
+  };
+  const editorPanels = [[$('topbar'), 'translateY(-100%)'], [$('sidebar'), 'translateX(-100%)'], [$('sidebarSplitter'), null], [$('tablePanel'), 'translateY(100%)']];
+  let fullscreenControlAnimations = [];
+  const stopFullscreenControlAnimations = () => {
+    const hadAnimations = fullscreenControlAnimations.length > 0;
+    const viewport = fullscreenControlAnimations.find(({ element }) => element === mapContainer);
+    if (viewport) {
+      viewport.animation.cancel();
+      if (viewport.inlineStyle === null) mapContainer.removeAttribute('style');
+      else mapContainer.setAttribute('style', viewport.inlineStyle);
+      map.invalidateSize({ pan: true, animate: false, debounceMoveend: true });
+    }
+    fullscreenControlAnimations.forEach(({ element, animation, inlineStyle, preserveStyle }) => {
+      animation.cancel();
+      if (!preserveStyle) {
+        if (inlineStyle === null) element.removeAttribute('style');
+        else element.setAttribute('style', inlineStyle);
+      }
+      element.classList.remove('panel-animating', 'fullscreen-controls-animating');
+    });
+    fullscreenControlAnimations = [];
+    if (hadAnimations) updatePanelLayout();
+  };
+  const fullscreenControlBounds = () => [...mapContainer.querySelectorAll('.leaflet-top, .leaflet-bottom')].map(element => ({ element, bounds: element.getBoundingClientRect() }));
+  const animateEditorPanels = (showing, before = fullscreenControlBounds()) => {
+    stopFullscreenControlAnimations();
+    const jobs = editorPanels.map(([panel, offset]) => animatePanel(panel,
+      panel === $('sidebarSplitter') ? `translateX(-${$('sidebar').getBoundingClientRect().width}px)` :
+        panel === $('sidebar') && mobileControls.matches ? 'translateY(-100%)' : offset, showing, undefined, !showing));
+    if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      const timing = { duration: 360, easing: 'cubic-bezier(.22, 0, .18, 1)', fill: 'both' };
+      before.forEach(({ element, bounds }) => {
+        const current = element.getBoundingClientRect();
+        const edgeLeft = element.classList.contains('leaflet-left') ? 0 : window.innerWidth - current.width;
+        const edgeTop = element.classList.contains('leaflet-top') ? 0 : window.innerHeight - current.height;
+        const inlineStyle = element.getAttribute('style');
+        Object.assign(element.style, {
+          position: 'fixed', left: `${current.left}px`, top: `${current.top}px`, right: 'auto', bottom: 'auto',
+          width: `${current.width}px`, height: `${current.height}px`,
+        });
+        element.classList.add('fullscreen-controls-animating');
+        const animation = element.animate(showing ? [
+          { transform: `translate(${bounds.left - current.left}px, ${bounds.top - current.top}px)` },
+          { transform: 'translate(0px, 0px)' },
+        ] : [
+          { transform: `translate(${bounds.left - current.left}px, ${bounds.top - current.top}px)` },
+          { transform: `translate(${edgeLeft - current.left}px, ${edgeTop - current.top}px)` },
+        ], timing);
+        element.classList.add('panel-animating');
+        fullscreenControlAnimations.push({ element, animation, inlineStyle });
+      });
+      const headerSpace = $('mapWrap').getBoundingClientRect().top;
+      const inlineStyle = mapContainer.getAttribute('style');
+      const viewportAnimation = mapContainer.animate(showing ? [
+        { top: `${-headerSpace}px` }, { top: '0px' },
+      ] : [
+        { top: '0px' }, { top: `${-headerSpace}px` },
+      ], timing);
+      fullscreenControlAnimations.push({ element: mapContainer, animation: viewportAnimation, inlineStyle });
+      const pane = map.getPane('mapPane');
+      const paneAnimation = pane.animate([
+        { translate: '0px 0px' }, { translate: `0px ${headerSpace / 2 * (showing ? -1 : 1)}px` },
+      ], timing);
+      fullscreenControlAnimations.push({ element: pane, animation: paneAnimation, preserveStyle: true });
+      const startTime = document.timeline.currentTime;
+      if (startTime !== null) {
+        editorPanels.forEach(([panel]) => {
+          const record = panelAnimations.get(panel);
+          if (!record) return;
+          record.animation.startTime = startTime;
+          if (record.companionAnimation) record.companionAnimation.startTime = startTime;
+          record.controlAnimations.forEach(({ animation }) => { animation.startTime = startTime; });
+        });
+        fullscreenControlAnimations.forEach(({ animation }) => { animation.startTime = startTime; });
+      }
+      const animations = fullscreenControlAnimations;
+      jobs.push(Promise.all(animations.map(({ animation }) => animation.finished.catch(() => {}))).then(() => {
+        if (showing && fullscreenControlAnimations === animations) stopFullscreenControlAnimations();
+      }));
+    }
+    return Promise.all(jobs);
+  };
+  let fullscreenFallback = false;
+  const updateMapFullscreen = () => {
+    const active = document.fullscreenElement === mapContainer || fullscreenFallback;
+    const wasActive = mapContainer.classList.contains('map-fullscreen');
+    const before = !active && wasActive ? fullscreenControlBounds() : null;
+    mapContainer.classList.toggle('map-fullscreen', active);
+    fullscreenButton.title = active ? 'Exit fullscreen' : 'Enter fullscreen';
+    fullscreenButton.setAttribute('aria-label', fullscreenButton.title);
+    fullscreenButton.setAttribute('aria-pressed', String(active));
+    fullscreenButton.replaceChildren(actionIcon(active ? 'Minimize2' : 'Maximize2'));
+    if (active === wasActive) return;
+    const hadMotion = fullscreenControlAnimations.length > 0;
+    if (active) {
+      editorPanels.forEach(([panel]) => stopPanelAnimation(panel));
+      stopFullscreenControlAnimations();
+    } else animateEditorPanels(true, before);
+    if (active ? !hadMotion : !fullscreenControlAnimations.length) map.invalidateSize({ pan: true, animate: false, debounceMoveend: true });
+    if (wasActive && !active) requestAnimationFrame(() => fullscreenButton.focus());
+  };
+  fullscreenButton.addEventListener('click', async () => {
+    basemapControl.collapse();
+    fullscreenButton.disabled = true;
+    try {
+      if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) fullscreenButton.animate([
+        { transform: 'scale(1)' }, { transform: 'scale(.88)', offset: .3 }, { transform: 'scale(1)' },
+      ], { duration: 280, easing: 'cubic-bezier(.22, 1, .36, 1)' });
+      if (document.fullscreenElement !== mapContainer && !fullscreenFallback) await animateEditorPanels(false);
+      if (document.fullscreenElement === mapContainer) await document.exitFullscreen();
+      else if (fullscreenFallback) fullscreenFallback = false;
+      else {
+        try {
+          if (!document.fullscreenEnabled || !mapContainer.requestFullscreen) fullscreenFallback = true;
+          else await mapContainer.requestFullscreen();
+        } catch {
+          fullscreenFallback = true;
+        }
+      }
+    } finally {
+      fullscreenButton.disabled = false;
+      updateMapFullscreen();
+    }
+  });
+  document.addEventListener('fullscreenchange', updateMapFullscreen);
+  document.addEventListener('keydown', event => {
+    if (event.key !== 'Escape' || !fullscreenFallback) return;
+    event.preventDefault();
+    event.stopPropagation();
+    fullscreenFallback = false;
+    updateMapFullscreen();
+  }, true);
+  updateMapFullscreen();
   const scaleControl = L.control.scale().addTo(map);
 
   map.pm.addControls({
@@ -1235,11 +1522,11 @@
   let displayRefreshTimer = null;
   let panelResizeActive = false;
   function scheduleMapDisplay() {
+    if (panelResizeActive || panelMotionCount) return;
     state.layers.forEach(lyr => {
       lyr.spatialRequest = (lyr.spatialRequest || 0) + 1;
       cancelLayerDisplay(lyr);
     });
-    if (panelResizeActive) return;
     if (displayRefreshTimer !== null) return;
     displayRefreshTimer = setTimeout(() => {
       displayRefreshTimer = null;
@@ -3612,23 +3899,42 @@
   $('btnUndo').addEventListener('click', undoLastTableEdit);
   $('btnToggleLayers').addEventListener('click', () => {
     const sidebar = $('sidebar');
-    const previousHeight = sidebar.getBoundingClientRect().height;
-    if (mobileControls.matches) sidebar.getAnimations().forEach(animation => animation.cancel());
-    const collapsed = sidebar.classList.toggle('collapsed');
-    $('sidebarContent').hidden = collapsed;
+    const content = $('sidebarContent');
     const button = $('btnToggleLayers');
+    const collapsed = button.getAttribute('aria-expanded') === 'true';
+    const tableBefore = $('tablePanel').getBoundingClientRect();
+    const headerBefore = [...$('sidebarHeader').children].map(element => ({ element, before: element.getBoundingClientRect() }));
+    const contentStart = getComputedStyle(content).transform;
+    const movingPanel = mobileControls.matches ? content : sidebar;
+    panelAnimations.get(movingPanel)?.controlAnimations?.forEach(({ element, animation }) => {
+      if (element === $('tablePanel') || element === $('splitter') || sidebar.contains(element)) animation.cancel();
+    });
+    const before = [...mapContainer.querySelectorAll('.leaflet-top, .leaflet-bottom')].map(element => {
+      const bounds = element.getBoundingClientRect();
+      return { element, left: bounds.left, top: bounds.top };
+    });
+    const previousCollapsed = sidebar.classList.contains('collapsed');
+    const previousHidden = content.hidden;
+    sidebar.classList.add('collapsed');
+    content.hidden = true;
+    const collapsedOffsets = sidebarControlOffsets();
+    sidebar.classList.toggle('collapsed', collapsed);
+    content.hidden = collapsed;
+    const target = sidebarControlOffsets();
+    const tableTarget = $('tablePanel').getBoundingClientRect();
+    const header = headerBefore.map(item => ({ ...item, target: item.element.getBoundingClientRect() }));
+    sidebar.classList.toggle('collapsed', previousCollapsed);
+    content.hidden = previousHidden;
+    content.inert = collapsed;
+    animatePanel(mobileControls.matches ? content : sidebar, mobileControls.matches ? 'translateY(-100%)' : 'translateX(-100%)', !collapsed, () => {
+      sidebar.classList.toggle('collapsed', collapsed);
+      content.hidden = collapsed;
+      applySidebarControlOffsets(sidebarControlOffsets());
+    }, false, { before, target, collapsed: collapsedOffsets, table: { before: tableBefore, target: tableTarget }, header, contentStart });
     const label = `${collapsed ? 'Expand' : 'Collapse'} Layers panel`;
     button.title = label;
     button.setAttribute('aria-label', label);
     button.setAttribute('aria-expanded', String(!collapsed));
-    button.replaceChildren(actionIcon(collapsed ? 'PanelLeftOpen' : 'PanelLeftClose'));
-    if (mobileControls.matches && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      const height = sidebar.getBoundingClientRect().height;
-      if (height !== previousHeight) sidebar.animate([
-        { height: `${previousHeight}px`, overflow: 'hidden' },
-        { height: `${height}px`, overflow: 'hidden' },
-      ], { duration: 320, easing: 'cubic-bezier(.22, 1, .36, 1)' });
-    }
   });
   $('btnAddField').addEventListener('click', addField);
   $('btnFilter').addEventListener('click', async () => {
@@ -3783,7 +4089,8 @@
     initialMapViewPending = false;
     if (!state.layers.length) fitVisibleBounds(L.latLngBounds([[-44, 112], [-10, 154]]));
   }
-  const panelObserver = new ResizeObserver(() => {
+  function updatePanelLayout() {
+    if (fullscreenControlAnimations.length) return;
     const preferredWidth = parseFloat($('main').style.getPropertyValue('--sidebar-width')) || minimumSidebarWidth;
     if (resizableSidebar.matches && preferredWidth > maximumSidebarWidth()) {
       setSidebarWidth(preferredWidth, $('main').classList.contains('sidebar-fit-names'));
@@ -3816,9 +4123,54 @@
     if (scaleControl.getPosition() !== scalePosition) scaleControl.setPosition(scalePosition);
     fitInitialMapView();
     scheduleMapDisplay();
-  });
+  }
+  const panelObserver = new ResizeObserver(updatePanelLayout);
   [$('main'), $('sidebar'), $('tablePanel')].forEach(panel => panelObserver.observe(panel));
 
+  let tableCollapsed = false;
+  const setTableCollapsed = (collapsed, animated = false) => {
+    tableCollapsed = collapsed;
+    const panel = $('tablePanel');
+    const commit = () => panel.classList.toggle('table-collapsed', collapsed);
+    if (animated) animatePanel(panel, 'translateY(100%)', !collapsed, commit);
+    else {
+      stopPanelAnimation(panel);
+      commit();
+    }
+    $('tablePanel').inert = collapsed;
+    $('splitter').setAttribute('aria-expanded', String(!collapsed));
+    $('splitter').title = `Drag to resize; double-press to ${collapsed ? 'expand' : 'collapse'} table`;
+  };
+  const toggleTableCollapsed = () => setTableCollapsed(!tableCollapsed, true);
+  let tableTouchStart;
+  let lastTableTap = 0;
+  let lastTableTouchToggle = -Infinity;
+  $('splitter').addEventListener('dblclick', event => {
+    event.preventDefault();
+    if (performance.now() - lastTableTouchToggle > 500) toggleTableCollapsed();
+  });
+  $('splitter').addEventListener('pointerdown', event => {
+    if (event.pointerType === 'touch') tableTouchStart = { x: event.clientX, y: event.clientY };
+  });
+  $('splitter').addEventListener('pointercancel', () => { tableTouchStart = null; lastTableTap = 0; });
+  $('splitter').addEventListener('pointerup', event => {
+    if (event.pointerType !== 'touch' || !tableTouchStart) return;
+    const start = tableTouchStart;
+    tableTouchStart = null;
+    if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > 8) { lastTableTap = 0; return; }
+    const now = performance.now();
+    if (lastTableTap && now - lastTableTap < 350) {
+      event.preventDefault();
+      toggleTableCollapsed();
+      lastTableTouchToggle = now;
+      lastTableTap = 0;
+    } else lastTableTap = now;
+  });
+  $('splitter').addEventListener('keydown', event => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    toggleTableCollapsed();
+  });
   $('splitter').addEventListener('mousedown', (e) => {
     e.preventDefault();
     const total = $('workspace').getBoundingClientRect();
@@ -3830,12 +4182,14 @@
       if (frame !== null) return;
       frame = requestAnimationFrame(() => {
         frame = null;
+        setTableCollapsed(false);
         $('tablePanel').style.flexBasis = nextHeight + 'px';
       });
     };
     const up = () => {
       if (frame !== null) {
         cancelAnimationFrame(frame);
+        setTableCollapsed(false);
         $('tablePanel').style.flexBasis = nextHeight + 'px';
       }
       window.removeEventListener('mousemove', move);

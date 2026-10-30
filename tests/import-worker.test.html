@@ -838,6 +838,197 @@
           basemap.classList.remove('leaflet-control-layers-expanded');
         }
       }));
+      await test('Table handle double-press collapses fully and restores its height on desktop and phones', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        await app.handleFiles([jsonFile(collection([point({ name: 'Keep me' })]), 'table-collapse.geojson')]);
+        const panel = doc.getElementById('tablePanel');
+        const handle = doc.getElementById('splitter');
+        const settle = async () => {
+          await Promise.all(doc.getAnimations().filter(animation => animation.effect.getComputedTiming().iterations !== Infinity).map(animation => animation.finished.catch(() => {})));
+          await new Promise(resolve => host.setTimeout(resolve, 100));
+        };
+        const doubleClick = () => handle.dispatchEvent(new host.MouseEvent('dblclick', { bubbles: true, cancelable: true }));
+        const assertJoinedMotion = () => {
+          if (host.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+          const moving = element => element.getAnimations().find(animation => animation.effect.getKeyframes().some(frame => 'transform' in frame));
+          const tableMotion = moving(panel);
+          const handleMotion = moving(handle);
+          assert(tableMotion && handleMotion, 'Table and resize handle are not both animated');
+          assert(tableMotion.startTime === handleMotion.startTime, 'Table and resize handle have different animation clocks');
+          assert(tableMotion.effect.getTiming().duration === handleMotion.effect.getTiming().duration && tableMotion.effect.getTiming().easing === handleMotion.effect.getTiming().easing, 'Table and resize handle use different pacing');
+          tableMotion.pause();
+          handleMotion.pause();
+          for (const progress of [.25, .5, .75]) {
+            tableMotion.currentTime = handleMotion.currentTime = tableMotion.effect.getTiming().duration * progress;
+            assert(Math.abs(handle.getBoundingClientRect().bottom - panel.getBoundingClientRect().top) < 1, `Resize handle detached from table at ${progress * 100}%`);
+          }
+          tableMotion.play();
+          handleMotion.play();
+        };
+        for (const width of [1440, 390]) {
+          host.frameElement.style.width = `${width}px`;
+          panel.style.flexBasis = '180px';
+          await settle();
+          const height = panel.getBoundingClientRect().height;
+          doubleClick();
+          assertJoinedMotion();
+          await settle();
+          assert(panel.getBoundingClientRect().height === 0 && panel.inert, `Table did not collapse completely at width ${width}`);
+          assert(handle.getBoundingClientRect().height > 0 && handle.getAttribute('aria-expanded') === 'false', 'Collapsed table lost its restore handle');
+          assert(parseFloat(host.getComputedStyle(doc.getElementById('main')).getPropertyValue('--panel-bottom')) <= 7, 'Collapsed table still reserves map space');
+          doubleClick();
+          assertJoinedMotion();
+          await settle();
+          assert(Math.abs(panel.getBoundingClientRect().height - height) < 1 && !panel.inert, 'Double-press did not restore the previous table height');
+          panel.style.flexBasis = '42%';
+          await settle();
+          const sidebar = doc.getElementById('sidebar');
+          const layersButton = doc.getElementById('btnToggleLayers');
+          const glyph = layersButton.querySelector('svg');
+          const header = doc.getElementById('sidebarHeader');
+          const headerTop = header.getBoundingClientRect().top;
+          const direction = width <= 760 ? 'translateY(-100%)' : 'translateX(-100%)';
+          const motion = () => width > 760 ? sidebar.getAnimations().find(animation => animation.effect.getKeyframes().some(frame => 'clipPath' in frame)) : doc.getElementById('sidebarContent').getAnimations().find(animation => animation.effect.getKeyframes().some(frame => 'transform' in frame));
+          const motionFrames = () => motion()?.effect.getKeyframes();
+          let tableBefore;
+          let railHandoff;
+          const assertFixedHeader = () => {
+            if (host.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+            const animation = motion();
+            const controls = [...doc.querySelectorAll('#map .leaflet-top, #map .leaflet-bottom')].flatMap(element => element.getAnimations().filter(animation => animation.effect.getKeyframes().some(frame => 'transform' in frame)).map(animation => ({ element, animation })));
+            assert(controls.length > 0 && controls.every(control => control.animation.startTime === animation.startTime && control.animation.effect.getTiming().duration === animation.effect.getTiming().duration && control.animation.effect.getTiming().easing === animation.effect.getTiming().easing), 'Map controls do not share the Layers animation clock and pacing');
+            const tableMotion = panel.getAnimations().find(animation => animation.effect.getKeyframes().some(frame => 'flexBasis' in frame));
+            const handleMotion = handle.getAnimations().find(animation => animation.effect.getKeyframes().some(frame => 'width' in frame));
+            assert(tableMotion && handleMotion && [tableMotion, handleMotion].every(motion => motion.startTime === animation.startTime && motion.effect.getTiming().easing === animation.effect.getTiming().easing && motion.effect.getTiming().duration === animation.effect.getTiming().duration), 'Table resize and handle do not share the Layers animation pacing');
+            const synchronized = [animation, tableMotion, handleMotion, ...controls.map(control => control.animation), ...sidebar.getAnimations({ subtree: true })];
+            synchronized.forEach(motion => motion.pause());
+            synchronized.forEach(motion => { motion.currentTime = 0; });
+            assert(Math.abs(panel.getBoundingClientRect().width - tableBefore.width) < 1 && Math.abs(panel.getBoundingClientRect().height - tableBefore.height) < 1 && Math.abs(panel.getBoundingClientRect().left - tableBefore.left) < 1, 'Table jumps at the start of Layers motion');
+            for (const progress of [.25, .5, .75]) {
+              synchronized.forEach(motion => { motion.currentTime = motion.effect.getTiming().duration * progress; });
+              const bounds = panel.getBoundingClientRect();
+              const handleBounds = handle.getBoundingClientRect();
+              assert(Math.abs(bounds.top - handleBounds.bottom) < 1 && Math.abs(bounds.left - handleBounds.left) < 1 && Math.abs(bounds.width - handleBounds.width) < 1, 'Table resize handle separates during Layers motion');
+              const frames = tableMotion.effect.getKeyframes();
+              const start = parseFloat(width <= 760 ? frames[0].flexBasis : frames[0].width);
+              const end = parseFloat(width <= 760 ? frames.at(-1).flexBasis : frames.at(-1).width);
+              const actual = width <= 760 ? bounds.height : bounds.width;
+              assert(Math.abs(end - start) > 1 && actual > Math.min(start, end) && actual < Math.max(start, end), 'Table size snaps instead of interpolating with Layers');
+              if (width > 760) {
+                const sidebarBounds = sidebar.getBoundingClientRect();
+                const clipped = Number(host.getComputedStyle(sidebar).clipPath.match(/inset\(0px ([\d.]+)px/)?.[1] || 0);
+                const buttonBounds = layersButton.getBoundingClientRect();
+                assert(host.getComputedStyle(sidebar).transform === 'none' && sidebarBounds.right - clipped > sidebarBounds.left + 40, 'Desktop Layers rail disappears before its collapsed layout takes over');
+                assert(buttonBounds.left >= sidebarBounds.left && buttonBounds.right <= sidebarBounds.right - clipped + 1, 'Desktop Layers toggle disappears behind the retracting panel');
+              }
+            }
+            if (width > 760 && layersButton.getAttribute('aria-expanded') === 'false') {
+              synchronized.forEach(motion => { motion.currentTime = motion.effect.getTiming().duration * .999; });
+              const clipped = Number(host.getComputedStyle(sidebar).clipPath.match(/inset\(0px ([\d.]+)px/)?.[1] || 0);
+              const toggle = layersButton.getBoundingClientRect();
+              railHandoff = { edge: sidebar.getBoundingClientRect().right - clipped, left: toggle.left, top: toggle.top };
+            }
+            synchronized.forEach(motion => motion.play());
+            if (width > 760) return;
+            const background = sidebar.getAnimations().find(animation => animation.effect.getKeyframes().some(frame => 'clipPath' in frame));
+            assert(background && background.startTime === animation.startTime && background.effect.getTiming().duration === animation.effect.getTiming().duration && background.effect.getTiming().easing === animation.effect.getTiming().easing, 'Mobile Layers background does not share the content animation clock and pacing');
+            animation.pause();
+            background.pause();
+            animation.currentTime = animation.effect.getTiming().duration * .5;
+            background.currentTime = animation.currentTime;
+            controls.forEach(control => { control.animation.pause(); control.animation.currentTime = animation.currentTime; });
+            [tableMotion, handleMotion].forEach(motion => { motion.pause(); motion.currentTime = animation.currentTime; });
+            assert(Math.abs(header.getBoundingClientRect().top - headerTop) < 1 && host.getComputedStyle(sidebar).opacity === '1' && host.getComputedStyle(sidebar).transform === 'none', 'Mobile Layers header moved or faded with the content');
+            assert(animation.effect.target === doc.getElementById('sidebarContent') && host.getComputedStyle(doc.getElementById('sidebarBody')).overflow === 'clip', 'Mobile Layers content is not clipped below its fixed header');
+            assert(host.getComputedStyle(doc.getElementById('sidebarContent')).opacity === '1', 'Mobile Layers content changes transparency while moving');
+            const clipDistance = value => Number(value.match(/inset\(0px 0px ([\d.]+)px/)?.[1] || 0);
+            const distance = Math.max(...background.effect.getKeyframes().map(frame => clipDistance(frame.clipPath)));
+            const clipped = clipDistance(host.getComputedStyle(sidebar).clipPath);
+            const content = doc.getElementById('sidebarContent');
+            const translated = Math.abs(new host.DOMMatrix(host.getComputedStyle(content).transform).m42) / content.getBoundingClientRect().height;
+            assert(distance > 0 && Math.abs(clipped / distance - translated) < .01, 'Mobile Layers background lags behind the content progress');
+            const edge = sidebar.getBoundingClientRect().bottom - clipped;
+            assert(controls.every(control => !control.element.classList.contains('leaflet-top') || Math.abs(control.element.getBoundingClientRect().top - edge) < 1), 'Map controls lag behind the visible Layers edge');
+            animation.play();
+            background.play();
+            controls.forEach(control => control.animation.play());
+            [tableMotion, handleMotion].forEach(motion => motion.play());
+          };
+          tableBefore = panel.getBoundingClientRect();
+          layersButton.click();
+          if (!host.matchMedia('(prefers-reduced-motion: reduce)').matches) assert(width > 760 ? !!motionFrames()?.at(-1).clipPath : motionFrames()?.at(-1).transform === direction, `Layers collapse has the wrong direction at width ${width}`);
+          assertFixedHeader();
+          assert(layersButton.querySelector('svg') === glyph, 'Layers collapse replaced its glyph instead of rotating it');
+          await settle();
+          assert(sidebar.classList.contains('collapsed') && layersButton.getAttribute('aria-expanded') === 'false', 'Layers collapse did not finish');
+          if (railHandoff) {
+            const toggle = layersButton.getBoundingClientRect();
+            assert(Math.abs(sidebar.getBoundingClientRect().right - railHandoff.edge) < 1 && Math.abs(toggle.left - railHandoff.left) < 1 && Math.abs(toggle.top - railHandoff.top) < 1, 'Desktop Layers rail or toggle jumps at the collapsed-layout handoff');
+          }
+          assert(host.getComputedStyle(glyph).rotate === (width <= 760 ? '270deg' : '180deg'), 'Layers glyph did not rotate to its collapsed direction');
+          tableBefore = panel.getBoundingClientRect();
+          layersButton.click();
+          if (!host.matchMedia('(prefers-reduced-motion: reduce)').matches) assert(width > 760 ? !!motionFrames()?.[0].clipPath : motionFrames()?.[0].transform === direction, `Layers expansion has the wrong direction at width ${width}`);
+          assertFixedHeader();
+          await settle();
+          assert(!sidebar.classList.contains('collapsed') && !doc.getElementById('sidebarContent').hidden, 'Layers expansion did not restore its content');
+          assert(layersButton.querySelector('svg') === glyph && host.getComputedStyle(glyph).rotate === (width <= 760 ? '90deg' : '0deg'), 'Layers glyph did not rotate back on expansion');
+        }
+        const tap = () => {
+          for (const type of ['pointerdown', 'pointerup']) handle.dispatchEvent(new host.PointerEvent(type, { pointerType: 'touch', pointerId: 7, clientX: 200, clientY: 400, bubbles: true, cancelable: true }));
+        };
+        tap(); tap();
+        await settle();
+        assert(panel.getBoundingClientRect().height === 0, 'Touch double-press did not collapse the table');
+        doubleClick();
+        assert(panel.classList.contains('table-collapsed'), 'Compatibility double-click undid the touch toggle');
+        handle.dispatchEvent(new host.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+        await settle();
+        assert(!panel.classList.contains('table-collapsed'), 'Keyboard did not expand the table');
+        handle.dispatchEvent(new host.KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true }));
+        handle.dispatchEvent(new host.MouseEvent('mousedown', { button: 0, bubbles: true }));
+        const bottom = doc.getElementById('workspace').getBoundingClientRect().bottom;
+        host.dispatchEvent(new host.MouseEvent('mousemove', { clientY: bottom - 210 }));
+        host.dispatchEvent(new host.MouseEvent('mouseup'));
+        await settle();
+        assert(!panel.classList.contains('table-collapsed') && panel.style.flexBasis === '210px' && !panel.inert, 'Dragging did not reopen the collapsed table');
+        assert(app.state.active.group.getLayers().length === 1, 'Collapsing changed feature data');
+        Object.defineProperty(doc, 'fullscreenEnabled', { configurable: true, value: false });
+        const fullscreen = doc.querySelector('.map-fullscreen-toggle');
+        const directions = [['topbar', 'translateY(-100%)'], ['sidebar', host.matchMedia('(max-width: 760px)').matches ? 'translateY(-100%)' : 'translateX(-100%)'], ['tablePanel', 'translateY(100%)']];
+        const appearance = new Map(directions.map(([id]) => {
+          const style = host.getComputedStyle(doc.getElementById(id));
+          return [id, { background: style.backgroundColor, backdrop: style.backdropFilter, opacity: style.opacity }];
+        }));
+        fullscreen.click();
+        if (!host.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+          for (const [id, transform] of directions) assert(doc.getElementById(id).getAnimations().some(animation => animation.effect.getKeyframes().some(frame => frame.transform === transform)), `${id} is not sliding in its fullscreen exit direction`);
+          const request = app.state.active.spatialRequest;
+          for (let index = 0; index < 20; index++) app.map.fire('resize');
+          assert(app.state.active.spatialRequest === request, 'Panel motion repeatedly invalidated geometry display');
+          for (const [id] of directions) {
+            const element = doc.getElementById(id);
+            const style = host.getComputedStyle(element);
+            const before = appearance.get(id);
+            assert(style.backgroundColor === before.background && style.backdropFilter === before.backdrop && style.opacity === before.opacity, `${id} changes its glass appearance while moving`);
+            assert(element.getAnimations().every(animation => animation.effect.getKeyframes().every(frame => !('opacity' in frame))), `${id} changes transparency in its animation keyframes`);
+            assert(element.getAnimations().every(animation => animation.effect.getKeyframes().every(frame => !('height' in frame) && !('width' in frame) && !('flexBasis' in frame))), `${id} animates layout dimensions`);
+          }
+        }
+        await settle();
+        assert(app.map.getContainer().classList.contains('map-fullscreen'), 'Animated fullscreen did not finish');
+        fullscreen.click();
+        await settle();
+        assert(!app.map.getContainer().classList.contains('map-fullscreen') && !panel.getAnimations().length && !doc.querySelector('.panel-animating'), 'Returning panels retained a fullscreen animation or compositor hint');
+        const matchMedia = host.matchMedia.bind(host);
+        host.matchMedia = query => query === '(prefers-reduced-motion: reduce)' ? { matches: true } : matchMedia(query);
+        try {
+          handle.dispatchEvent(new host.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+          assert(panel.classList.contains('table-collapsed') && !panel.getAnimations().length, 'Reduced-motion collapse was animated or delayed');
+          handle.dispatchEvent(new host.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+          assert(!panel.classList.contains('table-collapsed') && !panel.getAnimations().length, 'Reduced-motion restore was animated or delayed');
+        } finally { host.matchMedia = matchMedia; }
+      }));
       await test('Loaded panel drags batch writes and defer geometry scans until release', () => withEditor(async (host, doc) => {
         host.frameElement.style.width = '1920px';
         host.frameElement.style.height = '1000px';
@@ -1418,6 +1609,148 @@
           else localStorage.setItem('geoeditor-modal-focus', saved);
         }
       });
+      await test('Map fullscreen preserves the view and restores the editor on desktop and phones', () => withEditor(async (host, doc) => {
+        await host.__geoEditor.handleFiles([jsonFile(collection([point({ name: 'Fullscreen motion' })]), 'fullscreen-motion.geojson')]);
+        const map = host.__geoEditor.map;
+        const container = map.getContainer();
+        const button = doc.querySelector('.map-fullscreen-toggle');
+        const basemap = doc.querySelector('.leaflet-control-layers-toggle');
+        const anchor = doc.createElement('span');
+        anchor.style.cssText = 'position:absolute;left:200px;top:200px;width:1px;height:1px;pointer-events:none';
+        map.getPane('mapPane').appendChild(anchor);
+        const originalSetView = map.setView;
+        let viewResets = 0;
+        map.setView = function(...args) { viewResets++; return originalSetView.apply(this, args); };
+        let nativeElement = null;
+        Object.defineProperty(doc, 'fullscreenEnabled', { configurable: true, value: true });
+        Object.defineProperty(doc, 'fullscreenElement', { configurable: true, get: () => nativeElement });
+        container.requestFullscreen = async () => {
+          nativeElement = container;
+          doc.dispatchEvent(new host.Event('fullscreenchange'));
+        };
+        doc.exitFullscreen = async () => {
+          nativeElement = null;
+          doc.dispatchEvent(new host.Event('fullscreenchange'));
+        };
+        const settle = async () => {
+          while (button.disabled) await new Promise(resolve => host.setTimeout(resolve, 20));
+          await Promise.all(doc.getAnimations().filter(animation => animation.effect.getComputedTiming().iterations !== Infinity).map(animation => animation.finished.catch(() => {})));
+          await new Promise(resolve => host.requestAnimationFrame(() => host.requestAnimationFrame(resolve)));
+        };
+        const controlBounds = () => [...container.querySelectorAll('.leaflet-top, .leaflet-bottom')].map(element => ({ element, bounds: element.getBoundingClientRect() }));
+        const assertFullscreenControlMotion = (before, anchorBefore) => {
+          if (host.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+          const panelMotion = doc.getElementById('topbar').getAnimations().find(animation => animation.effect.getKeyframes().some(frame => 'transform' in frame));
+          const motions = before.map(({ element }) => element.getAnimations().find(animation => animation.effect.getKeyframes().some(frame => 'transform' in frame)));
+          assert(panelMotion && motions.every(animation => animation && animation.startTime === panelMotion.startTime && animation.effect.getTiming().duration === panelMotion.effect.getTiming().duration && animation.effect.getTiming().easing === panelMotion.effect.getTiming().easing), 'Fullscreen map controls do not share the editor panel clock and pacing');
+          const viewportMotion = container.getAnimations().find(animation => animation.effect.getKeyframes().some(frame => 'top' in frame));
+          const imageryMotion = map.getPane('mapPane').getAnimations().find(animation => animation.effect.getKeyframes().some(frame => 'translate' in frame));
+          assert([viewportMotion, imageryMotion].every(animation => animation && animation.startTime === panelMotion.startTime && animation.effect.getTiming().duration === panelMotion.effect.getTiming().duration && animation.effect.getTiming().easing === panelMotion.effect.getTiming().easing), 'Map background and imagery lag behind the header');
+          for (const id of ['sidebar', 'sidebarSplitter', 'tablePanel', 'splitter']) {
+            const element = doc.getElementById(id);
+            if (!element.getClientRects().length || host.getComputedStyle(element).visibility === 'hidden') continue;
+            const animation = element.getAnimations().find(animation => animation.effect.getKeyframes().some(frame => 'transform' in frame));
+            assert(animation && animation.startTime === panelMotion.startTime && animation.effect.getTiming().duration === panelMotion.effect.getTiming().duration && animation.effect.getTiming().easing === panelMotion.effect.getTiming().easing, `${id} lags behind the fullscreen group`);
+          }
+          const synchronized = doc.getAnimations().filter(animation => animation.effect.getComputedTiming().iterations !== Infinity);
+          synchronized.forEach(animation => { animation.pause(); animation.currentTime = 0; });
+          before.forEach(({ element, bounds }) => {
+            const current = element.getBoundingClientRect();
+            assert(Math.abs(current.left - bounds.left) < 1 && Math.abs(current.top - bounds.top) < 1, 'Fullscreen map controls jump before starting their transition');
+          });
+          const anchorStart = anchor.getBoundingClientRect();
+          assert(Math.abs(anchorStart.left - anchorBefore.left) < 1 && Math.abs(anchorStart.top - anchorBefore.top) < 1, 'Map imagery jumps at the start of fullscreen motion');
+          for (const progress of [.25, .5, .75]) {
+            synchronized.forEach(animation => { animation.currentTime = animation.effect.getTiming().duration * progress; });
+            assert(Math.abs(container.getBoundingClientRect().top - doc.getElementById('topbar').getBoundingClientRect().bottom) < 1, 'Header background leaves a stationary strip above the map');
+            for (const id of ['sidebar', 'tablePanel']) {
+              const panel = doc.getElementById(id);
+              const bounds = panel.getBoundingClientRect();
+              assert(Number(host.getComputedStyle(map.getPane('mapPane')).zIndex) < Number(host.getComputedStyle(panel).zIndex), `${id} is painted beneath the animated map`);
+              const left = Math.max(0, bounds.left);
+              const right = Math.min(host.innerWidth, bounds.right);
+              const top = Math.max(0, bounds.top);
+              const bottom = Math.min(host.innerHeight, bounds.bottom);
+              if (right - left > 4 && bottom - top > 4) {
+                const hit = doc.elementFromPoint((left + right) / 2, (top + bottom) / 2);
+                assert(hit && panel.contains(hit), `${id} is obscured while the fullscreen panels animate together`);
+              }
+            }
+          }
+          synchronized.forEach(animation => { animation.currentTime = animation.effect.getTiming().duration * .5; });
+          assert(before.some(({ element, bounds }) => Math.abs(element.getBoundingClientRect().top - bounds.top) > 1 || Math.abs(element.getBoundingClientRect().left - bounds.left) > 1), 'Fullscreen map controls wait until the panels finish before moving');
+          const toggle = button.getBoundingClientRect();
+          const hit = doc.elementFromPoint(toggle.left + toggle.width / 2, toggle.top + toggle.height / 2);
+          assert(hit && button.closest('.leaflet-top').contains(hit), 'Fullscreen map controls are clipped or covered during the transition');
+          const sidebarHandle = doc.getElementById('sidebarSplitter');
+          if (sidebarHandle.getClientRects().length) {
+            for (const progress of [.25, .5, .75]) {
+              synchronized.forEach(animation => { animation.currentTime = animation.effect.getTiming().duration * progress; });
+              const handleBounds = sidebarHandle.getBoundingClientRect();
+              assert(Math.abs(handleBounds.left + handleBounds.width / 2 - doc.getElementById('sidebar').getBoundingClientRect().right) < 1, 'Layers resize handle separates from its panel during fullscreen');
+            }
+          }
+          synchronized.forEach(animation => { animation.currentTime = animation.effect.getTiming().duration * .999; });
+          const handoff = anchor.getBoundingClientRect();
+          synchronized.forEach(animation => animation.play());
+          return handoff;
+        };
+        const assertMapHandoff = before => {
+          if (!before) return;
+          const after = anchor.getBoundingClientRect();
+          assert(Math.abs(after.left - before.left) < 1 && Math.abs(after.top - before.top) < 1, 'Map imagery snaps when fullscreen resizing completes');
+        };
+        for (const width of [1440, 390]) {
+          host.frameElement.style.width = `${width}px`;
+          await settle();
+          const center = map.getCenter();
+          const zoom = map.getZoom();
+          const resetsBefore = viewResets;
+          const toggleBounds = button.getBoundingClientRect();
+          const basemapBounds = basemap.getBoundingClientRect();
+          const icon = button.querySelector('svg');
+          const basemapIcon = basemap.querySelector('svg');
+          assert(icon.innerHTML === host.lucide.createElement(host.lucide.icons.Maximize2).innerHTML, 'Fullscreen button is missing its diagonal expand arrows');
+          assert(icon.getBoundingClientRect().width === basemapIcon.getBoundingClientRect().width && icon.getBoundingClientRect().height === basemapIcon.getBoundingClientRect().height, 'Fullscreen glyph size differs from the adjacent basemap glyph');
+          assert(Math.abs(toggleBounds.top + toggleBounds.height / 2 - basemapBounds.top - basemapBounds.height / 2) < 2 && toggleBounds.left >= basemapBounds.right, 'Fullscreen button is not beside the basemap button');
+          const entering = controlBounds();
+          const enteringAnchor = anchor.getBoundingClientRect();
+          button.click();
+          const entered = assertFullscreenControlMotion(entering, enteringAnchor);
+          await settle();
+          assertMapHandoff(entered);
+          assert(nativeElement === container && button.getAttribute('aria-pressed') === 'true', 'Native map fullscreen did not activate');
+          assert(button.querySelector('svg').innerHTML === host.lucide.createElement(host.lucide.icons.Minimize2).innerHTML, 'Fullscreen exit button is missing its diagonal collapse arrows');
+          assert(host.getComputedStyle(doc.getElementById('topbar')).visibility === 'hidden', 'Editor header remains visible in fullscreen');
+          const bounds = container.getBoundingClientRect();
+          assert(bounds.left === 0 && bounds.top === 0 && Math.abs(bounds.width - host.innerWidth) < 1 && Math.abs(bounds.height - host.innerHeight) < 1, 'Fullscreen map does not fill the viewport');
+          assert(host.getComputedStyle(container.querySelector('.leaflet-top.leaflet-left')).left === '0px', 'Fullscreen map controls retain the sidebar offset');
+          const exiting = controlBounds();
+          const exitingAnchor = anchor.getBoundingClientRect();
+          button.click();
+          const exited = assertFullscreenControlMotion(exiting, exitingAnchor);
+          await settle();
+          assertMapHandoff(exited);
+          assert(viewResets === resetsBefore, 'Fullscreen resets the map view after resizing');
+          assert(!nativeElement && !container.classList.contains('map-fullscreen') && doc.activeElement === button, 'Fullscreen exit did not restore the editor and focus');
+          assert([...container.querySelectorAll('.leaflet-top, .leaflet-bottom')].every(element => host.getComputedStyle(element).position === 'absolute') && !doc.querySelector('.fullscreen-controls-animating'), 'Fullscreen controls retained temporary viewport positioning');
+          assert(host.getComputedStyle(doc.getElementById('topbar')).visibility === 'visible', 'Header was not restored');
+          assert(map.getCenter().equals(center) && map.getZoom() === zoom, 'Fullscreen changed the map view');
+        }
+        container.requestFullscreen = async () => { throw new Error('Fullscreen unavailable'); };
+        button.click();
+        await settle();
+        assert(container.classList.contains('map-fullscreen') && !nativeElement, 'Rejected fullscreen did not use the map-only fallback');
+        button.click();
+        await settle();
+        assert(!container.classList.contains('map-fullscreen'), 'Fallback button did not exit fullscreen');
+        Object.defineProperty(doc, 'fullscreenEnabled', { configurable: true, value: false });
+        button.click();
+        await settle();
+        button.dispatchEvent(new host.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        await settle();
+        assert(!container.classList.contains('map-fullscreen') && button.getAttribute('aria-pressed') === 'false', 'Escape did not exit the unsupported-browser fallback');
+      }));
       await test('Basemap button toggles its pop-up on desktop and phones with keyboard dismissal', () => withEditor(async (host, doc) => {
         const errors = [];
         const captureError = event => errors.push(event.message);

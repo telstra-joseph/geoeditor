@@ -103,6 +103,7 @@ button:disabled { opacity: .48; cursor: not-allowed; box-shadow: none; transform
 
 #topbar {
   display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  position: relative; z-index: 6;
   background: var(--surface); color: var(--navy); flex: 0 0 auto;
   border-bottom: 1px solid var(--line);
 }
@@ -122,12 +123,18 @@ button:disabled { opacity: .48; cursor: not-allowed; box-shadow: none; transform
 #sidebar {
   flex: 0 0 330px; background: var(--panel-glass); border-right: 1px solid rgba(17, 26, 52, .12);
   padding: 10px; overflow: auto; position: relative; z-index: 2;
-  transition: flex-basis 320ms cubic-bezier(.22, 1, .36, 1);
   -webkit-backdrop-filter: blur(20px) saturate(180%); backdrop-filter: blur(20px) saturate(180%);
+}
+#topbar.panel-animating, #sidebar.panel-animating, #tablePanel.panel-animating {
+  will-change: transform; backface-visibility: hidden;
 }
 #sidebarHeader { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
 #sidebar h2 { margin: 0; font-size: 12px; text-transform: uppercase; color: var(--muted); }
 #btnToggleLayers { width: 28px; height: 28px; flex: 0 0 28px; padding: 0; }
+#btnToggleLayers svg { rotate: 0deg; transition: rotate 360ms cubic-bezier(.22, 0, .18, 1); }
+#btnToggleLayers[aria-expanded="false"] svg { rotate: 180deg; }
+#sidebarContent.panel-animating { will-change: transform; backface-visibility: hidden; }
+#sidebar.panel-animating:has(#sidebarContent.panel-animating) { will-change: clip-path; }
 #btnEditHelp { width: 28px; height: 28px; flex: 0 0 28px; padding: 0; margin-left: auto; }
 #btnEditHelp:hover:not(:disabled) { background: #fde68a; border-color: #fde68a; color: #713f12; }
 #sidebar details.help { display: none; }
@@ -224,10 +231,24 @@ button:disabled { opacity: .48; cursor: not-allowed; box-shadow: none; transform
 
 #workspace { flex: 1 1 auto; display: flex; flex-direction: column; justify-content: flex-end; min-width: 0; pointer-events: none; }
 #mapWrap { position: absolute; inset: 0; z-index: 0; pointer-events: auto; }
+#mapWrap:has(.fullscreen-controls-animating) { z-index: auto; }
+#map:has(.fullscreen-controls-animating) > .leaflet-map-pane { z-index: 0; }
+body:has(#map .fullscreen-controls-animating) { overflow: hidden; }
+#main:has(#map .fullscreen-controls-animating) { overflow: visible; }
 #map { position: absolute; inset: 0; }
+#map.map-fullscreen {
+  position: fixed; inset: 0; width: 100%; height: 100%; z-index: 10000;
+  --panel-left: 0px; --panel-top: 0px; --panel-bottom: 0px;
+  --map-controls-height: calc(100dvh - 20px) !important;
+}
+body:has(#map.map-fullscreen) #topbar,
+body:has(#map.map-fullscreen) #main > :not(#workspace),
+body:has(#map.map-fullscreen) #workspace > :not(#mapWrap),
+body:has(#map.map-fullscreen) #mapWrap > :not(#map) { visibility: hidden; }
 #map .leaflet-left { left: var(--panel-left); }
 #map .leaflet-top { top: var(--panel-top); }
 #map .leaflet-bottom { bottom: var(--panel-bottom); }
+#map :is(.leaflet-top, .leaflet-bottom).panel-animating { will-change: transform; }
 #map .leaflet-control-scale {
   margin-left: 10px; margin-bottom: 10px; padding: 6px 8px;
   border: 1px solid var(--line); border-radius: 6px; background: rgba(255, 255, 255, .45);
@@ -293,6 +314,7 @@ button[value="cancel"]:hover:not(:disabled),
   outline: 3px solid var(--focus-ring); outline-offset: 2px;
 }
 #map .leaflet-control-layers {
+  display: flex; align-items: center; gap: 4px;
   padding: 0; border: 1px solid var(--line); border-radius: 6px;
   background: var(--surface); color: var(--ink); font: inherit;
   box-shadow: 0 1px 3px rgba(16, 26, 58, .16);
@@ -302,6 +324,15 @@ button[value="cancel"]:hover:not(:disabled),
   border-radius: 5px; background-image: none; color: var(--navy);
 }
 #map .leaflet-control-layers-toggle svg { width: 16px; height: 16px; flex: 0 0 16px; }
+#map .map-fullscreen-toggle {
+  display: flex; align-items: center; justify-content: center; flex: 0 0 32px;
+  width: 32px; height: 32px; padding: 0; border: 0; border-radius: 5px;
+  background: transparent; color: var(--navy);
+}
+#map .map-fullscreen-toggle svg { width: 16px; height: 16px; flex: 0 0 16px; }
+#map .map-fullscreen-toggle:hover { background: var(--hover-fill); }
+#map .map-fullscreen-toggle:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 2px; }
+#map.compact-controls .map-fullscreen-toggle { width: 44px; height: 44px; flex-basis: 44px; }
 #map .leaflet-control-layers .leaflet-control-layers-list {
   display: block; position: absolute; top: calc(100% + 4px); right: 0;
   width: max-content; max-width: calc(100vw - 24px); padding: 6px; margin: 0;
@@ -407,9 +438,12 @@ dialog.analysis-complete h3 { overflow-wrap: anywhere; }
 .analysis-fields th:first-child, .analysis-fields td:first-child { text-align: left; }
 .analysis-issues { max-height: 160px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
 
-#splitter { flex: 0 0 6px; background: rgba(203, 213, 225, .75); cursor: row-resize; transition: background-color var(--ease-ui); position: relative; z-index: 3; pointer-events: auto; }
+#splitter { flex: 0 0 6px; width: 100%; height: 6px; min-height: 0; margin: 0; padding: 0; border: 0; border-radius: 0; background: rgba(203, 213, 225, .75); cursor: row-resize; transition: background-color var(--ease-ui); position: relative; z-index: 3; pointer-events: auto; touch-action: none; }
 #splitter:hover { background: #94a3b8; }
+#splitter.panel-animating { will-change: transform; backface-visibility: hidden; }
+#splitter:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 #tablePanel { flex: 0 0 38%; min-height: 80px; display: flex; flex-direction: column; background: var(--panel-glass); position: relative; z-index: 2; pointer-events: auto; -webkit-backdrop-filter: blur(20px) saturate(180%); backdrop-filter: blur(20px) saturate(180%); container-type: inline-size; }
+#tablePanel.table-collapsed { flex: 0 0 0 !important; min-height: 0; overflow: hidden; visibility: hidden; }
 #tableBar {
   display: flex; align-items: center; gap: 8px; padding: 6px 10px;
   border-bottom: 1px solid var(--line); background: rgba(245, 247, 250, .5); flex: 0 0 auto;
@@ -626,7 +660,7 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
   button .action-icon,
   #layerList .layer-reorder svg, #layerList .layer-rename svg, #layerList .lmeta button svg, #layerList .kml-folder-row button svg,
   #tableBar button svg, table.attrs button svg, #aboutDlg .action-icon,
-  #map .leaflet-control-zoom svg, #map .leaflet-pm-toolbar svg, #map .leaflet-control-layers-toggle svg {
+  #map .leaflet-control-zoom svg, #map .leaflet-pm-toolbar svg, #map .leaflet-control-layers-toggle svg, #map .map-fullscreen-toggle svg {
     width: 24px; height: 24px; flex: 0 0 24px;
   }
   #map .leaflet-pm-toolbar .control-icon { width: 24px; height: 24px; }
@@ -692,7 +726,7 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
   #tableTitle, dialog p, dialog output, #aboutDlg p { font-size: 14px; }
   button .action-icon,
   #tableBar button svg, table.attrs button svg, #aboutDlg .action-icon,
-  #map .leaflet-control-zoom svg, #map .leaflet-pm-toolbar svg, #map .leaflet-control-layers-toggle svg {
+  #map .leaflet-control-zoom svg, #map .leaflet-pm-toolbar svg, #map .leaflet-control-layers-toggle svg, #map .map-fullscreen-toggle svg {
     width: 18px; height: 18px; flex-basis: 18px;
   }
   #map .leaflet-pm-toolbar .control-icon { width: 18px; height: 18px; }
@@ -747,7 +781,9 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
   #sidebar.collapsed #sidebarHeader { flex-direction: row; }
   #sidebar.collapsed #btnToggleLayers { order: 0; }
   #sidebar.collapsed #btnEditHelp { margin-left: auto; }
+  #sidebarBody { overflow: clip; }
   #btnToggleLayers svg { rotate: 90deg; }
+  #btnToggleLayers[aria-expanded="false"] svg { rotate: 270deg; }
   #workspace { flex: 1 1 auto; min-height: 0; }
   #map .leaflet-control-zoom { display: none; }
   #tablePanel { flex-basis: 42%; }
@@ -804,7 +840,7 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
 @media (prefers-reduced-motion: reduce) {
   .progress-track.indeterminate::before { animation: none; }
   #layerList li.layer-dragging { scale: 1; }
-  button, select, #sidebar, #layerList li, #splitter, table.attrs tbody tr, .toast, dialog[open],
+  button, select, #sidebar, #btnToggleLayers svg, #layerList li, #splitter, table.attrs tbody tr, .toast, dialog[open],
   #map .leaflet-bar a, #map .leaflet-control-layers-toggle,
   #map .leaflet-control-layers-list, #map .leaflet-control-layers label,
   #map .leaflet-pm-actions-container, #layerList input[type=checkbox], #layerList input[type=checkbox]::after,

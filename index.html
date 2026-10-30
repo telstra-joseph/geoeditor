@@ -55,6 +55,7 @@
         <button id="btnEditHelp" type="button" title="How to edit" aria-label="How to edit" aria-haspopup="dialog" aria-controls="editHelpDlg"><i data-lucide="circle-help" class="action-icon" aria-hidden="true"></i></button>
         <button id="btnToggleLayers" type="button" title="Collapse Layers panel" aria-label="Collapse Layers panel" aria-expanded="true" aria-controls="sidebarContent"><i data-lucide="panel-left-close" class="action-icon" aria-hidden="true"></i></button>
       </div>
+      <div id="sidebarBody">
       <div id="sidebarContent">
       <ul id="layerList"></ul>
       <p class="hint" id="layerHint">No layers yet. Upload a file or create a new layer.</p>
@@ -72,6 +73,7 @@
           <li><b>Save your work:</b> choose Session to save locally before refreshing or closing the tab. Only one session is stored; saving replaces it. The saved session restores automatically. Download files for a portable backup.</li>
         </ul>
       </details>
+      </div>
       </div>
     </aside>
 
@@ -99,7 +101,7 @@
           </div>
         </div>
       </div>
-      <div id="splitter" title="Drag to resize"></div>
+      <button id="splitter" type="button" aria-label="Resize or collapse attribute table" aria-controls="tablePanel" aria-expanded="true" title="Drag to resize; double-press to collapse table"></button>
       <div id="tablePanel">
         <div id="tableBar">
           <div id="tableHeading">
