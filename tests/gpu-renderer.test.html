@@ -117,6 +117,71 @@
           await paint();
         }
       });
+      await test('Culled polygons reuse detached geometry and invalidate hidden styles and coordinates', async () => {
+        if (!renderer._gpu) return 'skip';
+        const saved = renderer._graphic;
+        const coordinates = polygon.getLatLngs();
+        let builds = 0;
+        renderer._graphic = function(layer) {
+          if (layer === polygon) builds++;
+          return saved.call(this, layer);
+        };
+        try {
+          const graphic = renderer._graphics.get(L.stamp(polygon));
+          map.removeLayer(polygon);
+          await paint();
+          assert(renderer._retained.has(L.stamp(polygon)) && !renderer._stage.children.includes(graphic), 'Culled graphic was not detached and retained');
+          assert(pixel([4, 4])[3] === 0, 'Retained hidden polygon remained visible');
+          map.panBy([24, 0], { animate: false });
+          polygon.addTo(map);
+          await paint();
+          assert(builds === 0 && renderer._graphics.get(L.stamp(polygon)) === graphic, 'Returning polygon rebuilt cached geometry');
+          assert(pixel([4, 4])[3] > 0 && pixel([0, 0])[3] === 0, 'Reused polygon or hole shifted');
+          map.removeLayer(polygon);
+          polygon.setStyle({ fillColor: '#0000ff' });
+          assert(!renderer._retained.has(L.stamp(polygon)), 'Hidden style change retained stale geometry');
+          polygon.addTo(map);
+          await paint();
+          assert(builds === 1 && pixel([4, 4])[2] > 200, 'Hidden style change was not rebuilt');
+          map.removeLayer(polygon);
+          polygon.setLatLngs(coordinates.map(ring => ring.map(point => [point.lat + 1, point.lng])));
+          polygon.addTo(map);
+          await paint();
+          assert(builds === 2 && pixel([-5.5, 4])[3] === 0 && pixel([6.5, 4])[3] > 0, 'Hidden coordinate change reused stale geometry');
+        } finally {
+          renderer._graphic = saved;
+          polygon.setLatLngs(coordinates);
+          polygon.setStyle({ fillColor: '#ff0000' });
+          if (!map.hasLayer(polygon)) polygon.addTo(map);
+          await paint();
+        }
+      });
+      await test('Retained geometry is bounded and evicted GPU resources are destroyed', async () => {
+        if (!renderer._gpu) return 'skip';
+        const limit = renderer.options.geometryCacheSize;
+        renderer._clearRetained();
+        renderer.options.geometryCacheSize = 2;
+        const additions = Array.from({ length: 3 }, (_, index) => L.polygon([[12, index], [13, index], [12, index + .5]], { renderer }).addTo(map));
+        try {
+          await paint();
+          const first = renderer._graphics.get(L.stamp(additions[0]));
+          additions[1]._glayer = { order: 1 };
+          additions[2]._glayer = { order: 2 };
+          additions.forEach(layer => map.removeLayer(layer));
+          await paint();
+          assert(renderer._retained.size === 2 && first.destroyed, 'Retained cache did not evict its oldest graphic');
+          assert(renderer._retainedVertices <= renderer.options.geometryCacheVertices, 'Retained vertex limit exceeded');
+          renderer._clearRetained(additions[1]._glayer);
+          assert(renderer._retained.size === 1 && renderer._retained.has(L.stamp(additions[2])), 'Releasing one layer discarded another layer cache');
+          renderer._clearRetained();
+          assert(renderer._retained.size === 0 && renderer._retainedVertices === 0, 'Retained resources were not released');
+        } finally {
+          renderer.options.geometryCacheSize = limit;
+          additions.forEach(layer => { if (map.hasLayer(layer)) map.removeLayer(layer); });
+          renderer._clearRetained();
+          await paint();
+        }
+      });
       await test('Styling an undisplayed feature does not recreate its graphic', async () => {
         const hidden = L.circleMarker([-12, 12], { renderer, radius: 8, fillOpacity: 1 }).addTo(map);
         await paint();
@@ -135,6 +200,11 @@
         point.setLatLng([8, 12]);
         await paint();
         assert(pixel([8, 12])[3] > 0 && pixel([8, 8])[3] === 0, 'Point did not move');
+        point.setLatLng([80, 170]);
+        await paint();
+        point.setLatLng([8, 12]);
+        await paint();
+        assert(pixel([8, 12])[3] > 0, 'Point returned to a stale empty cached graphic');
       });
       await test('Bring to front and back preserve rendering order', async () => {
         const red = L.circleMarker([10, 0], { renderer, radius: 12, stroke: false, fillColor: '#ff0000', fillOpacity: 1 }).addTo(map);
@@ -180,6 +250,66 @@
           await paint();
         }
       });
+      await test('Compatible detailed polygons share draw calls without merging editable features', async () => {
+        if (!renderer._gpu) return 'skip';
+        const additions = [];
+        const threshold = PIXI.GraphicsGeometry.BATCHABLE_SIZE;
+        const batchThreshold = renderer.options.geometryBatchThreshold;
+        renderer.options.geometryBatchThreshold = 64;
+        const context = renderer._gpu.gl;
+        const drawElements = context.drawElements;
+        const drawArrays = context.drawArrays;
+        try {
+          for (let index = 0; index < 120; index++) {
+            const latitude = 10 + Math.floor(index / 12) * .4;
+            const longitude = -14 + index % 12 * .4;
+            const coordinates = Array.from({ length: 160 }, (_, vertex) => {
+              const angle = vertex / 160 * Math.PI * 2;
+              return [latitude + Math.sin(angle) * .15, longitude + Math.cos(angle) * .15];
+            });
+            additions.push(L.polygon(coordinates, { renderer, stroke: false, fillColor: '#00ff00', fillOpacity: 1 }).addTo(map));
+          }
+          await paint();
+          assert(renderer._geometryBatches.size > 0 && [...renderer._geometryBatches.values()].every(batch => !batch.graphic.geometry.batchable), 'Detailed polygons did not use retained native geometry groups');
+          let calls = 0;
+          context.drawElements = function(...args) { calls++; return drawElements.apply(this, args); };
+          context.drawArrays = function(...args) { calls++; return drawArrays.apply(this, args); };
+          renderer._gpu.render(renderer._stage);
+          assert(calls > 0 && calls < 20, `Expected shared draw calls, got ${calls}`);
+          assert(pixel([10, -14])[1] > 200, 'Batched polygon did not render');
+          additions[0].setStyle({ fillColor: '#0000ff' });
+          await paint();
+          assert(pixel([10, -14])[2] > 200 && pixel([10, -13.6])[1] > 200, 'Editing one batched style changed its neighbours');
+          assert(pixel([4, 4])[3] > 0 && pixel([0, 0])[3] === 0, 'Retained batch filled a polygon hole');
+          const retained = [...renderer._geometryBatches.values()].map(batch => [batch, batch.signature, batch.graphic.geometry.dirty]);
+          point.redraw();
+          await paint();
+          assert(retained.every(([batch, signature, dirty]) => batch.signature === signature && batch.graphic.geometry.dirty === dirty), 'Unchanged retained groups rebuilt their geometry');
+          additions[1].setLatLngs(additions[0].getLatLngs());
+          await paint();
+          assert(pixel([10, -14])[1] > 200, 'Batched coordinate edit or stacking was lost');
+          additions[0]._displaySelected = true;
+          additions[0].bringToFront();
+          additions[0].redraw();
+          await paint();
+          assert(renderer._graphics.get(L.stamp(additions[0])).renderable && pixel([10, -14])[2] > 200, 'Selected feature did not leave its batch with correct stacking');
+          map.setView([1, 1], map.getZoom(), { animate: false });
+          await paint();
+          assert(pixel([10, -14])[2] > 200 && pixel([0, 0])[3] === 0, 'Retained groups lost alignment after the pixel origin changed');
+          map.setZoom(map.getZoom() + 1, { animate: false });
+          await paint();
+          assert(pixel([4, 4])[3] > 0 && pixel([0, 0])[3] === 0, 'Batched polygon holes were lost after zooming');
+          assert(PIXI.GraphicsGeometry.BATCHABLE_SIZE === threshold, 'Renderer changed global Pixi batching policy');
+          assert(additions.every(layer => map.hasLayer(layer) && layer.toGeoJSON(false).geometry.coordinates[0].length === 161), 'Batching merged or changed editable geometry');
+        } finally {
+          renderer.options.geometryBatchThreshold = batchThreshold;
+          context.drawElements = drawElements;
+          context.drawArrays = drawArrays;
+          additions.forEach(layer => map.removeLayer(layer));
+          map.setView([0, 0], 4, { animate: false });
+          await paint();
+        }
+      });
       await test('Batched additions build each new geometry only once', async () => {
         if (!renderer._gpu) return 'skip';
         const saved = renderer._graphic;
@@ -205,6 +335,40 @@
         map.setView([2, 3], 5, { animate: false });
         await paint();
         assert(pixel([4, 4])[3] > 0 && pixel([0, 0])[3] === 0, 'View transform misaligned');
+      });
+      await test('Dense interactions lower only canvas resolution and restore sharp aligned geometry', async () => {
+        if (!renderer._gpu) return 'skip';
+        const threshold = renderer.options.adaptiveResolutionThreshold;
+        const full = renderer._fullResolution;
+        const width = renderer._container.style.width;
+        try {
+          renderer.options.adaptiveResolutionThreshold = Infinity;
+          map.fire('movestart');
+          assert(renderer._gpu.resolution === full, 'Sparse map unnecessarily lowered resolution');
+          renderer.options.adaptiveResolutionThreshold = 1;
+          map.fire('movestart');
+          await paint();
+          assert(renderer._gpu.resolution < full && renderer._container.style.width === width, 'Interaction resolution changed logical map dimensions');
+          assert(pixel([4, 4])[3] > 0 && pixel([0, 0])[3] === 0, 'Low-resolution polygon or hole is misaligned');
+          point.setStyle({ fillColor: '#00ff00' });
+          await paint();
+          assert(pixel(point.getLatLng())[1] > 200, 'Style edit was lost at interaction resolution');
+          map.fire('moveend');
+          map.fire('movestart');
+          await new Promise(resolve => setTimeout(resolve, renderer.options.resolutionRestoreDelay + 30));
+          assert(renderer._gpu.resolution < full, 'New interaction failed to cancel pending sharpness restoration');
+          map.fire('moveend');
+          await new Promise(resolve => setTimeout(resolve, renderer.options.resolutionRestoreDelay + 30));
+          await paint();
+          assert(renderer._gpu.resolution === full, 'Full resolution was not restored after interaction');
+          assert(pixel([4, 4])[3] > 0 && pixel([0, 0])[3] === 0, 'Restored polygon or hole is misaligned');
+        } finally {
+          renderer.options.adaptiveResolutionThreshold = threshold;
+          clearTimeout(renderer._resolutionTimer);
+          renderer._setResolution(full);
+          point.setStyle({ fillColor: '#0000ff' });
+          await paint();
+        }
       });
       await test('Missing WebGL library falls back to native Canvas', async () => {
         const library = window.PIXI;

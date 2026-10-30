@@ -1985,6 +1985,7 @@
       });
       await test('Uncovered-area culling follows phone, tablet and desktop layouts', () => withEditor(async (host, doc) => {
         const app = host.__geoEditor;
+        await app.handleFiles([jsonFile(collection([point()]), 'responsive-culling-anchor.geojson')]);
         host.frameElement.style.width = '390px';
         host.frameElement.style.height = '800px';
         const settle = () => new Promise(resolve => host.setTimeout(resolve, 150));
@@ -2141,6 +2142,15 @@
         await settle();
         const stable = [...layer.displayed];
         const query = host.SpatialQueries.query;
+        let bufferedCalls = 0;
+        host.SpatialQueries.query = (...args) => { bufferedCalls++; return query(...args); };
+        try {
+          app.map.panBy([8, 0], { animate: false });
+          await settle();
+          assert(bufferedCalls === 0, 'Small pan repeated a buffered spatial search');
+          assert(stable.every(leaf => layer.displayed.has(leaf)), 'Buffered pan changed eligible sampled folders');
+        } finally { host.SpatialQueries.query = query; }
+        layer.spatialCache.queryBounds = null;
         let reordered = false;
         host.SpatialQueries.query = async (...args) => {
           const indices = await query(...args);

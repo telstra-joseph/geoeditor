@@ -939,10 +939,16 @@
         lyr.spatialCache = cache;
       }
       const bounds = uncoveredMapBounds();
-      const indices = await SpatialQueries.query(lyr.id, cache.records, bounds && {
-        minX: bounds.getWest(), minY: bounds.getSouth(), maxX: bounds.getEast(), maxY: bounds.getNorth(),
+      const reusable = bounds && cache.queryBounds?.contains(bounds);
+      const queryBounds = bounds?.pad(.15);
+      const indices = !bounds ? [] : reusable ? cache.queryIndices : await SpatialQueries.query(lyr.id, cache.records, {
+        minX: queryBounds.getWest(), minY: queryBounds.getSouth(), maxX: queryBounds.getEast(), maxY: queryBounds.getNorth(),
       });
       if (request !== lyr.spatialRequest || version !== lyr.spatialVersion || panelResizeActive || !map.hasLayer(lyr.group) || !state.layers.includes(lyr)) return;
+      if (bounds && !reusable) {
+        cache.queryBounds = queryBounds;
+        cache.queryIndices = indices;
+      }
       syncLayerDisplay(lyr, indices.map(index => cache.leaves[index]));
     } catch (error) {
       if (request === lyr.spatialRequest && map.hasLayer(lyr.group)) syncLayerDisplay(lyr, leavesOf(lyr));
@@ -1147,6 +1153,7 @@
       SpatialQueries.release(lyr.id);
       lyr.displayed.forEach(leaf => map.removeLayer(leaf));
       lyr.displayed.clear();
+      vectorRenderer._clearRetained(lyr);
     };
     group.addLayer = function(leaf) {
       if (this.hasLayer(leaf)) return this;
@@ -1189,6 +1196,7 @@
     if (!lyr || !leaf.setStyle) return;
     const st = (leaf.feature && leaf.feature.style) || {};
     const selected = state.selected === leaf;
+    leaf._displaySelected = selected;
     const point = isPointLeaf(leaf);
     const num = (v, d) => (v === undefined || v === null || v === '' || isNaN(Number(v)) ? d : Number(v));
     let style;
