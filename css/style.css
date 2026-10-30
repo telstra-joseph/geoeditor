@@ -304,7 +304,7 @@ button[value="cancel"]:hover:not(:disabled),
 #map .leaflet-control-layers-toggle svg { width: 16px; height: 16px; flex: 0 0 16px; }
 #map .leaflet-control-layers .leaflet-control-layers-list {
   display: block; position: absolute; top: calc(100% + 4px); right: 0;
-  width: 184px; max-width: calc(100vw - 24px); padding: 6px; margin: 0;
+  width: max-content; max-width: calc(100vw - 24px); padding: 6px; margin: 0;
   max-height: max(32px, calc(var(--map-controls-height, 400px) - 44px)); overflow: auto;
   border: 1px solid var(--line); border-radius: 8px; background: var(--surface);
   box-shadow: 0 12px 28px rgba(16, 26, 58, .16);
@@ -316,18 +316,22 @@ button[value="cancel"]:hover:not(:disabled),
   opacity: 1; visibility: visible; pointer-events: auto; transform: translateY(0) scale(1);
 }
 #map .leaflet-control-layers-expanded::after {
-  content: ''; position: absolute; top: 100%; right: 0; width: 184px; height: 4px;
+  content: ''; position: absolute; top: 100%; right: 0; width: 100%; height: 4px;
 }
 #map .leaflet-control-layers label {
   padding: 6px 8px; min-height: 32px; border-radius: 4px; font-size: 13px;
   cursor: pointer; transition: background-color var(--ease-ui), color var(--ease-ui);
 }
 #map .leaflet-control-layers label > span { display: flex; align-items: center; gap: 8px; }
-#map .leaflet-control-layers-selector { margin: 0; top: 0; accent-color: var(--accent); }
+#map .leaflet-control-layers label > span > span { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+#map .leaflet-control-layers-selector { position: absolute; width: 1px; height: 1px; margin: 0; padding: 0; border: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+#map .leaflet-control-layers label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
+#map .basemap-preview { display: block; width: 28px; height: 28px; flex: 0 0 28px; overflow: hidden; border: 1px solid var(--line); border-radius: 4px; background: #ddd; }
+#map .basemap-preview img { display: block; width: 100%; height: 100%; object-fit: cover; }
 #map .leaflet-control-layers label:has(input:checked) { background: #eaf3ff; color: var(--navy); }
 #map .leaflet-control-layers label:hover { background: var(--hover-fill); color: var(--navy); }
 #map.compact-controls .leaflet-top.leaflet-left { display: flex; flex-wrap: wrap; align-items: flex-start; max-width: calc(100% - var(--panel-left) - 60px); max-height: var(--map-controls-height); overflow: visible; pointer-events: auto; padding: 0 4px 4px 0; }
-#map.compact-controls .leaflet-control-layers .leaflet-control-layers-list { top: 0; right: calc(100% + 4px); max-height: max(0px, calc(var(--map-controls-height) - 10px)); max-width: min(184px, calc(100vw - var(--panel-left) - 60px)); }
+#map.compact-controls .leaflet-control-layers .leaflet-control-layers-list { top: 0; right: calc(100% + 4px); max-height: max(0px, calc(var(--map-controls-height) - 10px)); max-width: calc(100vw - var(--panel-left) - 60px); }
 #map.compact-controls .leaflet-control-layers-expanded::after { top: 0; right: 100%; width: 4px; height: 100%; }
 #map.compact-controls .leaflet-pm-toolbar { display: flex; touch-action: none; user-select: none; -webkit-touch-callout: none; }
 #map.compact-controls .leaflet-pm-toolbar > .mobile-tool-current { order: -1; }

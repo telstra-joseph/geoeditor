@@ -29,8 +29,8 @@ See [FLOWCHART.md](./FLOWCHART.md) for diagrams of how the app works.
 
 ### Map and layers
 Drag a layer's grip handle to change its drawing order; the top layer in the list draws on top. Focus the handle and use Arrow Up/Down to reorder with the keyboard. Ordering is retained through selection, visibility changes and map refreshes, without changing feature data. Reordering moves existing sidebar rows without rescanning feature collections or rebuilding folder controls. Drag previews use cached geometry and at most one update per animation frame; hidden-layer moves do not redraw the map unless displayed-layer stacking changes.
-- Leaflet map with OpenStreetMap, satellite and blank basemaps.
-- Press the basemap button to open its options; press it again, press Escape, or click the map to dismiss them. Enter and Space also toggle the options.
+- Leaflet map with Standard (OpenStreetMap), Satellite (Esri imagery), Hybrid (Esri Open Basemap imagery with roads and labels), and Blank basemaps. Hybrid uses the public Open Basemap Hybrid Reference vector style over Esri World Imagery.
+- Press the basemap button to open its options; press it again, press Escape, or click the map to dismiss them. Enter and Space also toggle the options. Small square previews appear to the left of each name, and the active row is highlighted. Radio circles are visually hidden while native exclusive selection and keyboard focus remain. Saved sessions retain Hybrid, and older OpenStreetMap selections restore as Standard.
 - Modal focus indicators are off by default without removing focus or keyboard navigation. Enable **Show modal focus indicators** in About to restore them; the preference is remembered in this browser. Keyboard focus indicators outside dialogs are unchanged.
 - Automatic WebGL rendering through PixiJS for layer points, lines and polygons, with retained geometry between updates. Same-zoom pans reuse unchanged projected polygon geometry; zooms, coordinate edits and style changes rebuild it without changing source coordinates. Canvas is used automatically if WebGL is unavailable; Leaflet's native SVG guides preserve drawing-tool interactions.
 - At 128 displayed graphics or more, consecutive compatible features use retained native geometry groups of up to 32 features. Unchanged groups keep their compiled GPU buffers; membership, order, coordinate and style changes rebuild affected groups. Features remain separate Leaflet objects for hit testing, editing and export. Selected and actively edited features draw independently, with the same layer order and polygon holes.
@@ -167,7 +167,7 @@ Then open <http://localhost:8765/index.html>.
 
 Use the local server or an HTTP/HTTPS deployment to enable background import workers. Opening the HTML directly with `file://`, or a worker startup failure, automatically uses main-thread imports instead.
 
-An internet connection is needed for basemap tiles (OpenStreetMap and Esri imagery) and the Doto heading font from Google Fonts. The app uses a bundled fallback font if Doto is unavailable. The blank basemap does not request map tiles.
+An internet connection is needed for basemap tiles (OpenStreetMap, Esri imagery, and Hybrid vector tiles, glyphs and sprites) and the Doto heading font from Google Fonts. Hybrid's vector overlay requires WebGL. Basemap preview images and the Esri Leaflet adapter are bundled locally. The app uses a bundled fallback font if Doto is unavailable. The blank basemap does not request map tiles.
 
 **Important:** layers exist only in the open browser tab. Refreshing or closing the page loses them, so download your work first. The page warns before you leave while layers are loaded.
 
@@ -229,6 +229,7 @@ Retained native geometry groups were compared with the committed renderer using 
 
 ## Libraries
 - [Leaflet](https://leafletjs.com/) — map display
+- [Esri Leaflet 3.0.15](https://github.com/Esri/esri-leaflet) and [Esri Leaflet Vector 4.2.8](https://github.com/Esri/esri-leaflet-vector) - Hybrid basemap integration; [Esri Leaflet licence](./lib/esri-leaflet.LICENSE), [vector adapter licence](./lib/esri-leaflet-vector.LICENSE). The vector adapter bundles MapLibre GL JS 4.7.1; [renderer licence](./lib/maplibre-gl.LICENSE).
 - [PixiJS 7.4.3](https://pixijs.com/) - bundled WebGL geometry rendering
 - [Leaflet-Geoman](https://geoman.io/leaflet-geoman) — drawing and editing tools
 - [shp.js](https://github.com/calvinmetcalf/shapefile-js) — shapefile reading

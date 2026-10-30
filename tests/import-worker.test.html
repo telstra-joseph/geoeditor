@@ -1419,6 +1419,10 @@
         }
       });
       await test('Basemap button toggles its pop-up on desktop and phones with keyboard dismissal', () => withEditor(async (host, doc) => {
+        const errors = [];
+        const captureError = event => errors.push(event.message);
+        host.addEventListener('error', captureError);
+        let hybridReference;
         const button = doc.querySelector('.leaflet-control-layers-toggle');
         const control = button.parentElement;
         const expanded = () => control.classList.contains('leaflet-control-layers-expanded');
@@ -1430,6 +1434,28 @@
           assert(!expanded(), 'Hover opened the basemap menu before its first press');
           button.click();
           assert(expanded() && button.getAttribute('aria-expanded') === 'true', 'First basemap press did not open its menu');
+          assert([...control.querySelectorAll('label')].some(label => label.textContent.trim() === 'Standard'), 'Street basemap was not renamed Standard');
+          assert(control.querySelectorAll('.basemap-preview').length === control.querySelectorAll('input[type="radio"]').length, 'Basemap choice is missing its square preview');
+          assert([...control.querySelectorAll('label')].map(label => label.textContent.trim()).join() === 'Standard,Satellite,Hybrid,Blank', 'Unexpected basemap choices');
+          control.getAnimations({ subtree: true }).filter(animation => animation.effect.getComputedTiming().iterations !== Infinity).forEach(animation => animation.finish());
+          const menu = control.querySelector('.leaflet-control-layers-list');
+          assert(menu.getBoundingClientRect().width < 184, 'Basemap menu retained its oversized fixed width');
+          for (const label of control.querySelectorAll('label')) {
+            const range = doc.createRange();
+            range.selectNodeContents(label.querySelector('span > span'));
+            const content = range.getBoundingClientRect();
+            const bounds = menu.getBoundingClientRect();
+            assert(content.left >= bounds.left && content.right <= bounds.right, `Basemap option is cut off at width ${width}: ${label.textContent.trim()}`);
+          }
+          assert([...control.querySelectorAll('input[type="radio"]')].every(input => host.getComputedStyle(input).clipPath === 'inset(50%)'), 'Basemap radio buttons remain visibly rendered');
+          for (const name of ['Satellite', 'Hybrid', 'Standard']) {
+            const label = [...control.querySelectorAll('label')].find(label => label.textContent.trim() === name);
+            label.click();
+            assert(label.querySelector('input').checked && control.querySelectorAll('input:checked').length === 1, `Selecting ${name} did not retain exclusive radio behavior`);
+            if (name === 'Hybrid') host.__geoEditor.map.eachLayer(layer => {
+              if (layer instanceof host.L.esri.Vector.VectorTileLayer) hybridReference = layer;
+            });
+          }
           const blank = [...control.querySelectorAll('label')].find(label => label.textContent.trim() === 'Blank').querySelector('input');
           blank.click();
           assert(blank.checked, 'Basemap selection stopped working');
@@ -1445,6 +1471,19 @@
           await new Promise(resolve => host.setTimeout(resolve, 0));
           assert(!expanded() && button.getAttribute('aria-expanded') === 'false', 'Map click did not dismiss the menu or update accessibility state');
         }
+        const request = host.L.esri.request;
+        host.L.esri.request = () => ({ abort() {} });
+        try {
+          const pending = new hybridReference.constructor('0769f07cc0c3453faec703e77dbb3459', { pane: 'tilePane' });
+          pending.addTo(host.__geoEditor.map);
+          host.__geoEditor.map.removeLayer(pending);
+          assert(!pending.listens('ready'), 'Removed Hybrid retained a pending style-ready callback');
+          pending._maplibreGL = host.L.layerGroup();
+          pending.fire('ready');
+          assert(!host.__geoEditor.map.hasLayer(pending._maplibreGL), 'Late Hybrid readiness attached an orphan overlay');
+        } finally { host.L.esri.request = request; }
+        host.removeEventListener('error', captureError);
+        assert(errors.length === 0, `Basemap switching raised browser errors: ${errors.join('; ')}`);
       }));
       await test('Dismissible modals animate dismissal while preserving validation and results', () => withEditor(async (host, doc) => {
         for (const dialog of doc.querySelectorAll('dialog:not(.progress-dialog)')) {
@@ -1637,8 +1676,10 @@
         doc.getAnimations().forEach(animation => animation.finish());
         app.map.stop();
         app.map.setView([-35, 149], 9, { animate: false });
+        [...doc.querySelectorAll('.leaflet-control-layers label')].find(label => label.textContent.trim() === 'Hybrid').click();
         await choose('save');
         const original = await new host.SessionStore().load();
+        assert(original.view.basemap === 'Hybrid', 'Hybrid selection was not saved');
         assert(original.layers[1].features.length === 1001 && original.selected.feature === 0, 'Save used sampled data or lost selection');
         layer.name = 'Replacement';
         layer.group.getLayers()[0].feature.properties.amount = 99;
@@ -1653,6 +1694,8 @@
         currentDoc = frame.contentDocument;
         await currentHost.__geoEditor.sessionReady;
         const restored = currentHost.__geoEditor;
+        const selectedBasemap = () => [...currentDoc.querySelectorAll('.leaflet-control-layers label')].find(label => label.querySelector('input').checked)?.textContent.trim();
+        assert(selectedBasemap() === 'Hybrid', 'Reload did not restore Hybrid');
         assert(restored.state.layers.length === 2 && restored.state.layers[0].name === 'Replacement', 'Reload did not restore the latest layer order/names');
         assert(restored.state.layers[1].group.getLayers().length === 1001 && !restored.state.layers[1].visible && !restored.map.hasLayer(restored.state.layers[1].group), 'Hidden dataset was lost or shown');
         const restoredLayer = restored.state.layers[0];
@@ -1667,6 +1710,14 @@
         assert(restored.state.layers[0].name === 'Replacement', 'Manual restore did not discard unsaved changes');
         const before = restored.state.layers.map(item => item.group.toGeoJSON(false));
         const valid = await new currentHost.SessionStore().load();
+        const legacy = structuredClone(valid);
+        legacy.view.basemap = 'OpenStreetMap';
+        await new currentHost.SessionStore().save(legacy);
+        await choose('restore');
+        assert(selectedBasemap() === 'Standard', 'Legacy OpenStreetMap session did not restore Standard');
+        await new currentHost.SessionStore().save(valid);
+        await choose('restore');
+        assert(selectedBasemap() === 'Hybrid', 'Manual restore did not restore Hybrid');
         const broken = structuredClone(valid);
         broken.layers.push({ ...structuredClone(valid.layers[0]), features: [{ type: 'Feature', properties: {}, geometry: { type: 'InvalidGeometry', coordinates: [] } }] });
         await new currentHost.SessionStore().save(broken);

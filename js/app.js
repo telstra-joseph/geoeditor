@@ -396,11 +396,51 @@
   const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19, attribution: '&copy; OpenStreetMap contributors',
   }).addTo(map);
-  const imagery = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+  const imageryUrl = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+  const imagery = L.tileLayer(imageryUrl, {
     maxZoom: 19, attribution: 'Tiles &copy; Esri',
   });
+  const HybridReference = L.esri.Vector.VectorTileLayer.extend({
+    onAdd(map) {
+      this._map = map;
+      if (this._ready) this._asyncAdd();
+      else this.once('ready', this._asyncAdd, this);
+    },
+    onRemove(map) {
+      this.off('ready', this._asyncAdd, this);
+      if (this._maplibreGL && map.hasLayer(this._maplibreGL)) L.esri.Vector.VectorTileLayer.prototype.onRemove.call(this, map);
+    },
+  });
+  const hybrid = L.layerGroup([
+    L.tileLayer(imageryUrl, { maxZoom: 19, attribution: 'Tiles &copy; Esri' }),
+    new HybridReference('0769f07cc0c3453faec703e77dbb3459', {
+      pane: 'tilePane', attribution: 'Map data &copy; OpenStreetMap contributors, Microsoft, Esri',
+    }),
+  ]);
   const blank = L.layerGroup();
-  const basemapControl = L.control.layers({ OpenStreetMap: osm, Satellite: imagery, Blank: blank }, null, { position: 'topright' }).addTo(map);
+  const basemaps = { Standard: osm, Satellite: imagery, Hybrid: hybrid, Blank: blank };
+  const basemapControl = L.control.layers(basemaps, null, { position: 'topright' }).addTo(map);
+  const addBasemapItem = basemapControl._addItem;
+  basemapControl._addItem = function(entry) {
+    const label = addBasemapItem.call(this, entry);
+    const preview = document.createElement('span');
+    preview.className = 'basemap-preview';
+    preview.setAttribute('aria-hidden', 'true');
+    const url = entry.layer.options.basemapPreview;
+    if (url) {
+      const image = document.createElement('img');
+      image.src = url;
+      image.alt = '';
+      image.loading = 'lazy';
+      preview.appendChild(image);
+    } else preview.classList.add('basemap-preview-blank');
+    label.querySelector('span > span').prepend(preview);
+    return label;
+  };
+  osm.options.basemapPreview = 'lib/images/basemap-standard.png';
+  imagery.options.basemapPreview = 'lib/images/basemap-satellite.jpg';
+  hybrid.options.basemapPreview = 'lib/images/basemap-hybrid.png';
+  basemapControl._update();
   const basemapToggle = basemapControl.getContainer().querySelector('.leaflet-control-layers-toggle');
   basemapToggle.replaceChildren(actionIcon('Layers'));
   basemapToggle.title = 'Choose basemap';
@@ -2032,7 +2072,7 @@
       page: state.page, filter: state.filter, sort: state.sort ? { ...state.sort } : null, colorIdx: state.colorIdx,
       view: {
         center: [center.lat, center.lng], zoom: map.getZoom(),
-        basemap: map.hasLayer(osm) ? 'OpenStreetMap' : map.hasLayer(imagery) ? 'Satellite' : 'Blank',
+        basemap: Object.keys(basemaps).find(name => map.hasLayer(basemaps[name])) || 'Standard',
         collapsed: $('sidebar').classList.contains('collapsed'), tableBasis: $('tablePanel').style.flexBasis,
         sidebarWidth: parseFloat($('main').style.getPropertyValue('--sidebar-width')) || 330,
         sidebarFitNames: $('main').classList.contains('sidebar-fit-names'),
@@ -2084,8 +2124,8 @@
       $('btnUndo').title = 'Undo last table edit';
       $('filter').value = state.filter;
       if (state.active) $('fmt').value = state.active.format;
-      const base = { OpenStreetMap: osm, Satellite: imagery, Blank: blank };
-      [osm, imagery, blank].forEach(layer => map.removeLayer(layer));
+      const base = { ...basemaps, OpenStreetMap: osm };
+      Object.values(basemaps).forEach(layer => map.removeLayer(layer));
       (base[saved.view.basemap] || osm).addTo(map);
       if (saved.view.theme === 'dark' || saved.view.theme === 'light') applyTheme(saved.view.theme);
       setSidebarWidth(Number.isFinite(saved.view.sidebarWidth) ? saved.view.sidebarWidth : 330, !!saved.view.sidebarFitNames);

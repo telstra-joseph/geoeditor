@@ -28,7 +28,7 @@ flowchart LR
     end
 
     Libs["lib/<br/>Leaflet, Geoman, shp.js,<br/>toGeoJSON, JSZip, Lucide"]
-    Tiles["Basemap tile servers<br/>OpenStreetMap, Esri"]
+    Tiles["Basemap tile servers<br/>Standard: OpenStreetMap<br/>Satellite and Hybrid: Esri imagery<br/>Hybrid: Open Basemap roads and labels"]
     Fonts["Google Fonts<br/>Doto heading font"]
     Files[("Local files")]
 
