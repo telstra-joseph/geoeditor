@@ -335,13 +335,32 @@
         map.setView([2, 3], 5, { animate: false });
         await paint();
         assert(pixel([4, 4])[3] > 0 && pixel([0, 0])[3] === 0, 'View transform misaligned');
+        if (renderer._gpu) {
+          const resize = renderer._gpu.resize;
+          let resizes = 0;
+          renderer._gpu.resize = function(...args) { resizes++; return resize.apply(this, args); };
+          try {
+            map.panBy([24, 0], { animate: false });
+            await paint();
+            assert(resizes === 0, 'Same-size pan reallocated the GPU canvas');
+            assert(pixel([4, 4])[3] > 0 && pixel([0, 0])[3] === 0, 'Pan without canvas resize lost alignment');
+          } finally { renderer._gpu.resize = resize; }
+        }
       });
       await test('Dense interactions lower only canvas resolution and restore sharp aligned geometry', async () => {
         if (!renderer._gpu) return 'skip';
         const threshold = renderer.options.adaptiveResolutionThreshold;
-        const full = renderer._fullResolution;
+        const nativeResolution = renderer._fullResolution;
+        const full = 2;
         const width = renderer._container.style.width;
         try {
+          renderer.options.adaptiveResolutionThreshold = 1;
+          renderer._fullResolution = 1;
+          renderer._setResolution(1);
+          map.fire('movestart');
+          assert(renderer._gpu.resolution === 1, 'Standard-DPI interaction unnecessarily resized the canvas');
+          renderer._fullResolution = full;
+          renderer._setResolution(full);
           renderer.options.adaptiveResolutionThreshold = Infinity;
           map.fire('movestart');
           assert(renderer._gpu.resolution === full, 'Sparse map unnecessarily lowered resolution');
@@ -365,7 +384,8 @@
         } finally {
           renderer.options.adaptiveResolutionThreshold = threshold;
           clearTimeout(renderer._resolutionTimer);
-          renderer._setResolution(full);
+          renderer._fullResolution = nativeResolution;
+          renderer._setResolution(nativeResolution);
           point.setStyle({ fillColor: '#0000ff' });
           await paint();
         }

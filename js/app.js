@@ -655,6 +655,65 @@
     return Math.round(size * 10) / 10;
   }
 
+  const kmlLabelDimensions = new Map();
+  const KmlMapTooltip = L.Tooltip.extend({
+    onAdd(map) {
+      this._placementRendered = false;
+      if (!this.options.kmlManagedLabel) {
+        this._placementRendered = true;
+        return L.Tooltip.prototype.onAdd.call(this, map);
+      }
+      if (!this._container) this._initLayout();
+      this._updateContent();
+      this._container.style.visibility = 'hidden';
+      this._updatePosition();
+    },
+    onRemove(map) {
+      if (this._placementRendered) L.Tooltip.prototype.onRemove.call(this, map);
+      this._placementRendered = false;
+    },
+    _setLabelVisible(visible) {
+      if (visible && !this._placementRendered) {
+        this._placementRendered = true;
+        L.Tooltip.prototype.onAdd.call(this, this._map);
+      } else if (!visible && this._placementRendered) {
+        L.Tooltip.prototype.onRemove.call(this, this._map);
+        this._placementRendered = false;
+      }
+    },
+    _measureLabel() {
+      const key = this.options.kmlMeasureKey;
+      let size = kmlLabelDimensions.get(key);
+      if (!size) {
+        const detached = !this._container.isConnected;
+        if (detached) this.getPane().appendChild(this._container);
+        size = L.point(this._container.offsetWidth, this._container.offsetHeight);
+        if (detached) this._container.remove();
+        if (size.x && size.y) {
+          if (kmlLabelDimensions.size >= 4096) kmlLabelDimensions.delete(kmlLabelDimensions.keys().next().value);
+          kmlLabelDimensions.set(key, size);
+        }
+      }
+      return size;
+    },
+    _setPosition(position) {
+      const direction = this.options.direction;
+      if (!['top', 'bottom', 'left', 'right', 'center'].includes(direction)) return L.Tooltip.prototype._setPosition.call(this, position);
+      const size = this._measureLabel();
+      const offset = L.point(direction === 'right' ? 0 : direction === 'left' ? size.x : size.x / 2,
+        direction === 'top' ? size.y : direction === 'bottom' ? 0 : size.y / 2);
+      const target = position.subtract(offset.round()).add(L.point(this.options.offset)).add(this._getAnchor());
+      const element = this._container;
+      if (!element.classList.contains(`leaflet-tooltip-${direction}`)) {
+        element.classList.remove('leaflet-tooltip-top', 'leaflet-tooltip-bottom', 'leaflet-tooltip-left', 'leaflet-tooltip-right');
+        element.classList.add(`leaflet-tooltip-${direction}`);
+      }
+      if (!L.DomUtil.getPosition(element).equals(target)) L.DomUtil.setPosition(element, target);
+    },
+  });
+  window.addEventListener('resize', () => kmlLabelDimensions.clear());
+  document.fonts?.addEventListener('loadingdone', () => kmlLabelDimensions.clear());
+
   function updateKmlLabel(leaf, siteFontSize = null) {
     if (!leaf.feature?.kml) return;
     const name = String(leaf.feature.properties.name ?? '').trim();
@@ -669,7 +728,7 @@
     const single = singleCharacterLabel(leaf);
     const site = isPointLeaf(leaf) && [...name].length === 4;
     if (!name || scale <= 0 || opacity <= 0 || (single && !leaf._kmlLabelSize)) { leaf.unbindTooltip(); return; }
-    const fontSize = site ? siteFontSize ?? siteLabelSize() : single ? leaf._kmlLabelSize : Math.min(256, 16 * (Number.isFinite(scale) ? scale : 1));
+    const fontSize = site ? siteFontSize ?? siteLabelSize() : single ? Math.round(leaf._kmlLabelSize * 10) / 10 : Math.min(256, 16 * (Number.isFinite(scale) ? scale : 1));
     const centered = !site && (!isPointLeaf(leaf) || kmlLabelOnly(leaf));
     const alpha = Number.isFinite(opacity) ? Math.max(0, Math.min(1, opacity)) : 1;
     const labelKey = JSON.stringify([name, style['label-color'] || '#ffffff', fontSize, centered, site, alpha]);
@@ -689,9 +748,9 @@
     const options = {
       permanent: true, interactive: true, className: site ? 'kml-map-label kml-site-label' : 'kml-map-label',
       direction: site ? 'top' : centered ? 'center' : 'right', offset: site ? L.point(0, -4) : L.point(centered ? 0 : 8, 0),
-      opacity: alpha,
+      opacity: alpha, kmlMeasureKey: labelKey, kmlManagedLabel: single || site,
     };
-    if (!leaf.getTooltip()) leaf.bindTooltip(text, options);
+    if (!leaf.getTooltip()) leaf.bindTooltip(new KmlMapTooltip(options).setContent(text));
     else {
       Object.assign(leaf.getTooltip().options, options);
       leaf.getTooltip().getElement()?.classList.toggle('kml-site-label', site);
@@ -728,7 +787,12 @@
     for (const leaf of sites) {
       const tooltip = leaf.getTooltip();
       const element = tooltip.getElement();
-      if (element && map.hasLayer(tooltip)) measured.push({ leaf, tooltip, element, point: map.latLngToContainerPoint(leaf.getLatLng()), width: element.offsetWidth, height: element.offsetHeight });
+      if (element && map.hasLayer(tooltip)) {
+        const size = tooltip._measureLabel();
+        measured.push({ leaf, tooltip, element, point: map.latLngToContainerPoint(leaf.getLatLng()), width: size.x, height: size.y });
+      } else if (element) {
+        tooltip._setLabelVisible(false);
+      }
       yield true;
     }
     for (const { leaf, tooltip, element, point, width, height } of measured) {
@@ -744,6 +808,7 @@
         return cells(rectangle).every(key => (occupied.get(key) || []).every(other =>
           rectangle.right <= other.left || rectangle.left >= other.right || rectangle.bottom <= other.top || rectangle.top >= other.bottom));
       }) || (leaf === state.selected ? choices[0] : null);
+      tooltip._setLabelVisible(!!placement);
       const visibility = placement ? '' : 'hidden';
       if (element.style.visibility !== visibility) element.style.visibility = visibility;
       if (!placement) { yield true; continue; }
@@ -751,7 +816,7 @@
       if (tooltip.options.direction !== placement.direction || !tooltip.options.offset.equals(offset)) {
         tooltip.options.direction = placement.direction;
         tooltip.options.offset = offset;
-        tooltip.update();
+        tooltip._updatePosition();
       }
       const rectangle = { left: placement.left - 2, top: placement.top - 2, right: placement.left + width + 2, bottom: placement.top + height + 2 };
       cells(rectangle).forEach(key => {
@@ -762,19 +827,23 @@
     }
     const letters = [];
     for (const leaf of lyr.displayed) {
-      const element = singleCharacterLabel(leaf) && leaf.getTooltip()?.getElement();
+      const tooltip = singleCharacterLabel(leaf) && leaf.getTooltip();
+      const element = tooltip && tooltip.getElement();
       if (element) {
-        const bounds = element.getBoundingClientRect();
-        letters.push({ element, rectangle: { left: bounds.left - mapRect.left - 1, top: bounds.top - mapRect.top - 1,
-          right: bounds.right - mapRect.left + 1, bottom: bounds.bottom - mapRect.top + 1 } });
+        const position = map.layerPointToContainerPoint(L.DomUtil.getPosition(element));
+        const size = tooltip._measureLabel();
+        letters.push({ tooltip, element, rectangle: { left: position.x - 1, top: position.y - 1,
+          right: position.x + size.x + 1, bottom: position.y + size.y + 1 } });
       }
       if (element || ++checkpoints % DISPLAY_CHECKPOINT_INTERVAL === 0) yield !!element;
     }
-    for (const { element, rectangle } of letters) {
+    for (const { tooltip, element, rectangle } of letters) {
       const visible = rectangle.left >= area.left && rectangle.right <= area.right && rectangle.top >= area.top && rectangle.bottom <= area.bottom &&
         cells(rectangle).every(key => (occupied.get(key) || []).every(other =>
           rectangle.right <= other.left || rectangle.left >= other.right || rectangle.bottom <= other.top || rectangle.top >= other.bottom));
-      element.style.visibility = visible ? '' : 'hidden';
+          tooltip._setLabelVisible(visible);
+      const visibility = visible ? '' : 'hidden';
+      if (element.style.visibility !== visibility) element.style.visibility = visibility;
       if (!visible) { yield true; continue; }
       cells(rectangle).forEach(key => {
         if (!occupied.has(key)) occupied.set(key, []);

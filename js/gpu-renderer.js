@@ -38,8 +38,8 @@
     _startInteraction() {
       if (!this._gpu) return;
       clearTimeout(this._resolutionTimer);
-      if (this._graphics.size < this.options.adaptiveResolutionThreshold) return;
-      this._setResolution(Math.min(this._fullResolution, Math.max(.5, Math.min(1, this._fullResolution * .75))));
+      if (this._fullResolution <= 1 || this._graphics.size < this.options.adaptiveResolutionThreshold) return;
+      this._setResolution(1);
     },
 
     _endInteraction(event) {
@@ -55,7 +55,7 @@
     _setResolution(resolution) {
       if (this._gpu.resolution === resolution) return;
       this._gpu.resolution = resolution;
-      this._gpu.resize(this._gpu.screen.width, this._gpu.screen.height);
+      this._gpu.resize(this._gpuSize.x, this._gpuSize.y);
       if (this._drawFirst) this._requestRedraw(this._drawFirst.layer);
     },
 
@@ -75,6 +75,7 @@
       }
       this._stage = new PIXI.Container();
       this._fullResolution = this._gpu.resolution;
+      this._gpuSize = L.point(1, 1);
       this._graphics = new Map();
       this._retained = new Map();
       this._retainedVertices = 0;
@@ -115,6 +116,7 @@
       delete this._retained;
       delete this._dirty;
       delete this._gpu;
+      delete this._gpuSize;
       delete this._container;
     },
 
@@ -124,7 +126,12 @@
       L.Renderer.prototype._update.call(this);
       const size = this._bounds.getSize();
       L.DomUtil.setPosition(this._container, this._bounds.min);
-      this._gpu.resize(Math.max(1, size.x), Math.max(1, size.y));
+      const width = Math.max(1, size.x);
+      const height = Math.max(1, size.y);
+      if (this._gpuSize.x !== width || this._gpuSize.y !== height) {
+        this._gpu.resize(width, height);
+        this._gpuSize = L.point(width, height);
+      }
       this._stage.position.set(-this._bounds.min.x, -this._bounds.min.y);
       this.fire('update');
     },

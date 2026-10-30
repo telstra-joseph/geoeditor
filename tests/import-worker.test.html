@@ -2442,7 +2442,14 @@
         assert(!app.map.hasLayer(named('F')), 'Distant letter associated with unrelated polygon');
         assert(!app.map.hasLayer(named('1')), 'Letter shown over a tiny polygon');
         const text = named('B').getTooltip().getContent();
-        assert(Number.parseFloat(text.style.fontSize) <= 12 && host.getComputedStyle(text).fontWeight === '400', 'Letter too large or bold');
+        const withVisibleLabel = run => {
+          const label = named('B').getTooltip();
+          const visible = label._placementRendered;
+          label._setLabelVisible(true);
+          try { return run(); }
+          finally { label._setLabelVisible(visible); }
+        };
+        assert(Number.parseFloat(text.style.fontSize) <= 12 && withVisibleLabel(() => host.getComputedStyle(text).fontWeight) === '400', 'Letter too large or bold');
         const bounds = named('A').getBounds();
         const size = app.map.latLngToContainerPoint(bounds.getSouthEast()).subtract(app.map.latLngToContainerPoint(bounds.getNorthWest()));
         assert(Number.parseFloat(text.style.fontSize) < Math.min(size.x, size.y) * .2, 'Letter exceeds polygon-relative size');
@@ -2473,7 +2480,7 @@
         assert(wideFont >= 8 && wideFont < closeFont, 'Letter did not shrink as its polygon became smaller');
         assert(wideFont <= Math.min(southEast.x - northWest.x, southEast.y - northWest.y) * .18 + .01, 'Letter exceeds 18% of the polygon size');
         assert(!app.map.hasLayer(named('E')), 'Letter near the polygon edge rendered without enough clearance');
-        const labelRect = named('B').getTooltip().getContent().getBoundingClientRect();
+        const labelRect = withVisibleLabel(() => named('B').getTooltip().getContent().getBoundingClientRect());
         const mapRect = app.map.getContainer().getBoundingClientRect();
         assert(labelRect.left >= mapRect.left + northWest.x && labelRect.right <= mapRect.left + southEast.x && labelRect.top >= mapRect.top + northWest.y && labelRect.bottom <= mapRect.top + southEast.y, 'Letter extends outside polygon bounds');
         app.map.setView([-35, 149], 15, { animate: false });
@@ -2485,7 +2492,7 @@
         await app.handleFiles([jsonFile(collection([point()]), 'compact-labels.geojson')]);
         app.map.stop();
         app.map.options.zoomAnimation = false;
-        const features = ['A', 'B', 'C', 'D'].map(name => ({
+        const features = ['A', 'B', 'C', 'D', 'A'].map(name => ({
           ...point({ name }), kml: { folderIds: [] },
           style: { 'icon-scale': 0, 'label-scale': name === 'C' ? 0 : .6, 'label-opacity': name === 'D' ? 0 : 1 },
         }));
@@ -2506,9 +2513,37 @@
           assert(labels.every(Boolean), 'Explicit zero-icon source labels suppressed without a large polygon');
           const visible = labels.filter(label => label.getElement().style.visibility !== 'hidden');
           assert(visible.length === 1, 'Colliding source letters overlap or both disappear');
+          assert(labels.every(label => label.getElement().isConnected === (label.getElement().style.visibility !== 'hidden')), 'Collision-hidden letters remained in the live DOM or visible letters were detached');
           const font = Number.parseFloat(visible[0].getContent().style.fontSize);
           assert(font >= 6 && font <= 9.6, 'Compact label is too small or oversized');
           fonts.push(font);
+          const label = labels[0];
+          const dimensions = label._measureLabel();
+          assert(leaves[4].getTooltip()._measureLabel() === dimensions, 'Identical letters did not share measured dimensions');
+          const element = label.getElement();
+          const width = Object.getOwnPropertyDescriptor(host.HTMLElement.prototype, 'offsetWidth');
+          let widthReads = 0;
+          Object.defineProperty(element, 'offsetWidth', { configurable: true, get() { widthReads++; return width.get.call(this); } });
+          try {
+            const position = app.map.latLngToLayerPoint(label.getLatLng());
+            host.L.Tooltip.prototype._setPosition.call(label, position);
+            const nativePosition = host.L.DomUtil.getPosition(element).clone();
+            widthReads = 0;
+            label._setPosition(position);
+            assert(widthReads === 0, 'Unchanged letter positioning forced another width measurement');
+            assert(host.L.DomUtil.getPosition(element).equals(nativePosition), 'Cached positioning differs from native Leaflet alignment');
+            host.dispatchEvent(new host.Event('resize'));
+            label._measureLabel();
+            assert(widthReads > 0, 'Viewport resize reused stale label dimensions');
+          } finally { delete element.offsetWidth; }
+          const rectangle = element.getBoundingClientRect;
+          let rectangleReads = 0;
+          element.getBoundingClientRect = function(...args) { rectangleReads++; return rectangle.apply(this, args); };
+          try {
+            app.map.fire('moveend');
+            await new Promise(resolve => host.setTimeout(resolve, 120));
+            assert(rectangleReads === 0, 'Letter collision refresh forced per-label DOM rectangle reads');
+          } finally { delete element.getBoundingClientRect; }
           assert(!leaves[2].getTooltip() && !leaves[3].getTooltip(), 'Explicitly hidden source labels became visible');
           assert(leaves.every(leaf => leaf.options.opacity === 0 && leaf.options.fillOpacity === 0), 'Letter dots became visible');
         }
