@@ -10,6 +10,7 @@
     try {
       const url = new URL('js/processing-worker.js', document.baseURI);
       url.searchParams.set('task', task);
+      if (task === 'mask' || task === 'export') url.searchParams.set('revision', '2');
       worker = new Worker(url);
     } catch { return Promise.resolve().then(fallback); }
     return new Promise((resolve, reject) => {

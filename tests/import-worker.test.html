@@ -466,7 +466,8 @@
         const letter = leaves.find(leaf => leaf.feature.properties.name === 'B');
         const hidden = leaves.find(leaf => leaf.feature.properties.name === 'F');
         assert(letter.getTooltip().getContent().textContent === 'B', 'Letter not rendered');
-        assert(letter.getTooltip().getContent().style.fontSize === '12px', 'Single-character size cap ignored');
+        const letterSize = Number.parseFloat(letter.getTooltip().getContent().style.fontSize);
+        assert(letterSize >= 6 && letterSize < 12, 'Single-character size did not shrink at the 500 m scale');
         assert(host.getComputedStyle(letter.getTooltip().getElement()).fontWeight === '400', 'Label is bold');
         assert(letter.getTooltip().getContent().style.color === 'rgb(255, 0, 0)', 'Label colour ignored');
         assert(Math.abs(letter.getTooltip().options.opacity - 128 / 255) < .001, 'Label opacity ignored');
@@ -503,6 +504,25 @@
         assert(layer.group.getLayers().length === 7, 'Visibility removed editable features');
         letter.setLatLng([-34.9, 149.1]);
         assert(letter.getTooltip().getLatLng().equals(letter.getLatLng()), 'Label did not follow edited point');
+      }));
+      await test('Explicit KML point styles preserve opacity and zero-scale icons', () => withEditor(async (host) => {
+        const app = host.__geoEditor;
+        const styled = '<kml xmlns="http://www.opengis.net/kml/2.2"><Document><Style id="blue"><IconStyle><color>80eb6325</color><scale>2</scale><Icon><href>http://maps.google.com/mapfiles/kml/pushpin/wht-pushpin.png</href></Icon></IconStyle></Style><Style id="hidden"><IconStyle><scale>0</scale><Icon><href>http://maps.google.com/mapfiles/kml/pushpin/wht-pushpin.png</href></Icon></IconStyle></Style><Placemark><name>1</name><styleUrl>#blue</styleUrl><Point><coordinates>149,-35</coordinates></Point></Placemark><Placemark><name>2</name><styleUrl>#hidden</styleUrl><Point><coordinates>149,-35</coordinates></Point></Placemark><Placemark><name>3</name><Point><coordinates>149,-35</coordinates></Point></Placemark></Document></kml>';
+        await app.handleFiles([new File([styled.replace('<name>1</name>', '<name>Styled</name>')], 'styled-points.kml')]);
+        app.map.stop();
+        app.map.setView([-35, 149], 9, { animate: false });
+        await new Promise(resolve => host.setTimeout(resolve, 120));
+        const leaves = app.state.active.group.getLayers();
+        const visible = leaves.find(leaf => leaf.feature.properties.name === 'Styled');
+        const hidden = leaves.find(leaf => leaf.feature.properties.name === '2');
+        const unstyled = leaves.find(leaf => leaf.feature.properties.name === '3');
+        assert(app.map.hasLayer(visible), 'Explicit icon was suppressed by label zoom or polygon-size rules');
+        assert(visible.options.fillColor === '#2563eb', 'KML icon colour was overridden');
+        assert(visible.options.radius === 6, 'KML icon scale was ignored');
+        assert(Math.abs(visible.options.fillOpacity - 128 / 255) < .001 && Math.abs(visible.options.opacity - 128 / 255) < .001, 'KML icon opacity was ignored');
+        assert(hidden.options.radius === 0 && hidden.options.opacity === 0 && hidden.options.fillOpacity === 0, 'Zero-scale icon became visible');
+        assert(!app.map.hasLayer(unstyled), 'Unstyled label-only point no longer follows label visibility rules');
+        assert(leaves.length === 3, 'Styling removed editable features');
       }));
       await test('Table follows visible folders and shows all rows when no folders are checked', () => withEditor(async (host, doc) => {
         const app = host.__geoEditor;
@@ -983,7 +1003,7 @@
           frame.style.width = `${width}px`;
           await settle();
           assert(host.getComputedStyle(slider).display === 'none', `Resize edge appeared on width ${width}`);
-          assert(Math.abs(sidebar.getBoundingClientRect().width - (width === 390 ? width : 330)) < 1, 'Tablet/phone sidebar layout changed');
+          assert(Math.abs(sidebar.getBoundingClientRect().width - (width === 390 ? width : 300)) < 1, 'Tablet/phone sidebar layout changed');
         }
         frame.style.width = '1920px';
         await settle();
@@ -1079,7 +1099,7 @@
           const controlBounds = control.getBoundingClientRect();
           const trayBounds = tray.getBoundingClientRect();
           assert(host.getComputedStyle(tray).visibility === 'visible', `Map action tray did not open at width ${width}`);
-          assert(controlBounds.height === (width <= 1024 ? 44 : 32), `Map control has an unexpected height at width ${width}`);
+          assert(controlBounds.height === (width <= 760 ? 44 : width <= 1024 ? 36 : 32), `Map control has an unexpected height at width ${width}`);
           assert(trayBounds.height === controlBounds.height, `Map action tray height differs from its control at width ${width}`);
           assert(Math.abs(trayBounds.top - controlBounds.top) < 1, `Map action tray is misaligned at width ${width}`);
           tray.querySelectorAll('.leaflet-pm-action').forEach(action => {
@@ -1186,15 +1206,22 @@
           host.frameElement.style.width = `${width}px`;
           host.frameElement.style.height = '800px';
           await new Promise(resolve => host.setTimeout(resolve, 100));
+          doc.getElementById('sidebar').getAnimations().forEach(animation => animation.finish());
           const mobile = width <= 1024;
-          const expected = mobile ? 188 : 112;
+          const tablet = width > 760 && mobile;
+          const expected = tablet ? 148 : mobile ? 188 : 112;
           const preview = doc.querySelector('table.attrs td.geometry-cell');
           assert(Math.abs(preview.getBoundingClientRect().width - expected) < 1, 'Action column width does not follow mobile mode');
           assert(parseFloat(host.getComputedStyle(doc.querySelector('table.attrs td.rn')).left) === expected, 'Sticky row numbers use the wrong action column offset');
           if (mobile) {
-            assert(host.getComputedStyle(doc.body).fontSize === '16px', 'Touch text remains too small');
-            assert(host.getComputedStyle(doc.querySelector('table.attrs')).fontSize === '16px', 'Touch table text remains too small');
-            assert(doc.querySelector('.geometry-preview').getBoundingClientRect().width === 28, 'Touch geometry preview remains too small');
+            assert(host.getComputedStyle(doc.body).fontSize === (tablet ? '14px' : '16px'), 'Incorrect responsive body text size');
+            assert(host.getComputedStyle(doc.querySelector('table.attrs')).fontSize === (tablet ? '13px' : '16px'), 'Incorrect responsive table text size');
+            assert(doc.querySelector('.geometry-preview').getBoundingClientRect().width === (tablet ? 22 : 28), 'Incorrect responsive geometry preview size');
+            if (tablet) {
+              assert(doc.getElementById('sidebar').getBoundingClientRect().width === 300, 'Tablet sidebar leaves too little map space');
+              assert(doc.querySelector('.kml-folder-row').getBoundingClientRect().height <= 36, 'Tablet folder rows are oversized');
+              assert(doc.querySelector('.layer-rename').getBoundingClientRect().width === 32, 'Tablet layer controls are oversized');
+            }
             assert(doc.getElementById('map').classList.contains('compact-controls'), 'Tablet map controls are not compact');
             assert(host.getComputedStyle(doc.getElementById('main')).flexDirection === (width <= 760 ? 'column' : 'row'), 'Phone and tablet layouts are not distinct');
             for (const meta of doc.querySelectorAll('#layerList .lmeta')) {
@@ -1205,7 +1232,7 @@
               const actions = [...meta.querySelectorAll('button')];
               const top = actions[0].getBoundingClientRect().top;
               assert(actions.every(button => Math.abs(button.getBoundingClientRect().top - top) < 1), 'Touch layer actions wrap onto separate rows');
-              assert(top >= meta.querySelector('span').getBoundingClientRect().bottom + 7, 'Layer actions share a row with the feature summary');
+              assert(top >= meta.querySelector('span').getBoundingClientRect().bottom + (tablet ? 4 : 7), 'Layer actions share a row with the feature summary');
               assert(top > meta.closest('li').querySelector('input[type=checkbox]').getBoundingClientRect().bottom, 'Layer actions are not below the visibility checkbox');
               actions.slice(1).forEach((button, index) => {
                 assert(Math.abs(button.getBoundingClientRect().left - actions[index].getBoundingClientRect().right - 4) < 1, 'Layer action spacing is uneven');
@@ -1214,18 +1241,18 @@
             for (const input of doc.querySelectorAll('#layerList input[type=checkbox], #layerList input[type=color]')) {
               const rect = input.getBoundingClientRect();
               if (!rect.width || !rect.height) continue;
-              assert(rect.width === 36 && rect.height === 36, 'Layer checkbox or colour swatch has the wrong touch size');
+              assert(rect.width === (tablet ? 24 : 36) && rect.height === (tablet ? 24 : 36), 'Layer checkbox or colour swatch has the wrong touch size');
             }
             for (const button of doc.querySelectorAll('button, #map .leaflet-buttons-control-button, #map .leaflet-control-layers-toggle')) {
               const rect = button.getBoundingClientRect();
               if (!rect.width || !rect.height) continue;
               const disclosure = button.matches('.kml-folder-row > button:first-child');
-              const targetSize = disclosure ? 36 : 44;
+              const targetSize = tablet ? button.closest('#layerList, table.attrs') ? 32 : 36 : disclosure ? 36 : 44;
               assert(rect.width >= targetSize - .5 && rect.height >= targetSize - .5, `Small mobile target: ${button.getAttribute('aria-label') || button.title || button.textContent}`);
               const icon = button.querySelector('svg');
               if (icon) {
                 const glyph = icon.getBoundingClientRect();
-                const glyphSize = disclosure ? 20 : 24;
+                const glyphSize = tablet ? button.closest('#layerList') ? 16 : 18 : disclosure ? 20 : 24;
                 assert(Math.abs(glyph.width - glyphSize) < .5 && Math.abs(glyph.height - glyphSize) < .5, `Small mobile glyph: ${button.getAttribute('aria-label') || button.title || button.textContent}`);
               }
             }
@@ -1246,6 +1273,33 @@
         }
         await host.__geoEditor.handleFiles([jsonFile(collection([point({ name: 'Second layer' })]), 'second-layer.geojson')]);
         assert([...doc.querySelectorAll('.layer-reorder')].every(handle => handle.getBoundingClientRect().width > 0), 'Multiple layers do not show reorder handles');
+        for (const [width, height] of [[820, 1180], [1024, 768]]) {
+          host.frameElement.style.width = `${width}px`;
+          host.frameElement.style.height = `${height}px`;
+          await new Promise(resolve => host.setTimeout(resolve, 120));
+          doc.getElementById('sidebar').getAnimations().forEach(animation => animation.finish());
+          for (const row of doc.querySelectorAll('#layerList > li')) {
+            const bounds = row.getBoundingClientRect();
+            assert(row.querySelector('.lname').getBoundingClientRect().width >= 80, 'Tablet layer names have too little space');
+            for (const button of row.querySelectorAll('.layer-actions button, .layer-rename, .layer-reorder')) {
+              const control = button.getBoundingClientRect();
+              assert(control.width === 32 && control.height === 32, 'Tablet layer target is not compact');
+              assert(control.left >= bounds.left && control.right <= bounds.right, 'Tablet layer control overflows');
+            }
+          }
+          assert(doc.documentElement.scrollWidth <= width, 'Tablet page overflows horizontally');
+          doc.getElementById('btnToggleLayers').click();
+          doc.getElementById('sidebar').getAnimations().forEach(animation => animation.finish());
+          const collapsed = doc.getElementById('sidebar').getBoundingClientRect();
+          for (const button of doc.querySelectorAll('#sidebarHeader button')) {
+            const bounds = button.getBoundingClientRect();
+            assert(bounds.left >= collapsed.left && bounds.right <= collapsed.right, 'Collapsed tablet sidebar clips its controls');
+          }
+          doc.getElementById('btnToggleLayers').click();
+          doc.getElementById('sidebar').getAnimations().forEach(animation => animation.finish());
+        }
+        host.frameElement.style.width = '390px';
+        await new Promise(resolve => host.setTimeout(resolve, 100));
         doc.querySelector('#layerList > li:last-child button[aria-label="Delete layer"]').click();
         const dialog = doc.getElementById('dlg');
         const closed = new Promise(resolve => dialog.addEventListener('close', resolve, { once: true }));
@@ -1430,7 +1484,7 @@
       }));
       await test('Map polygons and names show safe formatted descriptions and retain editing', () => withEditor(async (host, doc) => {
         const app = host.__geoEditor;
-        const html = '<h3>Site details</h3><table><tr><th>Band</th><td>700 MHz</td></tr></table><a href="javascript:alert(1)">Unsafe</a><a href="https://example.com/">Details</a><img src="x" onerror="window.__descriptionUnsafe=true">';
+        const html = '\n\n<h3>Site details</h3>\n\n<table><tr><th>Band</th><td>700 MHz</td></tr></table>\n\n<a href="javascript:alert(1)">Unsafe</a><a href="https://example.com/">Details</a><img src="x" onerror="window.__descriptionUnsafe=true">\n\n';
         const source = `<kml xmlns="http://www.opengis.net/kml/2.2"><Document><Placemark><name>Area</name><description><![CDATA[${html}]]></description><Polygon><outerBoundaryIs><LinearRing><coordinates>148,-36 150,-36 150,-34 148,-34 148,-36</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark><Placemark><name>AB12</name><description>First line\nSecond line &amp; text</description><Point><coordinates>149,-35</coordinates></Point></Placemark></Document></kml>`;
         await app.handleFiles([new File([source], 'descriptions.kml')]);
         const leaves = app.state.layers[0].group.getLayers();
@@ -1444,11 +1498,17 @@
         assert(!links[0].hasAttribute('href'), 'Unsafe URL survived sanitization');
         assert(links[1].target === '_blank' && links[1].rel.includes('noopener'), 'Safe link lacks isolation');
         assert(polygon.feature.properties.description.includes('onerror'), 'Displaying description changed stored source');
+        assert(host.getComputedStyle(description).whiteSpace === 'normal', 'Formatted descriptions retain oversized whitespace gaps');
+        assert(description.getBoundingClientRect().height < 110, 'Short formatted description wastes vertical space');
         const editor = doc.querySelector('.popup-form textarea');
         editor.value = '<strong>Updated</strong>\nSecond line';
         editor.dispatchEvent(new host.Event('change', { bubbles: true }));
         assert(description.querySelector('strong')?.textContent === 'Updated', 'Description preview did not update after editing');
         assert(polygon.feature.properties.description === editor.value, 'Description source edit was not saved');
+        editor.value = Array(100).fill('Long description line').join('\n');
+        editor.dispatchEvent(new host.Event('change', { bubbles: true }));
+        assert(!description.classList.contains('formatted'), 'Plain-text edits retain HTML whitespace styling');
+        assert(description.getBoundingClientRect().height <= 180 && description.scrollHeight > description.clientHeight, 'Long description does not use a compact scrollable preview');
         const named = leaves.find(leaf => leaf.feature.properties.name === 'AB12');
         named.getTooltip().getContent().click();
         description = [...doc.querySelectorAll('.feature-description')].at(-1);
@@ -1456,6 +1516,11 @@
         assert(description.textContent === 'First line\nSecond line & text', 'Plain description text or line breaks changed');
         assert(host.getComputedStyle(description).whiteSpace === 'pre-wrap', 'Plain text line breaks are not displayed');
         assert(host.getComputedStyle(named.getTooltip().getElement()).pointerEvents === 'auto', 'Map label cannot receive clicks');
+        for (const [width, fontSize] of [[820, '12px'], [390, '13px']]) {
+          host.frameElement.style.width = `${width}px`;
+          await new Promise(resolve => host.setTimeout(resolve, 100));
+          assert(host.getComputedStyle(description).fontSize === fontSize, 'Description text remains oversized on touch screens');
+        }
       }));
       await test('KMZ editor imports retain folder controls and point labels', () => withEditor(async (host, doc) => {
         const file = await zipFile('grouped.kmz', [{ name: 'doc.kml', data: groupedKml }]);
@@ -1652,6 +1717,69 @@
         assert(inverseCollection.geometry.geometries.length === 1 && inverseCollection.geometry.geometries[0].coordinates[0] === 10, 'Inverse collection mask used the wrong mode');
         assert(JSON.stringify(original) === before, 'Inverse masking modified the source');
       }));
+      await test('Whole-feature masks preserve originals, visible folder scope and nested KML/KMZ exports', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        const features = [host.turf.bboxPolygon([-1, -1, 3, 3]), host.turf.point([1.123456789123, 1]), host.turf.point([1, 1]), host.turf.point([10, 10])];
+        features.forEach((feature, index) => {
+          feature.properties = { name: `Original ${index}`, description: '<p>Source description</p>', amount: 12 };
+          feature.kml = { folderIds: index === 2 ? ['root', 'act'] : ['root', 'nsw', 'site'] };
+          feature.style = { fill: '#123456', 'fill-opacity': .6, 'icon-scale': 0, 'icon-opacity': .5, icon: 'https://example.test/icon.png', 'label-scale': .6, 'label-color': '#ff0000' };
+        });
+        const folders = [['root', null, 'Regions'], ['nsw', 'root', 'NSW'], ['site', 'nsw', 'Site & sectors'], ['act', 'root', 'ACT'], ['empty', 'nsw', 'Empty']]
+          .map(([id, parentId, name]) => ({ id, parentId, name, visible: id !== 'act', expanded: false }));
+        const target = app.createLayer({ name: 'Original NSWACT', features, fields: ['name', 'description', 'amount'], types: { name: 'string', description: 'string', amount: 'number' }, format: 'kml', kmlFolders: folders });
+        const boundary = app.createLayer({ name: 'Mask boundary', features: [host.turf.bboxPolygon([0, 0, 2, 2])] });
+        target.group.getLayers()[1].fire('click', { latlng: host.L.latLng(1, 1.123456789123) });
+        const before = JSON.stringify(target.group.toGeoJSON(false));
+        const originals = target.group.toGeoJSON(false).features;
+        const NativeWorker = host.Worker;
+        let result;
+        for (const fallback of [false, true]) {
+          if (fallback) host.Worker = class { constructor() { throw new Error('Worker blocked'); } };
+          try {
+            const count = app.state.layers.length;
+            doc.querySelector(`[data-layer-id="${target.id}"] button[title="Mask layer"]`).click();
+            const selects = doc.querySelectorAll('#dlgBody select');
+            assert(selects[2].value === 'preserve' && selects[3].value === 'visible', 'Mask defaults modify originals or include hidden folders');
+            selects[0].value = String(boundary.id);
+            doc.querySelector('#dlgBody input').value = 'NSW filtered';
+            doc.getElementById('dlgOk').click();
+            doc.getAnimations().filter(animation => animation.effect.getComputedTiming().iterations !== Infinity).forEach(animation => animation.finish());
+            for (let attempt = 0; attempt < 200 && (app.state.layers.length === count || doc.getElementById('maskProgressDlg').open); attempt++) await pause();
+            assert(app.state.layers.length === count + 1, 'Whole-feature mask did not complete');
+            result = app.state.active;
+            assert(JSON.stringify(result.group.toGeoJSON(false).features) === JSON.stringify(originals.slice(0, 2)), 'Mask changed original geometry, attributes, style or membership');
+            assert(result.kmlFolders.map(folder => folder.id).join() === 'root,nsw,site', 'Mask lost ancestors or retained unrelated folders');
+            assert(JSON.stringify(target.group.toGeoJSON(false)) === before, 'Mask changed the source layer');
+          } finally { host.Worker = NativeWorker; }
+        }
+        const downloads = [];
+        const originalUrl = host.URL.createObjectURL;
+        const originalClick = host.HTMLAnchorElement.prototype.click;
+        host.URL.createObjectURL = blob => { downloads.push(blob); return 'blob:mask-folder-export'; };
+        host.HTMLAnchorElement.prototype.click = function() {};
+        try {
+          for (const format of ['kml', 'kmz']) {
+            doc.getElementById('fmt').value = format;
+            await app.downloadLayers([result]);
+            const blob = downloads.at(-1);
+            const text = format === 'kml' ? await blob.text() : await (await host.JSZip.loadAsync(await blob.arrayBuffer())).file('doc.kml').async('string');
+            const xml = new host.DOMParser().parseFromString(text, 'text/xml');
+            assert(!xml.querySelector('parsererror') && xml.querySelectorAll('Folder').length === 3, 'Export flattened the surviving folder hierarchy');
+            assert(xml.querySelectorAll('Document > Folder > Folder > Folder > Placemark').length === 2, 'Export lost nested feature membership');
+            assert(xml.querySelector('Folder > Folder > Folder > name').textContent === 'Site & sectors', 'Export changed folder names');
+            const parsed = host.ImportCore.fromKml(xml, host.toGeoJSON);
+            const site = parsed.features.find(feature => feature.geometry.type === 'Point');
+            assert(site.geometry.coordinates[0] === 1.123456789123, 'Export rounded original coordinates');
+            assert(site.properties['icon-scale'] === 0 && site.properties['icon-opacity'] > .49 && site.properties['icon-opacity'] < .51 && site.properties.icon === 'https://example.test/icon.png', 'Export changed original point styling');
+            assert(site.properties['label-scale'] === .6 && site.properties['label-color'] === '#ff0000', 'Export lost label styling');
+            assert(parsed.kmlFolders.length === 3 && parsed.features.every(feature => feature.kml.folderIds.length === 3), 'Export cannot reimport the original folder structure');
+          }
+        } finally {
+          host.URL.createObjectURL = originalUrl;
+          host.HTMLAnchorElement.prototype.click = originalClick;
+        }
+      }));
       await test('Mask retention and exclusion keep only surviving folder branches and use a mask glyph', () => withEditor(async (host, doc) => {
         const app = host.__geoEditor;
         const features = [host.turf.point([1, 1]), host.turf.point([10, 10]), host.turf.bboxPolygon([-1, -1, 3, 3]), host.turf.point([8, 8])];
@@ -1673,6 +1801,8 @@
           assert(selects[1].value === 'retain', 'Retention is not the default mask operation');
           selects[0].value = String(source.id);
           selects[1].value = mode;
+          selects[2].value = 'clip';
+          selects[3].value = 'all';
           doc.querySelector('#dlgBody input').value = mode;
           doc.getElementById('dlgOk').click();
           doc.getAnimations().forEach(animation => animation.finish());
@@ -1709,6 +1839,7 @@
         const submit = (value, name) => {
           doc.querySelector(`[data-layer-id="${target.id}"] button[title="Mask layer"]`).click();
           doc.querySelector('#dlgBody select').value = value;
+          doc.querySelectorAll('#dlgBody select')[2].value = 'clip';
           doc.querySelector('#dlgBody input').value = name;
           doc.getElementById('dlgOk').click();
           finishAnimations();
@@ -1746,6 +1877,7 @@
           doc.querySelector(`[data-layer-id="${target.id}"] button[title="Mask layer"]`).click();
           doc.querySelector('#dlgBody select').value = 'draw';
           doc.querySelectorAll('#dlgBody select')[1].value = mode;
+          doc.querySelectorAll('#dlgBody select')[2].value = 'clip';
           doc.getElementById('dlgOk').click();
           doc.getAnimations().forEach(animation => animation.finish());
           for (let attempt = 0; attempt < 100 && !app.map.pm.Draw.Polygon.enabled(); attempt++) await pause();
@@ -1957,7 +2089,19 @@
       }));
       await test('Zoom limits count complete nested folders and retain selected and edited groups', () => withEditor(async host => {
         const app = host.__geoEditor;
-        const settle = () => new Promise(resolve => host.setTimeout(resolve, 100));
+        const settle = async () => {
+          const started = Date.now();
+          await new Promise(resolve => host.setTimeout(resolve, 100));
+          let idleSince = null;
+          while (true) {
+            assert(Date.now() - started < 10000, 'Display refresh did not finish');
+            if (app.state.layers.some(layer => layer.displayJob || layer.spatialPending)) idleSince = null;
+            else if (idleSince === null) idleSince = Date.now();
+            else if (Date.now() - idleSince >= 80) break;
+            await new Promise(resolve => host.setTimeout(resolve, 20));
+          }
+        };
+        await app.handleFiles([jsonFile(collection([point()]), 'display-anchor.geojson')]);
         app.map.options.zoomAnimation = false;
         app.map.setView([-35, 149], 3, { animate: false });
         await settle();
@@ -1995,6 +2139,21 @@
         layer.kmlFolderMap.get('sector-0').visible = true;
         app.map.setView([-35, 149], 3, { animate: false });
         await settle();
+        const stable = [...layer.displayed];
+        const query = host.SpatialQueries.query;
+        let reordered = false;
+        host.SpatialQueries.query = async (...args) => {
+          const indices = await query(...args);
+          reordered = true;
+          return indices.reverse();
+        };
+        try {
+          app.map.panBy([24, 0], { animate: false });
+          await settle();
+          assert(reordered, 'Pan did not refresh the spatial query');
+          assert(stable.every(leaf => layer.displayed.has(leaf)), 'Same-zoom pan replaced unchanged visible folders');
+          check(1000);
+        } finally { host.SpatialQueries.query = query; }
         const omitted = all.filter(leaf => !layer.displayed.has(leaf));
         app.state.selected = omitted[0];
         const editing = omitted.find(leaf => leaf.feature.properties.site !== omitted[0].feature.properties.site);
@@ -2014,6 +2173,94 @@
         await settle();
         check(1000);
         assert(layer.group.toGeoJSON().features.length === 6303, 'Folder sampling discarded editable or exportable data');
+      }));
+      await test('Large display refreshes yield between frames and cancel on pan and hide', () => withEditor(async host => {
+        const app = host.__geoEditor;
+        await app.handleFiles([jsonFile(collection([point()]), 'frame-anchor.geojson')]);
+        app.map.options.zoomAnimation = false;
+        app.map.setView([-35, 149], 3, { animate: false });
+        await new Promise(resolve => host.setTimeout(resolve, 150));
+        const requestFrame = host.requestAnimationFrame;
+        const cancelFrame = host.cancelAnimationFrame;
+        const now = host.performance.now;
+        const frames = new Map();
+        let sequence = 1000000;
+        let clock = now.call(host.performance);
+        host.requestAnimationFrame = callback => {
+          if (callback.name !== 'flushLayerDisplays') return requestFrame.call(host, callback);
+          frames.set(++sequence, callback);
+          return sequence;
+        };
+        host.cancelAnimationFrame = handle => {
+          if (!frames.delete(handle)) cancelFrame.call(host, handle);
+        };
+        const wait = async predicate => {
+          const started = Date.now();
+          while (!predicate()) {
+            assert(Date.now() - started < 10000, 'Timed out waiting for display work');
+            await new Promise(resolve => host.setTimeout(resolve, 20));
+          }
+        };
+        const runFrame = () => {
+          const [handle, callback] = frames.entries().next().value || [];
+          assert(callback, 'Missing scheduled display frame');
+          frames.delete(handle);
+          callback();
+        };
+        const finish = () => {
+          let steps = 0;
+          while (frames.size) {
+            assert(++steps < 1000, 'Display did not finish');
+            runFrame();
+          }
+        };
+        const showSome = layer => {
+          let steps = 0;
+          while (!layer.displayed.size && frames.size) {
+            assert(++steps < 20000, 'Display work made no progress');
+            runFrame();
+          }
+          assert(layer.displayed.size > 0 && layer.displayed.size < 1000 && layer.displayJob, 'Large update did not yield with partially applied features');
+        };
+        try {
+          const layer = app.createLayer({ name: 'Frame budget', features: Array.from({ length: 2400 }, () => point()) });
+          await wait(() => layer.displayJob && frames.size);
+          host.performance.now = () => clock += 9;
+          runFrame();
+          assert(layer.displayJob && frames.size && layer.displayed.size === 0, 'Candidate preparation ran to completion in one frame');
+          showSome(layer);
+          app.map.setView([0, 0], 3, { animate: false });
+          assert(!layer.displayJob && frames.size === 0, 'Pan did not cancel pending display work');
+          await wait(() => layer.displayed.size === 0);
+          app.map.setView([-35, 149], 3, { animate: false });
+          await wait(() => layer.displayJob && frames.size);
+          showSome(layer);
+          app.map.removeLayer(layer.group);
+          assert(!layer.displayJob && frames.size === 0 && layer.displayed.size === 0, 'Hidden layer retained queued or displayed features');
+          host.performance.now = now;
+          layer.group.addTo(app.map);
+          await wait(() => layer.displayJob && frames.size);
+          finish();
+          assert(!layer.displayJob && layer.displayed.size === 1000, 'Resumed display lost its cap or did not complete');
+          app.map.setZoom(6, { animate: false });
+          await wait(() => layer.displayJob && frames.size);
+          finish();
+          assert(layer.displayed.size === 2000, 'Zoom change did not refresh the display cap');
+          app.map.setView([0, 0], 6, { animate: false });
+          await wait(() => layer.displayJob && frames.size);
+          host.performance.now = () => clock += 9;
+          runFrame();
+          assert(layer.displayed.size > 0 && layer.displayed.size < 2000 && layer.displayJob, 'Large offscreen removal did not yield');
+          host.performance.now = now;
+          finish();
+          assert(!layer.displayJob && layer.displayed.size === 0, 'Offscreen removal did not finish');
+          assert(layer.group.toGeoJSON().features.length === 2400, 'Frame scheduling changed stored features');
+        } finally {
+          host.requestAnimationFrame = requestFrame;
+          host.cancelAnimationFrame = cancelFrame;
+          host.performance.now = now;
+          frames.clear();
+        }
       }));
       await test('Crowded layers reserve display slots for polygons before points', () => withEditor(async host => {
         const app = host.__geoEditor;
@@ -2062,7 +2309,10 @@
         assert(crowdedRemote.every(leaf => app.map.hasLayer(leaf)) && crowded.displayed.size === 1262, 'A nearby site caused partial folder rendering');
       }));
       await test('Four-character map labels have a thin black outline without bold text', () => withEditor(async (host, doc) => {
-        const layer = host.__geoEditor.createLayer({ name: 'Outlined labels', format: 'kml', features: ['AB12', 'ABC', 'ABCDE'].map(name => ({
+        const app = host.__geoEditor;
+        await app.handleFiles([jsonFile(collection([point()]), 'site-size-anchor.geojson')]);
+        app.map.setView([-35, 149], 15, { animate: false });
+        const layer = app.createLayer({ name: 'Outlined labels', format: 'kml', features: ['AB12', 'ABC', 'ABCDE'].map(name => ({
           ...point({ name }), kml: { folderIds: [] },
         })) });
         const labels = layer.group.getLayers().map(leaf => leaf.getTooltip().getContent());
@@ -2070,11 +2320,22 @@
         assert(labels[0].classList.contains('kml-label-outlined'), 'Four-character label not outlined');
         assert(style.webkitTextStrokeWidth === '1px' && style.webkitTextStrokeColor === 'rgb(0, 0, 0)', 'Incorrect outline width or colour');
         assert(style.fontWeight === '400', 'Outlined label became bold');
-        assert(style.fontSize === '14px', 'Site label is not a consistent readable size');
+        assert(style.fontSize === '14px', 'Close-up site label did not retain its original size');
         assert(labels.slice(1).every(label => !label.classList.contains('kml-label-outlined')), 'Other label lengths were outlined');
-        assert(host.getComputedStyle(doc.getElementById('btnAbout')).webkitTextStrokeColor === 'rgb(0, 0, 0)', 'Site-name outline missing');
-        const app = host.__geoEditor;
         const [node, other] = layer.group.getLayers();
+        const original = JSON.stringify(node.feature);
+        let previousSize = 0;
+        for (const zoom of [9, 10, 11, 12, 13, 14, 15, 16, 17]) {
+          app.map.setView([-35, 149], zoom, { animate: false });
+          await new Promise(resolve => host.setTimeout(resolve, 100));
+          const size = parseFloat(host.getComputedStyle(node.getTooltip().getContent()).fontSize);
+          assert(size >= 7 && size <= 14, 'Site label exceeded its size bounds');
+          assert(zoom >= 15 ? size === 14 : size > previousSize && size < 14, 'Site label did not resize progressively with zoom');
+          if (zoom <= 11) assert(size <= 10, 'Overview site label remains too prominent');
+          assert(host.getComputedStyle(other.getTooltip().getContent()).fontSize === '16px', 'Other label lengths changed size');
+          previousSize = size;
+        }
+        assert(JSON.stringify(node.feature) === original, 'Zoom-dependent sizing changed source feature data');
         for (const [zoom, radius] of [[4, 1], [9, 1.3], [12, 1.6], [16, 2]]) {
           app.map.setView([-35, 149], zoom, { animate: false });
           await new Promise(resolve => host.setTimeout(resolve, 80));
@@ -2091,6 +2352,7 @@
       }));
       await test('Site labels avoid collisions and give selected names placement priority', () => withEditor(async host => {
         const app = host.__geoEditor;
+        await app.handleFiles([jsonFile(collection([point()]), 'label-anchor.geojson')]);
         app.map.setView([-35, 149], 10, { animate: false });
         const layer = app.createLayer({ name: 'Site label placement', format: 'kml', features: ['AB12', 'CD34', 'EF56', 'GH78', 'IJ90', 'KL12'].map(name => ({
           ...point({ name }), kml: { folderIds: [] }, style: { 'label-scale': .7, 'label-color': '#ffff00' },
@@ -2102,7 +2364,8 @@
         shown.forEach((leaf, index) => {
           const element = leaf.getTooltip().getElement();
           const rectangle = element.getBoundingClientRect();
-          assert(host.getComputedStyle(leaf.getTooltip().getContent()).fontSize === '14px', 'KML scale reduced site-name legibility');
+          const fontSize = parseFloat(host.getComputedStyle(leaf.getTooltip().getContent()).fontSize);
+          assert(fontSize >= 7 && fontSize <= 10, 'Overview site name did not use compact zoom-dependent sizing');
           assert(host.getComputedStyle(element).backgroundColor === 'rgba(0, 0, 0, 0)', 'Site label has a backing field');
           assert(host.getComputedStyle(element).borderWidth === '0px', 'Site label has a bounding-field outline');
           shown.slice(index + 1).forEach(other => {
@@ -2121,6 +2384,9 @@
         app.map.fire('moveend');
         await new Promise(resolve => host.setTimeout(resolve, 80));
         assert(hidden.getTooltip().getContent() === content, 'Unchanged label DOM was recreated');
+        app.map.panBy([24, 0], { animate: false });
+        await new Promise(resolve => host.setTimeout(resolve, 100));
+        assert(hidden.getTooltip().getContent() === content, 'Small pan rebuilt unchanged site-label text');
         assert(layer.group.toGeoJSON().features.length === 6, 'Label layout discarded data');
       }));
       await test('Single-character labels require readable nearby polygons and hide at distant zoom', () => withEditor(async (host, doc) => {
@@ -2136,7 +2402,7 @@
         });
         const letter = (name, longitude, latitude, scale = 5) => ({
           ...point({ name }), geometry: { type: 'Point', coordinates: [longitude, latitude] },
-          kml: { folderIds: [] }, style: { 'label-scale': scale },
+          kml: { folderIds: [] }, style: { 'label-scale': scale, icon: 'pushpin.png', 'icon-scale': 1 },
         });
         const layer = app.createLayer({ name: 'Fitted labels', format: 'kml', fields: ['name'],
           kmlFolders: [{ id: 'zones', parentId: null, name: 'Zones', visible: true, expanded: false }],
@@ -2150,19 +2416,19 @@
         assert(!app.map.hasLayer(named('K')), 'Letter appeared on a polygon below the readable size threshold');
         app.map.setView([-35, 149], 12, { animate: false });
         await settle();
-        const widerBounds = named('A').getBounds();
-        const widerSize = app.map.latLngToContainerPoint(widerBounds.getSouthEast()).subtract(app.map.latLngToContainerPoint(widerBounds.getNorthWest()));
-        const shortSide = Math.min(widerSize.x, widerSize.y);
-        assert(shortSide >= 24 && shortSide < 32, 'Wider-zoom fixture does not exercise the relaxed polygon threshold');
-        assert(app.map.hasLayer(named('K')) && named('K').getTooltip()?.getContent().style.fontSize === '9.6px', 'Scale-0.6 letter missing at the wider zoom');
-        const widerFont = Number.parseFloat(named('B').getTooltip()?.getContent().style.fontSize);
-        assert(widerFont >= 8 && widerFont <= shortSide / 3 + .01, 'Wider-zoom label is unreadable or oversized for its polygon');
-        assert(!app.map.hasLayer(named('1')) && !app.map.hasLayer(named('F')), 'Wider zoom admitted tiny-polygon or distant labels');
+        assert(!named('A').getTooltip() && !app.map.hasLayer(named('B')), 'Letters visible above the 1 km scale');
+        app.map.setView([-35, 149], 13, { animate: false });
+        await settle();
+        assert(doc.querySelector('.leaflet-control-scale-line').textContent === '1 km', 'Unexpected wider-scale fixture');
+        assert(named('A').getTooltip() && app.map.hasLayer(named('B')) && named('B').getTooltip(), 'Letters missing at the 1 km scale');
         app.map.setView([-35, 149], 14, { animate: false });
         await settle();
+        assert(doc.querySelector('.leaflet-control-scale-line').textContent === '500 m', 'Unexpected close-scale fixture');
         assert(app.map.hasLayer(named('B')) && named('B').getTooltip(), 'Small overlapping polygon suppressed the label on a large polygon');
-        assert(app.map.hasLayer(named('K')) && named('K').getTooltip()?.getContent().style.fontSize === '9.6px', 'GCSTKM2-style label scale 0.6 was suppressed on a large polygon');
-        assert(app.map.hasLayer(named('E')), 'Letter immediately outside polygon not associated');
+        assert(named('B').options.opacity === 0 && named('B').options.fillOpacity === 0, 'Letter point rendered a substitute dot');
+        const scaledSize = Number.parseFloat(named('K').getTooltip()?.getContent().style.fontSize);
+        assert(app.map.hasLayer(named('K')) && scaledSize >= 8 && scaledSize <= 9.6, 'GCSTKM2-style label scale 0.6 was suppressed or enlarged on a large polygon');
+        assert(!app.map.hasLayer(named('E')), 'Letter outside polygon can encroach on its neighbour');
         assert(!app.map.hasLayer(named('F')), 'Distant letter associated with unrelated polygon');
         assert(!app.map.hasLayer(named('1')), 'Letter shown over a tiny polygon');
         const text = named('B').getTooltip().getContent();
@@ -2181,9 +2447,101 @@
         named('A').setLatLngs([[-35.15, 148.85], [-35.15, 149.15], [-34.85, 149.15], [-34.85, 148.85]]);
         app.map.setView([-35, 149], 10, { animate: false });
         await settle();
-        assert(app.map.hasLayer(named('B')) && named('B').getTooltip(), 'Large-polygon label missing at zoom 10');
-        assert(Number.parseFloat(named('B').getTooltip().getContent().style.fontSize) <= 12, 'Zoom-10 label exceeds size cap');
+        assert(!named('A').getTooltip() && !app.map.hasLayer(named('B')), 'Large polygon bypassed the 1 km label threshold');
         assert(layer.group.toGeoJSON().features.length === 8, 'Label suppression discarded data');
+        named('A').setLatLngs([[-35.0025, 148.9975], [-35.0025, 149.0025], [-34.9975, 149.0025], [-34.9975, 148.9975]]);
+        named('E').setLatLng([-35, 149.00245]);
+        app.map.setView([-35, 149], 15, { animate: false });
+        await settle();
+        const closeFont = Number.parseFloat(named('B').getTooltip().getContent().style.fontSize);
+        app.map.setView([-35, 149], 14, { animate: false });
+        await settle();
+        const wideFont = Number.parseFloat(named('B').getTooltip().getContent().style.fontSize);
+        const polygonBounds = named('A').getBounds();
+        const northWest = app.map.latLngToContainerPoint(polygonBounds.getNorthWest());
+        const southEast = app.map.latLngToContainerPoint(polygonBounds.getSouthEast());
+        assert(wideFont >= 8 && wideFont < closeFont, 'Letter did not shrink as its polygon became smaller');
+        assert(wideFont <= Math.min(southEast.x - northWest.x, southEast.y - northWest.y) * .18 + .01, 'Letter exceeds 18% of the polygon size');
+        assert(!app.map.hasLayer(named('E')), 'Letter near the polygon edge rendered without enough clearance');
+        const labelRect = named('B').getTooltip().getContent().getBoundingClientRect();
+        const mapRect = app.map.getContainer().getBoundingClientRect();
+        assert(labelRect.left >= mapRect.left + northWest.x && labelRect.right <= mapRect.left + southEast.x && labelRect.top >= mapRect.top + northWest.y && labelRect.bottom <= mapRect.top + southEast.y, 'Letter extends outside polygon bounds');
+        app.map.setView([-35, 149], 15, { animate: false });
+        await settle();
+        assert(Number.parseFloat(named('B').getTooltip().getContent().style.fontSize) === closeFont, 'Zooming back in did not restore the letter size');
+      }));
+      await test('Compact original KML letters remain visible at 500 m and 1 km without overlapping', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        await app.handleFiles([jsonFile(collection([point()]), 'compact-labels.geojson')]);
+        app.map.stop();
+        app.map.options.zoomAnimation = false;
+        const features = ['A', 'B', 'C', 'D'].map(name => ({
+          ...point({ name }), kml: { folderIds: [] },
+          style: { 'icon-scale': 0, 'label-scale': name === 'C' ? 0 : .6, 'label-opacity': name === 'D' ? 0 : 1 },
+        }));
+        const layer = app.createLayer({ name: 'Source text points', features, fields: ['name'], format: 'kml' });
+        const leaves = layer.group.getLayers();
+        const fonts = [];
+        for (const zoom of [14, 13]) {
+          app.map.setView([-35, 149], zoom, { animate: false });
+          const mapRect = app.map.getContainer().getBoundingClientRect();
+          const workspace = doc.getElementById('workspace').getBoundingClientRect();
+          const bottom = doc.getElementById('splitter').getBoundingClientRect().top - mapRect.top;
+          const anchor = app.map.containerPointToLatLng([(workspace.left - mapRect.left + mapRect.width) / 2, bottom / 2]);
+          leaves.forEach(leaf => leaf.setLatLng(anchor));
+          app.map.fire('moveend');
+          await new Promise(resolve => host.setTimeout(resolve, 120));
+          assert(doc.querySelector('.leaflet-control-scale-line').textContent === (zoom === 14 ? '500 m' : '1 km'), 'Unexpected compact-label scale');
+          const labels = leaves.slice(0, 2).map(leaf => leaf.getTooltip());
+          assert(labels.every(Boolean), 'Explicit zero-icon source labels suppressed without a large polygon');
+          const visible = labels.filter(label => label.getElement().style.visibility !== 'hidden');
+          assert(visible.length === 1, 'Colliding source letters overlap or both disappear');
+          const font = Number.parseFloat(visible[0].getContent().style.fontSize);
+          assert(font >= 6 && font <= 9.6, 'Compact label is too small or oversized');
+          fonts.push(font);
+          assert(!leaves[2].getTooltip() && !leaves[3].getTooltip(), 'Explicitly hidden source labels became visible');
+          assert(leaves.every(leaf => leaf.options.opacity === 0 && leaf.options.fillOpacity === 0), 'Letter dots became visible');
+        }
+        assert(fonts[0] > fonts[1], 'Source letters did not shrink toward the 1 km scale');
+        app.map.setView([-35, 149], 12, { animate: false });
+        await new Promise(resolve => host.setTimeout(resolve, 120));
+        assert(!app.map.hasLayer(leaves[0]) && !app.map.hasLayer(leaves[1]), 'Compact source labels visible beyond 1 km');
+      }));
+      await test('Five and ten kilometre scales retain geometry without letter clutter', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        await app.handleFiles([jsonFile(collection([point()]), 'overview.geojson')]);
+        app.map.stop();
+        app.map.options.zoomAnimation = false;
+        const features = Array.from({ length: 10001 }, (_, index) => point({ id: index }));
+        features.push(
+          { ...point({ name: 'B' }), kml: { folderIds: [] } },
+          { ...point({ name: 'C' }), kml: { folderIds: [] }, style: { 'label-scale': 0, 'icon-scale': 0 } },
+          { ...point({ name: 'Hidden' }), style: { visibility: false }, kml: { folderIds: ['hidden'] } },
+          { type: 'Feature', properties: { name: 'A' }, kml: { folderIds: [] }, geometry: { type: 'Polygon', coordinates: [[[148.99999, -35.00001], [149.00001, -35.00001], [149.00001, -34.99999], [148.99999, -35.00001]]] } },
+        );
+        const layer = app.createLayer({ name: 'Overview elements', format: 'kml', fields: ['id', 'name'], features,
+          kmlFolders: [{ id: 'hidden', parentId: null, name: 'Hidden', visible: false, expanded: false }],
+        });
+        for (const zoom of [10, 11]) {
+          app.map.setView([-35, 149], zoom, { animate: false });
+          await new Promise((resolve, reject) => {
+            const started = Date.now();
+            const check = () => {
+              if (layer.displayed.size === 10002) resolve();
+              else if (Date.now() - started > 10000) reject(new Error(`Missing overview features at zoom ${zoom}: ${layer.displayed.size}`));
+              else host.setTimeout(check, 50);
+            };
+            check();
+          });
+          const scale = doc.querySelector('.leaflet-control-scale-line').textContent;
+          assert(scale === (zoom === 10 ? '10 km' : '5 km'), `Unexpected fixture scale: ${scale}`);
+          const leaves = layer.group.getLayers();
+          const named = name => leaves.find(leaf => leaf.feature.properties.name === name);
+          assert(!app.map.hasLayer(named('B')) && !named('B').getTooltip(), 'Letter point visible at overview scale');
+          assert(app.map.hasLayer(named('A')) && !named('A').getTooltip(), 'Overview polygon hidden or its letter still visible');
+          assert(!named('C').getTooltip() && named('C').options.fillOpacity === 0, 'Explicit zero-scale styling ignored');
+          assert(!app.map.hasLayer(named('Hidden')), 'Hidden folder became visible');
+        }
       }));
       await test('Geometry previews have a separate column and four-digit row actions fit', () => withEditor(async (host, doc) => {
         const app = host.__geoEditor;

@@ -577,8 +577,9 @@
 
   function pointRadius(leaf) {
     const name = String(leaf.feature?.properties?.name ?? '').trim();
-    if (!leaf.feature?.kml || [...name].length !== 4) return 3;
-    return Math.max(1, Math.min(2, (map.getZoom() + 4) / 10));
+    const radius = !leaf.feature?.kml || [...name].length !== 4 ? 3 : Math.max(1, Math.min(2, (map.getZoom() + 4) / 10));
+    const scale = Number(leaf.feature?.style?.['icon-scale'] ?? 1);
+    return radius * (Number.isFinite(scale) && scale >= 0 ? scale : 1);
   }
 
   function singleCharacterLabel(leaf) {
@@ -587,9 +588,16 @@
   }
 
   function polygonLabelSize(leaf, nearby) {
-    if (map.getZoom() < 10) return 0;
+    const scale = Number(leaf.feature.style?.['label-scale'] ?? 1);
+    const distanceAcrossScale = mapScaleDistance();
+    if (distanceAcrossScale >= 2000) return 0;
     const point = isPointLeaf(leaf) ? map.latLngToContainerPoint(leaf.getLatLng()) : null;
+    if (point && Number(leaf.feature.style?.['icon-scale']) === 0) {
+      const zoomLimit = Math.max(6, Math.min(12, 12 * Math.sqrt(250 / distanceAcrossScale)));
+      return Math.min(zoomLimit, 16 * (Number.isFinite(scale) ? scale : 1));
+    }
     let best = null;
+    let bestFit = 0;
     let bestDistance = Infinity;
     const polygons = leaf instanceof L.Polygon ? [leaf] : nearby.get(`${Math.floor(point.x / 128)},${Math.floor(point.y / 128)}`) || [];
     polygons.forEach(polygon => {
@@ -599,22 +607,30 @@
       const distance = point ? Math.hypot(Math.max(start.x - point.x, 0, point.x - end.x), Math.max(start.y - point.y, 0, point.y - end.y)) : 0;
       const size = Math.min(end.x - start.x, end.y - start.y);
       if (size < 24) return;
-      if (distance <= 24 && (distance < bestDistance || (distance === bestDistance && size < best))) {
+      const clearance = point ? Math.min(point.x - start.x, end.x - point.x, point.y - start.y, end.y - point.y) : Infinity;
+      const fit = Math.min(size * .18, clearance * 2 / 1.2);
+      if (fit < 8) return;
+      if (distance === 0 && (distance < bestDistance || (distance === bestDistance && size < best))) {
         best = size;
+        bestFit = fit;
         bestDistance = distance;
       }
     });
     if (best < 24) return 0;
-    const scale = Number(leaf.feature.style?.['label-scale'] ?? 1);
-    const size = Math.min(12, 16 * (Number.isFinite(scale) ? scale : 1), best / 3);
+    const zoomLimit = Math.max(8, Math.min(12, 12 * Math.sqrt(250 / distanceAcrossScale)));
+    const size = Math.min(zoomLimit, 16 * (Number.isFinite(scale) ? scale : 1), bestFit);
     return size >= 8 ? size : 0;
   }
 
-  function polygonLabelIndex(polygons) {
+  const DISPLAY_CHECKPOINT_INTERVAL = 64;
+  const DISPLAY_FRAME_BUDGET = 12;
+
+  function* polygonLabelIndex(polygons) {
     const nearby = new Map();
+    let checkpoints = 0;
     if (map.getZoom() < 10) return nearby;
     const viewport = map.getSize();
-    polygons.forEach(polygon => {
+    for (const polygon of polygons) {
       const bounds = polygon.getBounds();
       const start = map.latLngToContainerPoint(bounds.getNorthWest());
       const end = map.latLngToContainerPoint(bounds.getSouthEast());
@@ -629,11 +645,17 @@
           nearby.get(key).push(polygon);
         }
       }
-    });
+      if (++checkpoints % DISPLAY_CHECKPOINT_INTERVAL === 0) yield;
+    }
     return nearby;
   }
 
-  function updateKmlLabel(leaf) {
+  function siteLabelSize() {
+    const size = Math.max(7, Math.min(14, 14 * Math.pow(500 / mapScaleDistance(), .16)));
+    return Math.round(size * 10) / 10;
+  }
+
+  function updateKmlLabel(leaf, siteFontSize = null) {
     if (!leaf.feature?.kml) return;
     const name = String(leaf.feature.properties.name ?? '').trim();
     const style = leaf.feature.style || {};
@@ -647,7 +669,7 @@
     const single = singleCharacterLabel(leaf);
     const site = isPointLeaf(leaf) && [...name].length === 4;
     if (!name || scale <= 0 || opacity <= 0 || (single && !leaf._kmlLabelSize)) { leaf.unbindTooltip(); return; }
-    const fontSize = site ? 14 : single ? leaf._kmlLabelSize : Math.min(256, 16 * (Number.isFinite(scale) ? scale : 1));
+    const fontSize = site ? siteFontSize ?? siteLabelSize() : single ? leaf._kmlLabelSize : Math.min(256, 16 * (Number.isFinite(scale) ? scale : 1));
     const centered = !site && (!isPointLeaf(leaf) || kmlLabelOnly(leaf));
     const alpha = Number.isFinite(opacity) ? Math.max(0, Math.min(1, opacity)) : 1;
     const labelKey = JSON.stringify([name, style['label-color'] || '#ffffff', fontSize, centered, site, alpha]);
@@ -678,7 +700,8 @@
     }
   }
 
-  function placeSiteLabels(lyr) {
+  function* placeSiteLabels(lyr) {
+    let checkpoints = 0;
     const mapRect = map.getContainer().getBoundingClientRect();
     const workspace = $('workspace').getBoundingClientRect();
     const area = {
@@ -695,15 +718,20 @@
       }
       return keys;
     };
-    const sites = [...lyr.displayed].filter(leaf => isPointLeaf(leaf) && leaf.getTooltip()?.options.className.includes('kml-site-label'));
+    const sites = [];
+    for (const leaf of lyr.displayed) {
+      if (isPointLeaf(leaf) && leaf.getTooltip()?.options.className.includes('kml-site-label')) sites.push(leaf);
+      if (++checkpoints % DISPLAY_CHECKPOINT_INTERVAL === 0) yield;
+    }
     sites.sort((first, second) => Number(second === state.selected) - Number(first === state.selected));
-    const measured = sites.map(leaf => {
+    const measured = [];
+    for (const leaf of sites) {
       const tooltip = leaf.getTooltip();
       const element = tooltip.getElement();
-      if (!element || !map.hasLayer(tooltip)) return null;
-      return { leaf, tooltip, element, point: map.latLngToContainerPoint(leaf.getLatLng()), width: element.offsetWidth, height: element.offsetHeight };
-    }).filter(Boolean);
-    measured.forEach(({ leaf, tooltip, element, point, width, height }) => {
+      if (element && map.hasLayer(tooltip)) measured.push({ leaf, tooltip, element, point: map.latLngToContainerPoint(leaf.getLatLng()), width: element.offsetWidth, height: element.offsetHeight });
+      yield true;
+    }
+    for (const { leaf, tooltip, element, point, width, height } of measured) {
       const choices = [
         { direction: 'top', offset: [0, -4], left: point.x - width / 2, top: point.y - height - 10 },
         { direction: 'right', offset: [4, 0], left: point.x + 10, top: point.y - height / 2 },
@@ -718,7 +746,7 @@
       }) || (leaf === state.selected ? choices[0] : null);
       const visibility = placement ? '' : 'hidden';
       if (element.style.visibility !== visibility) element.style.visibility = visibility;
-      if (!placement) return;
+      if (!placement) { yield true; continue; }
       const offset = L.point(placement.offset);
       if (tooltip.options.direction !== placement.direction || !tooltip.options.offset.equals(offset)) {
         tooltip.options.direction = placement.direction;
@@ -730,17 +758,50 @@
         if (!occupied.has(key)) occupied.set(key, []);
         occupied.get(key).push(rectangle);
       });
-    });
+      yield true;
+    }
+    const letters = [];
+    for (const leaf of lyr.displayed) {
+      const element = singleCharacterLabel(leaf) && leaf.getTooltip()?.getElement();
+      if (element) {
+        const bounds = element.getBoundingClientRect();
+        letters.push({ element, rectangle: { left: bounds.left - mapRect.left - 1, top: bounds.top - mapRect.top - 1,
+          right: bounds.right - mapRect.left + 1, bottom: bounds.bottom - mapRect.top + 1 } });
+      }
+      if (element || ++checkpoints % DISPLAY_CHECKPOINT_INTERVAL === 0) yield !!element;
+    }
+    for (const { element, rectangle } of letters) {
+      const visible = rectangle.left >= area.left && rectangle.right <= area.right && rectangle.top >= area.top && rectangle.bottom <= area.bottom &&
+        cells(rectangle).every(key => (occupied.get(key) || []).every(other =>
+          rectangle.right <= other.left || rectangle.left >= other.right || rectangle.bottom <= other.top || rectangle.top >= other.bottom));
+      element.style.visibility = visible ? '' : 'hidden';
+      if (!visible) { yield true; continue; }
+      cells(rectangle).forEach(key => {
+        if (!occupied.has(key)) occupied.set(key, []);
+        occupied.get(key).push(rectangle);
+      });
+      yield true;
+    }
   }
 
   function kmlLeafVisible(lyr, leaf) {
-    return lyr.visible && String(leaf.feature?.style?.visibility ?? '1') !== '0' &&
+    return lyr.visible && leaf.feature?.style?.visibility !== false && String(leaf.feature?.style?.visibility ?? '1') !== '0' &&
       (leaf.feature?.kml?.folderIds || []).every(id => lyr.kmlFolderMap.get(id)?.visible !== false);
   }
 
   function displayLimit() {
     const zoom = map.getZoom();
     return zoom <= 5 ? 1000 : zoom <= 8 ? 2000 : zoom <= 11 ? 10000 : zoom <= 14 ? 10000 : 20000;
+  }
+
+  function mapScaleDistance() {
+    const middle = map.getSize().y / 2;
+    return map.distance(map.containerPointToLatLng([0, middle]), map.containerPointToLatLng([scaleControl.options.maxWidth, middle]));
+  }
+
+  function fullDetailScale() {
+    const distance = mapScaleDistance();
+    return distance >= 5000 && distance < 20000;
   }
 
   function uncoveredMapBounds() {
@@ -819,29 +880,42 @@
     return preferred;
   }
 
-  function folderDisplaySelection(lyr, all, limit, bounds) {
+  function* folderDisplaySelection(lyr, all, limit, bounds) {
+    const zoom = map.getZoom();
+    const retain = lyr.displaySampleZoom === zoom;
     const featureFolders = lyr.spatialCache?.version === lyr.spatialVersion ? lyr.spatialCache.featureFolders :
       new Set(all.map(leaf => leaf.feature?.kml?.folderIds?.at(-1)).filter(Boolean));
     const groups = new Map();
-    all.forEach(leaf => {
-      if (!kmlLeafVisible(lyr, leaf) || !leafIntersectsBounds(leaf, bounds)) return;
-      const folderIds = leaf.feature?.kml?.folderIds || [];
-      const key = folderIds.find(id => featureFolders.has(id)) ?? leaf;
-      if (!groups.has(key)) groups.set(key, { leaves: [], pinned: false });
-      const group = groups.get(key);
-      group.leaves.push(leaf);
-      group.pinned ||= leaf === state.selected || leaf._displayEditing;
-    });
+    let checkpoints = 0;
+    for (const leaf of all) {
+      if (kmlLeafVisible(lyr, leaf) && leafIntersectsBounds(leaf, bounds)) {
+        const folderIds = leaf.feature?.kml?.folderIds || [];
+        const key = folderIds.find(id => featureFolders.has(id)) ?? leaf;
+        if (!groups.has(key)) groups.set(key, { leaves: [], pinned: false, retained: false });
+        const group = groups.get(key);
+        group.leaves.push(leaf);
+        group.pinned ||= leaf === state.selected || leaf._displayEditing;
+        group.retained ||= retain && lyr.displayed.has(leaf);
+      }
+      if (++checkpoints % DISPLAY_CHECKPOINT_INTERVAL === 0) yield;
+    }
     const candidates = [...groups.values()];
     const chosen = new Set(candidates.filter(group => group.pinned).slice(0, limit));
+    candidates.filter(group => group.retained && !chosen.has(group)).slice(0, limit - chosen.size).forEach(group => chosen.add(group));
     const remaining = candidates.filter(group => !chosen.has(group));
     const count = Math.min(limit - chosen.size, remaining.length);
     for (let index = 0; index < count; index++) chosen.add(remaining[Math.floor(index * remaining.length / count)]);
-    return new Set([...chosen].flatMap(group => group.leaves));
+    const desired = new Set();
+    for (const group of chosen) for (const leaf of group.leaves) {
+      desired.add(leaf);
+      if (++checkpoints % DISPLAY_CHECKPOINT_INTERVAL === 0) yield;
+    }
+    return desired;
   }
 
   async function requestSpatialDisplay(lyr) {
     const request = lyr.spatialRequest = (lyr.spatialRequest || 0) + 1;
+    lyr.spatialPending = request;
     const version = lyr.spatialVersion;
     try {
       let cache = lyr.spatialCache;
@@ -872,65 +946,152 @@
       syncLayerDisplay(lyr, indices.map(index => cache.leaves[index]));
     } catch (error) {
       if (request === lyr.spatialRequest && map.hasLayer(lyr.group)) syncLayerDisplay(lyr, leavesOf(lyr));
+    } finally {
+      if (lyr.spatialPending === request) lyr.spatialPending = null;
     }
   }
 
+  const pendingLayerDisplays = new Set();
+  let layerDisplayFrame = null;
+
+  function cancelLayerDisplay(lyr) {
+    pendingLayerDisplays.delete(lyr.displayJob);
+    lyr.displayJob = null;
+    if (!pendingLayerDisplays.size && layerDisplayFrame !== null) {
+      cancelAnimationFrame(layerDisplayFrame);
+      layerDisplayFrame = null;
+    }
+  }
+
+  function flushLayerDisplays() {
+    layerDisplayFrame = null;
+    const started = performance.now();
+    for (const job of pendingLayerDisplays) {
+      const { lyr, steps, request, version } = job;
+      if (lyr.displayJob !== job || request !== lyr.spatialRequest || version !== lyr.spatialVersion || panelResizeActive || !map.hasLayer(lyr.group)) {
+        pendingLayerDisplays.delete(job);
+        if (lyr.displayJob === job) lyr.displayJob = null;
+        continue;
+      }
+      let result;
+      try {
+        do {
+          result = steps.next();
+          if (result.done) break;
+          if (performance.now() - started >= DISPLAY_FRAME_BUDGET) break;
+        } while (true);
+      } catch (error) {
+        cancelLayerDisplay(lyr);
+        if (pendingLayerDisplays.size) layerDisplayFrame = requestAnimationFrame(flushLayerDisplays);
+        throw error;
+      }
+      pendingLayerDisplays.delete(job);
+      if (result.done) lyr.displayJob = null;
+      else pendingLayerDisplays.add(job);
+      if (performance.now() - started >= DISPLAY_FRAME_BUDGET) break;
+    }
+    if (pendingLayerDisplays.size) layerDisplayFrame = requestAnimationFrame(flushLayerDisplays);
+  }
+
   function syncLayerDisplay(lyr, indexed = null) {
+    cancelLayerDisplay(lyr);
     if (!map.hasLayer(lyr.group) || lyr.importing) return;
     if (!indexed && lyr.featureCount >= 2000) {
-      const cached = !!lyr.spatialCache;
       requestSpatialDisplay(lyr);
-      if (cached) return;
+      return;
     }
     const all = indexed || leavesOf(lyr);
-    const limit = displayLimit();
+    const steps = layerDisplaySteps(lyr, all);
+    if (Math.max(all.length, lyr.displayed.size) < 2000) {
+      while (!steps.next().done) {}
+      return;
+    }
+    const job = { lyr, steps, request: lyr.spatialRequest, version: lyr.spatialVersion };
+    lyr.displayJob = job;
+    pendingLayerDisplays.add(job);
+    if (layerDisplayFrame === null) layerDisplayFrame = requestAnimationFrame(flushLayerDisplays);
+  }
+
+  function* layerDisplaySteps(lyr, all) {
+    const siteFontSize = siteLabelSize();
+    let checkpoints = 0;
+    const fullDetail = fullDetailScale();
+    const limit = fullDetail ? Infinity : displayLimit();
     const grouped = lyr.kmlFolders.length > 0;
     const bounds = uncoveredMapBounds();
     const pinned = [];
     const candidates = [[], [], []];
-    if (!grouped) all.forEach(leaf => {
-      if (!kmlLeafVisible(lyr, leaf) || !leafIntersectsBounds(leaf, bounds)) return;
-      if (leaf === state.selected || leaf._displayEditing) { pinned.push(leaf); return; }
-      candidates[leaf instanceof L.Polygon ? 0 : isPointLeaf(leaf) ? 2 : 1].push(leaf);
-    });
-    const desired = grouped ? folderDisplaySelection(lyr, all, limit, bounds) : new Set(pinned.slice(0, limit));
+    if (!grouped) for (const leaf of all) {
+      if (kmlLeafVisible(lyr, leaf) && leafIntersectsBounds(leaf, bounds)) {
+        if (leaf === state.selected || leaf._displayEditing) pinned.push(leaf);
+        else candidates[leaf instanceof L.Polygon ? 0 : isPointLeaf(leaf) ? 2 : 1].push(leaf);
+      }
+      if (++checkpoints % DISPLAY_CHECKPOINT_INTERVAL === 0) yield;
+    }
+    const desired = grouped ? yield* folderDisplaySelection(lyr, all, limit, bounds) : new Set(pinned.slice(0, limit));
     if (!grouped && candidates[0].length > limit - desired.size) {
       isolatedSitePolygons(lyr, candidates[0], limit - desired.size).forEach(leaf => desired.add(leaf));
     }
-    if (!grouped) candidates.slice(0, 2).forEach(items => {
+    if (!grouped) for (const items of candidates.slice(0, 2)) {
       const remaining = items.filter(leaf => !desired.has(leaf));
       const count = Math.min(limit - desired.size, remaining.length);
-      for (let index = 0; index < count; index++) desired.add(remaining[Math.floor(index * remaining.length / count)]);
-    });
+      for (let index = 0; index < count; index++) {
+        desired.add(remaining[Math.floor(index * remaining.length / count)]);
+        if (++checkpoints % DISPLAY_CHECKPOINT_INTERVAL === 0) yield;
+      }
+    }
     const needsNearby = (grouped && [...desired].some(singleCharacterLabel)) || pinned.some(leaf => isPointLeaf(leaf) && singleCharacterLabel(leaf)) ||
       (desired.size < limit && candidates[2].some(singleCharacterLabel));
-    const nearby = needsNearby ? polygonLabelIndex([...desired].filter(leaf => leaf instanceof L.Polygon)) : new Map();
-    const points = candidates[2].filter(leaf => {
-      if (!singleCharacterLabel(leaf)) return true;
-      leaf._kmlLabelSize = polygonLabelSize(leaf, nearby);
-      return leaf._kmlLabelSize > 0;
-    });
+    const nearby = needsNearby ? yield* polygonLabelIndex([...desired].filter(leaf => leaf instanceof L.Polygon)) : new Map();
+    const points = [];
+    for (const leaf of candidates[2]) {
+      if (singleCharacterLabel(leaf) && kmlLabelOnly(leaf)) {
+        leaf._kmlLabelSize = polygonLabelSize(leaf, nearby);
+        if (leaf._kmlLabelSize > 0) points.push(leaf);
+      } else points.push(leaf);
+      if (++checkpoints % DISPLAY_CHECKPOINT_INTERVAL === 0) yield;
+    }
     const pointCount = grouped ? 0 : Math.min(limit - desired.size, points.length);
-    for (let index = 0; index < pointCount; index++) desired.add(points[Math.floor(index * points.length / pointCount)]);
-    desired.forEach(leaf => {
-      if (isPointLeaf(leaf) && leaf !== state.selected && leaf.options.radius !== pointRadius(leaf)) restyle(leaf);
+    for (let index = 0; index < pointCount; index++) {
+      desired.add(points[Math.floor(index * points.length / pointCount)]);
+      if (++checkpoints % DISPLAY_CHECKPOINT_INTERVAL === 0) yield;
+    }
+    for (const leaf of desired) {
+      let changed = false;
+      if (isPointLeaf(leaf) && leaf !== state.selected && leaf.options.radius !== pointRadius(leaf)) {
+        restyle(leaf);
+        changed = true;
+      }
       if (singleCharacterLabel(leaf)) {
+        changed ||= !!leaf.getTooltip();
         leaf._kmlLabelSize = polygonLabelSize(leaf, nearby);
         updateKmlLabel(leaf);
-        if (isPointLeaf(leaf) && !leaf._kmlLabelSize) desired.delete(leaf);
+        changed ||= !!leaf.getTooltip();
+        if (kmlLabelOnly(leaf) && !leaf._kmlLabelSize) desired.delete(leaf);
+      } else if (isPointLeaf(leaf) && [...String(leaf.feature?.properties?.name ?? '').trim()].length === 4) {
+        const previous = leaf._kmlLabelKey;
+        updateKmlLabel(leaf, siteFontSize);
+        changed ||= previous !== leaf._kmlLabelKey;
       }
-    });
-    lyr.displayed.forEach(leaf => {
-      if (!desired.has(leaf)) { map.removeLayer(leaf); lyr.displayed.delete(leaf); }
-    });
-    desired.forEach(leaf => {
-      if (!lyr.displayed.has(leaf)) { lyr.displayed.add(leaf); map.addLayer(leaf); }
-    });
-    placeSiteLabels(lyr);
-    lyr.displayed.forEach(leaf => {
+      if (changed || ++checkpoints % DISPLAY_CHECKPOINT_INTERVAL === 0) yield changed;
+    }
+    for (const leaf of lyr.displayed) {
+      const removed = !desired.has(leaf);
+      if (removed) { map.removeLayer(leaf); lyr.displayed.delete(leaf); }
+      if (removed || ++checkpoints % DISPLAY_CHECKPOINT_INTERVAL === 0) yield removed;
+    }
+    for (const leaf of desired) {
+      const added = !lyr.displayed.has(leaf);
+      if (added) { lyr.displayed.add(leaf); map.addLayer(leaf); }
+      if (added || ++checkpoints % DISPLAY_CHECKPOINT_INTERVAL === 0) yield added;
+    }
+    yield* placeSiteLabels(lyr);
+    for (const leaf of lyr.displayed) {
       const label = leaf.getTooltip()?.getElement();
       if (label) label.style.zIndex = String(lyr.order || 0);
-    });
+      if (++checkpoints % DISPLAY_CHECKPOINT_INTERVAL === 0) yield;
+    }
+    lyr.displaySampleZoom = map.getZoom();
   }
 
   function syncLayerOrder() {
@@ -956,6 +1117,10 @@
   let displayRefreshTimer = null;
   let panelResizeActive = false;
   function scheduleMapDisplay() {
+    state.layers.forEach(lyr => {
+      lyr.spatialRequest = (lyr.spatialRequest || 0) + 1;
+      cancelLayerDisplay(lyr);
+    });
     if (panelResizeActive) return;
     if (displayRefreshTimer !== null) return;
     displayRefreshTimer = setTimeout(() => {
@@ -964,6 +1129,10 @@
     }, 32);
   }
   map.on('moveend zoomend resize', scheduleMapDisplay);
+  map.on('movestart zoomstart', () => state.layers.forEach(lyr => {
+    lyr.spatialRequest = (lyr.spatialRequest || 0) + 1;
+    cancelLayerDisplay(lyr);
+  }));
 
   function configureLayerDisplay(lyr) {
     const group = lyr.group;
@@ -971,7 +1140,9 @@
     lyr.spatialVersion = 0;
     group.onAdd = () => syncLayerDisplay(lyr);
     group.onRemove = () => {
+      cancelLayerDisplay(lyr);
       lyr.spatialRequest = (lyr.spatialRequest || 0) + 1;
+      lyr.spatialPending = null;
       lyr.spatialCache = null;
       SpatialQueries.release(lyr.id);
       lyr.displayed.forEach(leaf => map.removeLayer(leaf));
@@ -1025,7 +1196,8 @@
       const radius = pointRadius(leaf);
       style = {
         radius: selected ? 9 : radius, color: selected ? '#facc15' : '#ffffff', weight: selected ? 3 : radius / 4,
-        fillColor: st['marker-color'] || st['icon-color'] || lyr.color, fillOpacity: 0.95, opacity: 1, fill: true,
+        fillColor: st['marker-color'] || st['icon-color'] || lyr.color,
+        fillOpacity: num(st['icon-opacity'], 0.95), opacity: num(st['icon-opacity'], 1), fill: true,
       };
     } else if (leaf instanceof L.Polygon) {
       style = {
@@ -1045,6 +1217,7 @@
       style.weight = selected ? 3 : 0;
     }
     leaf.setStyle(style);
+    if (point && leaf.getRadius() !== style.radius) leaf.setRadius(style.radius);
     updateKmlLabel(leaf);
   }
 
@@ -1223,7 +1396,7 @@
     return polygons;
   }
 
-  async function applyLayerMask(lyr, polygons, name, exclude = false) {
+  async function applyLayerMask(lyr, polygons, name, exclude = false, preserve = true, scope = 'visible') {
     const dialog = $('maskProgressDlg');
     const progress = $('maskProgressBar');
     const status = $('maskProgressStatus');
@@ -1248,13 +1421,13 @@
     try {
       await new Promise(resolve => setTimeout(resolve, 0));
       if (cancelled) return null;
-      const source = lyr.group.toGeoJSON(false).features;
+      const source = leavesOf(lyr).filter(leaf => scope === 'all' || kmlLeafVisible(lyr, leaf)).map(leaf => leaf.toGeoJSON(false));
       progress.max = source.length || 1;
       const report = count => {
         progress.value = count;
         status.textContent = `${count} / ${source.length} ${source.length === 1 ? 'feature' : 'features'}`;
       };
-      const features = await BackgroundTasks.run('mask', { polygons, features: source, exclude }, {
+      const features = await BackgroundTasks.run('mask', { polygons, features: source, exclude, preserve }, {
         signal: controller.signal, onProgress: report,
         fallback: async () => {
           const mask = LayerMask.combine(polygons);
@@ -1262,7 +1435,7 @@
           let sliceStart = performance.now();
           for (let index = 0; index < source.length; index++) {
             controller.signal.throwIfAborted();
-            const clipped = LayerMask.clip(source[index], mask, exclude);
+            const clipped = preserve ? LayerMask.filter(source[index], mask, exclude) : LayerMask.clip(source[index], mask, exclude);
             if (clipped) result.push(clipped);
             if (performance.now() - sliceStart >= 8 || index === source.length - 1) {
               report(index + 1);
@@ -1314,10 +1487,15 @@
       { key: 'name', label: 'Output layer name', value: `${lyr.name} (masked)`, required: true },
       { key: 'mode', label: 'Mask operation', type: 'select', value: 'retain',
         options: [['retain', 'Retain inside mask'], ['exclude', 'Exclude inside mask']] },
+      { key: 'geometry', label: 'Feature geometry', type: 'select', value: 'preserve',
+        options: [['preserve', 'Keep whole original features'], ['clip', 'Clip geometry at mask boundary']] },
+      { key: 'scope', label: 'Source features', type: 'select', value: 'visible',
+        options: [['visible', 'Visible folders and features'], ['all', 'All stored features']] },
     ], { okLabel: 'Continue' });
     if (!values || !values.name.trim()) return;
     const name = values.name.trim();
     const exclude = values.mode === 'exclude';
+    const preserve = values.geometry !== 'clip';
     if (values.source === 'draw') {
       map.closePopup();
       map.pm.disableDraw();
@@ -1325,12 +1503,12 @@
       if (map.pm.globalDragModeEnabled()) map.pm.disableGlobalDragMode();
       if (map.pm.globalRemovalModeEnabled()) map.pm.disableGlobalRemovalMode();
       if (map.pm.globalCutModeEnabled()) map.pm.disableGlobalCutMode();
-      pendingMask = { lyr, name, exclude };
+      pendingMask = { lyr, name, exclude, preserve, scope: values.scope };
       map.pm.enableDraw('Polygon', { snappable: true });
       return;
     }
     const source = sources.find(layer => String(layer.id) === values.source);
-    await applyLayerMask(lyr, selected && values.source === 'selected' ? [selected] : maskPolygons(source), name, exclude);
+    await applyLayerMask(lyr, selected && values.source === 'selected' ? [selected] : maskPolygons(source), name, exclude, preserve, values.scope);
   }
 
   map.on('pm:drawend', () => { pendingMask = null; });
@@ -1464,6 +1642,7 @@
           link.rel = 'noopener noreferrer';
         });
       } else description.textContent = value;
+      description.classList.toggle('formatted', description.children.length > 0);
     };
     renderDescription();
     form.appendChild(description);
@@ -1500,9 +1679,9 @@
     const leaf = e.layer;
     map.removeLayer(leaf);
     if (pendingMask) {
-      const { lyr, name, exclude } = pendingMask;
+      const { lyr, name, exclude, preserve, scope } = pendingMask;
       pendingMask = null;
-      applyLayerMask(lyr, [leaf.toGeoJSON(false)], name, exclude);
+      applyLayerMask(lyr, [leaf.toGeoJSON(false)], name, exclude, preserve, scope);
       return;
     }
     leaf.options.renderer = vectorRenderer;
@@ -3159,18 +3338,20 @@
 
   function cleanFeatures(lyr) {
     return leavesOf(lyr).map((leaf) => {
-      const geometry = leaf.toGeoJSON(9).geometry;
+      const geometry = leaf.toGeoJSON(false).geometry;
       const props = {};
       lyr.fields.forEach((f) => {
         const v = leaf.feature.properties[f];
         props[f] = v === undefined ? null : v;
       });
-      return { type: 'Feature', properties: props, geometry, style: leaf.feature.style || {} };
+      return { type: 'Feature', properties: props, geometry, style: leaf.feature.style || {},
+        ...(leaf.feature.kml ? { kml: structuredClone(leaf.feature.kml) } : {}) };
     });
   }
 
   async function exportLayerFiles(lyr, fmt, base, shapefileOptions) {
-    const layer = { name: lyr.name, fields: lyr.fields, types: lyr.types, color: lyr.color, features: cleanFeatures(lyr) };
+    const layer = { name: lyr.name, fields: lyr.fields, types: lyr.types, color: lyr.color,
+      kmlFolders: structuredClone(lyr.kmlFolders), features: cleanFeatures(lyr) };
     const options = shapefileOptions ? { ...shapefileOptions, styles: undefined } : null;
     const job = { layer, format: fmt, base, options };
     const output = await BackgroundTasks.run('export', job, { fallback: () => ExportCore.generate(job) });

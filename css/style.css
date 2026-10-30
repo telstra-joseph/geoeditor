@@ -557,7 +557,11 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
 .popup-form input, .popup-form textarea { display: block; width: 100%; padding: 3px 6px; border: 1px solid #cbd5e1; border-radius: 4px; font-weight: 400; background: var(--surface); color: var(--ink); }
 .popup-form textarea { min-height: 67px; resize: vertical; }
 .popup-form summary { cursor: pointer; margin-bottom: 6px; }
-.feature-description { overflow: auto; overflow-wrap: anywhere; white-space: pre-wrap; margin-bottom: 10px; font-size: 13px; }
+.feature-description { max-height: min(180px, 30vh); overflow: auto; overflow-wrap: anywhere; white-space: pre-wrap; margin-bottom: 6px; font-size: 12px; line-height: 1.4; }
+.feature-description.formatted { white-space: normal; }
+.feature-description :is(p, h1, h2, h3, h4, h5, h6, ul, ol, dl, blockquote, pre) { margin-top: 4px; margin-bottom: 4px; }
+.feature-description > :first-child { margin-top: 0; }
+.feature-description > :last-child { margin-bottom: 0; }
 .feature-description table { border-collapse: collapse; white-space: normal; }
 .feature-description th, .feature-description td { border: 1px solid var(--table-line); padding: 4px 6px; text-align: left; }
 .feature-description pre { white-space: pre-wrap; }
@@ -610,7 +614,8 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
   button { min-width: 44px; min-height: 44px; font-size: 16px; }
   #sidebar h2 { font-size: 14px; }
   #layerList .lmeta, #layerList .kml-folder-count, #tableCount, .popup-form label { font-size: 14px; }
-  #layerList .kml-folder-name, .feature-description, #emptyUpload { font-size: 15px; }
+  #layerList .kml-folder-name, #emptyUpload { font-size: 15px; }
+  .feature-description { font-size: 13px; }
   #tableTitle, dialog p, dialog output, #aboutDlg p { font-size: 16px; }
   #filter, dialog :is(input, textarea, select), .popup-form :is(input, textarea) { font-size: 16px; }
   button .action-icon,
@@ -664,6 +669,59 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
   #tableActions .button-label { display: none; }
   #filter { display: none; }
   #pager { grid-column: 1 / -1; justify-self: end; margin-left: 0; }
+}
+
+@media (min-width: 761px) and (max-width: 1024px) {
+  body { font-size: 14px; }
+  button { min-width: 36px; min-height: 36px; font-size: 14px; }
+  #topbar { padding: 6px 10px; }
+  #main { --panel-left: 300px; }
+  #sidebar { flex-basis: 300px; padding: 8px; }
+  #sidebar.collapsed { flex-basis: 52px; }
+  #sidebarHeader { margin-bottom: 6px; }
+  #sidebar h2 { font-size: 12px; }
+  #layerList li { gap: 3px 6px; padding: 6px; }
+  #layerList .lmeta, #layerList .kml-folder-count, #tableCount, .popup-form label { font-size: 12px; }
+  #layerList .kml-folder-name, #emptyUpload { font-size: 13px; }
+  .feature-description { font-size: 12px; }
+  #tableTitle, dialog p, dialog output, #aboutDlg p { font-size: 14px; }
+  button .action-icon,
+  #tableBar button svg, table.attrs button svg, #aboutDlg .action-icon,
+  #map .leaflet-control-zoom svg, #map .leaflet-pm-toolbar svg, #map .leaflet-control-layers-toggle svg {
+    width: 18px; height: 18px; flex-basis: 18px;
+  }
+  #map .leaflet-pm-toolbar .control-icon { width: 18px; height: 18px; }
+  #btnTheme, #btnToggleLayers, #btnEditHelp, #headerActions > button,
+  .progress-cancel, #aboutDlg .about-close { width: 36px; height: 36px; flex-basis: 36px; }
+  #aboutDlg .about-feedback { min-height: 36px; }
+  #layerList .layer-reorder, #layerList .layer-rename, #layerList .lmeta button, #layerList .kml-folder-row button {
+    width: 32px; height: 32px; min-width: 32px; min-height: 32px; flex-basis: 32px;
+  }
+  #layerList .layer-reorder svg, #layerList .layer-rename svg, #layerList .lmeta button svg, #layerList .kml-folder-row button svg {
+    width: 16px; height: 16px; flex-basis: 16px;
+  }
+  #layerList .layer-actions { grid-template-columns: repeat(5, 32px); margin-top: 2px; }
+  #layerList input[type=checkbox], #layerList input[type=color] { width: 24px; height: 24px; }
+  #layerList input[type=checkbox]::after { width: 5px; height: 9px; border-width: 0 2px 2px 0; }
+  #layerList .kml-folder-row { grid-template-columns: 32px 24px minmax(0, 1fr) auto 32px; gap: 4px; min-height: 32px; }
+  #layerList .kml-folder-row > button:first-child { width: 32px; height: 32px; min-width: 32px; min-height: 32px; flex-basis: 32px; }
+  #layerList .kml-folder-row > button:first-child svg { width: 16px; height: 16px; flex-basis: 16px; }
+  #layerList .kml-folder-children { margin-left: 8px; }
+  #colourPopover button { width: 36px; height: 36px; min-width: 36px; min-height: 36px; }
+  #colourPopover input { height: 36px; }
+  #map .leaflet-control-zoom a, #map .leaflet-pm-toolbar .leaflet-buttons-control-button,
+  #map .leaflet-control-layers-toggle { width: 36px; height: 36px; }
+  #map .leaflet-pm-toolbar .leaflet-pm-actions-container .leaflet-pm-action { min-width: 36px; height: 36px; }
+  #map .leaflet-control-layers label { min-height: 36px; }
+  #map .leaflet-popup-close-button { width: 36px; height: 36px; font-size: 24px; }
+  table.attrs { --geometry-column-width: 148px; font-size: 13px; }
+  table.attrs .sort, table.attrs .x, table.attrs .rn-actions button { width: 32px; height: 32px; min-width: 32px; min-height: 32px; flex-basis: 32px; }
+  table.attrs .fname { min-height: 32px; }
+  table.attrs .geometry-preview { width: 22px; height: 22px; flex-basis: 22px; }
+  #tablePanel { min-height: 96px; }
+  #tableBar { grid-template-columns: minmax(0, 1fr) repeat(4, 36px); gap: 6px; }
+  #tableBar button { height: 36px; }
+  #tableActions > button { width: 36px; }
 }
 
 @media (max-width: 760px) {

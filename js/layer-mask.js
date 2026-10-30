@@ -47,5 +47,10 @@
     return { ...result, geometry };
   }
 
-  globalThis.LayerMask = { combine, clip };
+  function filter(feature, mask, exclude = false) {
+    if (!feature.geometry || turf.booleanIntersects(feature, mask) === exclude) return null;
+    return structuredClone(feature);
+  }
+
+  globalThis.LayerMask = { combine, clip, filter };
 })();

@@ -29,6 +29,7 @@
       }
       this._stage = new PIXI.Container();
       this._graphics = new Map();
+      this._polygonRings = new WeakMap();
       this._dirty = new Set();
       this._container = this._gpu.view;
       this._container.dataset.renderer = 'webgl';
@@ -54,6 +55,7 @@
       this._gpu.destroy(true);
       delete this._stage;
       delete this._graphics;
+      delete this._polygonRings;
       delete this._dirty;
       delete this._gpu;
       delete this._container;
@@ -135,6 +137,13 @@
     _updatePoly(layer, closed) {
       if (!this._gpu) return L.Canvas.prototype._updatePoly.call(this, layer, closed);
       if (!this._drawing) { this._dirty.add(layer); return; }
+      if (closed && this._polygonRings.get(layer) === layer._rings) {
+        const cached = this._graphics.get(L.stamp(layer));
+        if (cached) {
+          cached.visible = layer._parts.length > 0;
+          return;
+        }
+      }
       const graphic = this._graphic(layer);
       graphic.visible = layer._parts.length > 0;
       if (!graphic.visible) return;
@@ -157,6 +166,7 @@
         }
       }
       graphic.endFill();
+      if (closed) this._polygonRings.set(layer, layer._rings);
     },
 
     _updateCircle(layer) {
@@ -172,13 +182,17 @@
 
     _updateStyle(layer) {
       if (!this._layers?.[L.stamp(layer)]) return;
-      if (this._gpu) this._dirty.add(layer);
+      if (this._gpu) {
+        this._polygonRings.delete(layer);
+        this._dirty.add(layer);
+      }
       L.Canvas.prototype._updateStyle.call(this, layer);
     },
 
     _removePath(layer) {
       if (this._gpu) {
         this._dirty.delete(layer);
+        this._polygonRings.delete(layer);
         this._graphics.get(L.stamp(layer))?.destroy();
         this._graphics.delete(L.stamp(layer));
       }

@@ -1,8 +1,8 @@
 'use strict';
 
 const task = new URL(self.location.href).searchParams.get('task');
-if (task === 'mask') importScripts('../lib/turf.min.js', 'layer-mask.js');
-else if (task === 'export') importScripts('../lib/jszip.js', 'qgis-style.js', 'shapefile-writer.js', 'export-core.js');
+if (task === 'mask') importScripts('../lib/turf.min.js', 'layer-mask.js?revision=2');
+else if (task === 'export') importScripts('../lib/jszip.js', 'qgis-style.js', 'shapefile-writer.js', 'export-core.js?revision=2');
 else if (task === 'table') importScripts('table-core.js');
 else if (task === 'geometry') importScripts('../lib/turf.min.js', 'geometry-core.js');
 else if (task === 'session') importScripts('../lib/jszip.js', 'session-core.js');
@@ -34,12 +34,12 @@ self.onmessage = async event => {
       postMessage({ type: 'result', value }, buffers);
       return;
     }
-    const { polygons, features, exclude } = event.data.data;
+    const { polygons, features, exclude, preserve } = event.data.data;
     const mask = LayerMask.combine(polygons);
     const result = [];
     let reported = performance.now();
     features.forEach((feature, index) => {
-      const clipped = LayerMask.clip(feature, mask, exclude);
+      const clipped = preserve ? LayerMask.filter(feature, mask, exclude) : LayerMask.clip(feature, mask, exclude);
       if (clipped) result.push(clipped);
       if (performance.now() - reported >= 50 || index === features.length - 1) {
         postMessage({ type: 'progress', value: index + 1 });

@@ -41,10 +41,16 @@
       const appearance = { stroke: layer.color, fill: layer.color, ...style, 'marker-color': style['marker-color'] || style['icon-color'] || layer.color };
       let styleXml;
       if (feature.geometry.type === 'Point') {
-        styleXml = `<IconStyle><color>${kmlColor(appearance['marker-color'], 1)}</color><scale>1</scale><Icon><href>http://maps.google.com/mapfiles/kml/pushpin/wht-pushpin.png</href></Icon></IconStyle>`;
+        const offset = style['icon-offset'];
+        const units = style['icon-offset-units'] || ['fraction', 'fraction'];
+        const hotSpot = Array.isArray(offset) ? `<hotSpot x="${xmlEsc(offset[0])}" y="${xmlEsc(offset[1])}" xunits="${xmlEsc(units[0])}" yunits="${xmlEsc(units[1])}"/>` : '';
+        styleXml = `<IconStyle><color>${kmlColor(appearance['marker-color'], style['icon-opacity'] ?? 1)}</color><scale>${xmlEsc(style['icon-scale'] ?? 1)}</scale><Icon><href>${xmlEsc(style.icon || 'http://maps.google.com/mapfiles/kml/pushpin/wht-pushpin.png')}</href></Icon>${hotSpot}</IconStyle>`;
       } else {
-        styleXml = `<LineStyle><color>${kmlColor(appearance.stroke, appearance['stroke-opacity'])}</color><width>${Number(appearance['stroke-width']) || 2}</width></LineStyle>`;
+        styleXml = `<LineStyle><color>${kmlColor(appearance.stroke, appearance['stroke-opacity'])}</color><width>${Number(appearance['stroke-width'] ?? 2)}</width></LineStyle>`;
         if (/Polygon/.test(feature.geometry.type)) styleXml += `<PolyStyle><color>${kmlColor(appearance.fill, appearance['fill-opacity'] === undefined ? 0.4 : appearance['fill-opacity'])}</color></PolyStyle>`;
+      }
+      if (['label-color', 'label-opacity', 'label-scale'].some(key => key in style)) {
+        styleXml += `<LabelStyle><color>${kmlColor(style['label-color'] || '#ffffff', style['label-opacity'] ?? 1)}</color><scale>${xmlEsc(style['label-scale'] ?? 1)}</scale></LabelStyle>`;
       }
       if (!styles.has(styleXml)) styles.set(styleXml, 's' + (styles.size + 1));
       const value = field => feature.properties[field] == null ? '' : String(feature.properties[field]);
@@ -52,13 +58,35 @@
       return '<Placemark>' +
         (value('name') ? `<name>${xmlEsc(value('name'))}</name>` : '') +
         (value('description') ? `<description>${xmlEsc(value('description'))}</description>` : '') +
+        ('visibility' in style ? `<visibility>${style.visibility === false || String(style.visibility) === '0' ? 0 : 1}</visibility>` : '') +
         `<styleUrl>#${styles.get(styleXml)}</styleUrl>` +
         (extra.length ? '<ExtendedData>' + extra.map(field => `<Data name="${xmlEsc(field)}"><value>${xmlEsc(value(field))}</value></Data>`).join('') + '</ExtendedData>' : '') +
         kmlGeometry(feature.geometry) + '</Placemark>';
     });
+    const folders = new Map((layer.kmlFolders || []).map(folder => [folder.id, { folder, children: [], placemarks: [] }]));
+    const roots = [];
+    folders.forEach(node => {
+      const parent = folders.get(node.folder.parentId);
+      (parent ? parent.children : roots).push(node);
+    });
+    const ungrouped = [];
+    placemarks.forEach((placemark, index) => {
+      const folderId = [...(layer.features[index].kml?.folderIds || [])].reverse().find(id => folders.has(id));
+      (folders.get(folderId)?.placemarks || ungrouped).push(placemark);
+    });
+    const content = [...ungrouped];
+    const pending = roots.slice().reverse();
+    while (pending.length) {
+      const node = pending.pop();
+      if (typeof node === 'string') { content.push(node); continue; }
+      content.push(`<Folder><name>${xmlEsc(node.folder.name)}</name><visibility>${node.folder.visible === false ? 0 : 1}</visibility><open>${node.folder.expanded ? 1 : 0}</open>`);
+      node.placemarks.forEach(placemark => content.push(placemark));
+      pending.push('</Folder>');
+      for (let index = node.children.length - 1; index >= 0; index--) pending.push(node.children[index]);
+    }
     const styleXml = [...styles].map(([xml, id]) => `<Style id="${id}">${xml}</Style>`).join('');
     return '<?xml version="1.0" encoding="UTF-8"?>\n<kml xmlns="http://www.opengis.net/kml/2.2"><Document>' +
-      `<name>${xmlEsc(layer.name)}</name>${styleXml}${placemarks.join('')}</Document></kml>`;
+      `<name>${xmlEsc(layer.name)}</name>${styleXml}${content.join('')}</Document></kml>`;
   }
 
   async function pack(files) {
