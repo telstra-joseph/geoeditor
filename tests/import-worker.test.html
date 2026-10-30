@@ -1452,9 +1452,17 @@
             const label = [...control.querySelectorAll('label')].find(label => label.textContent.trim() === name);
             label.click();
             assert(label.querySelector('input').checked && control.querySelectorAll('input:checked').length === 1, `Selecting ${name} did not retain exclusive radio behavior`);
-            if (name === 'Hybrid') host.__geoEditor.map.eachLayer(layer => {
-              if (layer instanceof host.L.esri.Vector.VectorTileLayer) hybridReference = layer;
-            });
+            if (name === 'Hybrid') {
+              host.__geoEditor.map.eachLayer(layer => {
+                if (layer instanceof host.L.esri.Vector.VectorTileLayer) hybridReference = layer;
+              });
+              const referencePane = host.__geoEditor.map.getPane(hybridReference.options.pane);
+              const referenceStyle = host.getComputedStyle(referencePane);
+              const tileStyle = host.getComputedStyle(host.__geoEditor.map.getPane('tilePane'));
+              const geometryStyle = host.getComputedStyle(host.__geoEditor.map.getPane('overlayPane'));
+              assert(Number(referenceStyle.zIndex) > Number(tileStyle.zIndex) && Number(referenceStyle.zIndex) < Number(geometryStyle.zIndex), 'Hybrid road labels are not between imagery and editable geometry');
+              assert(referenceStyle.pointerEvents === 'none', 'Hybrid reference pane intercepts feature interactions');
+            }
           }
           const blank = [...control.querySelectorAll('label')].find(label => label.textContent.trim() === 'Blank').querySelector('input');
           blank.click();

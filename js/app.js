@@ -400,6 +400,9 @@
   const imagery = L.tileLayer(imageryUrl, {
     maxZoom: 19, attribution: 'Tiles &copy; Esri',
   });
+  const hybridReferencePane = map.createPane('hybridReference');
+  hybridReferencePane.style.zIndex = '250';
+  hybridReferencePane.style.pointerEvents = 'none';
   const HybridReference = L.esri.Vector.VectorTileLayer.extend({
     onAdd(map) {
       this._map = map;
@@ -414,7 +417,7 @@
   const hybrid = L.layerGroup([
     L.tileLayer(imageryUrl, { maxZoom: 19, attribution: 'Tiles &copy; Esri' }),
     new HybridReference('0769f07cc0c3453faec703e77dbb3459', {
-      pane: 'tilePane', attribution: 'Map data &copy; OpenStreetMap contributors, Microsoft, Esri',
+      pane: 'hybridReference', attribution: 'Map data &copy; OpenStreetMap contributors, Microsoft, Esri',
     }),
   ]);
   const blank = L.layerGroup();
