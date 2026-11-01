@@ -1621,16 +1621,16 @@
         const originalSetView = map.setView;
         let viewResets = 0;
         map.setView = function(...args) { viewResets++; return originalSetView.apply(this, args); };
-        let nativeElement = null;
+        let nativeRequests = 0;
         Object.defineProperty(doc, 'fullscreenEnabled', { configurable: true, value: true });
-        Object.defineProperty(doc, 'fullscreenElement', { configurable: true, get: () => nativeElement });
+        Object.defineProperty(doc, 'fullscreenElement', { configurable: true, get: () => null });
         container.requestFullscreen = async () => {
-          nativeElement = container;
-          doc.dispatchEvent(new host.Event('fullscreenchange'));
+          nativeRequests++;
+          throw new Error('Browser fullscreen must not be requested');
         };
         doc.exitFullscreen = async () => {
-          nativeElement = null;
-          doc.dispatchEvent(new host.Event('fullscreenchange'));
+          nativeRequests++;
+          throw new Error('Browser fullscreen must not be exited');
         };
         const settle = async () => {
           while (button.disabled) await new Promise(resolve => host.setTimeout(resolve, 20));
@@ -1640,6 +1640,7 @@
         const controlBounds = () => [...container.querySelectorAll('.leaflet-top, .leaflet-bottom')].map(element => ({ element, bounds: element.getBoundingClientRect() }));
         const assertFullscreenControlMotion = (before, anchorBefore) => {
           if (host.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+          doc.querySelectorAll('.toast').forEach(toast => toast.remove());
           const panelMotion = doc.getElementById('topbar').getAnimations().find(animation => animation.effect.getKeyframes().some(frame => 'transform' in frame));
           const motions = before.map(({ element }) => element.getAnimations().find(animation => animation.effect.getKeyframes().some(frame => 'transform' in frame)));
           assert(panelMotion && motions.every(animation => animation && animation.startTime === panelMotion.startTime && animation.effect.getTiming().duration === panelMotion.effect.getTiming().duration && animation.effect.getTiming().easing === panelMotion.effect.getTiming().easing), 'Fullscreen map controls do not share the editor panel clock and pacing');
@@ -1719,7 +1720,8 @@
           const entered = assertFullscreenControlMotion(entering, enteringAnchor);
           await settle();
           assertMapHandoff(entered);
-          assert(nativeElement === container && button.getAttribute('aria-pressed') === 'true', 'Native map fullscreen did not activate');
+          assert(container.classList.contains('map-fullscreen') && button.getAttribute('aria-pressed') === 'true', 'Viewport-only map mode did not activate');
+          assert(nativeRequests === 0 && !doc.fullscreenElement, 'Map-only mode engaged browser fullscreen');
           assert(button.querySelector('svg').innerHTML === host.lucide.createElement(host.lucide.icons.Minimize2).innerHTML, 'Fullscreen exit button is missing its diagonal collapse arrows');
           assert(host.getComputedStyle(doc.getElementById('topbar')).visibility === 'hidden', 'Editor header remains visible in fullscreen');
           const bounds = container.getBoundingClientRect();
@@ -1732,24 +1734,24 @@
           await settle();
           assertMapHandoff(exited);
           assert(viewResets === resetsBefore, 'Fullscreen resets the map view after resizing');
-          assert(!nativeElement && !container.classList.contains('map-fullscreen') && doc.activeElement === button, 'Fullscreen exit did not restore the editor and focus');
+          assert(nativeRequests === 0 && !container.classList.contains('map-fullscreen') && doc.activeElement === button, 'Map-only exit changed browser fullscreen or failed to restore the editor and focus');
           assert([...container.querySelectorAll('.leaflet-top, .leaflet-bottom')].every(element => host.getComputedStyle(element).position === 'absolute') && !doc.querySelector('.fullscreen-controls-animating'), 'Fullscreen controls retained temporary viewport positioning');
           assert(host.getComputedStyle(doc.getElementById('topbar')).visibility === 'visible', 'Header was not restored');
           assert(map.getCenter().equals(center) && map.getZoom() === zoom, 'Fullscreen changed the map view');
         }
-        container.requestFullscreen = async () => { throw new Error('Fullscreen unavailable'); };
         button.click();
         await settle();
-        assert(container.classList.contains('map-fullscreen') && !nativeElement, 'Rejected fullscreen did not use the map-only fallback');
+        doc.dispatchEvent(new host.Event('fullscreenchange'));
+        assert(container.classList.contains('map-fullscreen') && nativeRequests === 0, 'Browser fullscreen events changed viewport-only map mode');
         button.click();
         await settle();
-        assert(!container.classList.contains('map-fullscreen'), 'Fallback button did not exit fullscreen');
+        assert(!container.classList.contains('map-fullscreen'), 'Map-only button did not restore the editor');
         Object.defineProperty(doc, 'fullscreenEnabled', { configurable: true, value: false });
         button.click();
         await settle();
         button.dispatchEvent(new host.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
         await settle();
-        assert(!container.classList.contains('map-fullscreen') && button.getAttribute('aria-pressed') === 'false', 'Escape did not exit the unsupported-browser fallback');
+        assert(!container.classList.contains('map-fullscreen') && button.getAttribute('aria-pressed') === 'false' && nativeRequests === 0, 'Escape did not restore the editor without browser fullscreen');
       }));
       await test('Basemap button toggles its pop-up on desktop and phones with keyboard dismissal', () => withEditor(async (host, doc) => {
         const errors = [];
@@ -2381,6 +2383,12 @@
         host.frameElement.style.width = '390px';
         host.frameElement.style.height = '800px';
         const settle = () => new Promise(resolve => host.setTimeout(resolve, 150));
+        const settleFullscreen = async () => {
+          while (doc.querySelector('.map-fullscreen-toggle').disabled) await new Promise(resolve => host.setTimeout(resolve, 20));
+          await Promise.all(doc.getAnimations().filter(animation => animation.effect.getComputedTiming().iterations !== Infinity).map(animation => animation.finished.catch(() => {})));
+          await settle();
+          await settle();
+        };
         await settle();
         app.map.options.zoomAnimation = false;
         app.map.stop();
@@ -2409,6 +2417,22 @@
             const eligible = pixel.x >= workspace.left - rectangle.left && pixel.x <= workspace.right - rectangle.left &&
               pixel.y >= workspace.top - rectangle.top && pixel.y <= tableTop - rectangle.top;
             assert(layer.displayed.has(leaf) === eligible, `Wrong uncovered-area rendering at width ${width}`);
+          });
+          Object.defineProperty(doc, 'fullscreenEnabled', { configurable: true, value: false });
+          doc.querySelector('.map-fullscreen-toggle').click();
+          await settleFullscreen();
+          assert(app.map.getContainer().classList.contains('map-fullscreen'), 'Fullscreen culling fixture did not enter map-only mode');
+          assert(layer.displayed.size === 3, `Fullscreen still culls features beneath hidden panels at width ${width}`);
+          doc.querySelector('.map-fullscreen-toggle').click();
+          await settleFullscreen();
+          const restoredMap = app.map.getContainer().getBoundingClientRect();
+          const restoredWorkspace = doc.getElementById('workspace').getBoundingClientRect();
+          const restoredBottom = doc.getElementById('splitter').getBoundingClientRect().top;
+          layer.group.getLayers().forEach(leaf => {
+            const pixel = app.map.latLngToContainerPoint(leaf.getLatLng());
+            const eligible = pixel.x >= restoredWorkspace.left - restoredMap.left && pixel.x <= restoredWorkspace.right - restoredMap.left &&
+              pixel.y >= restoredWorkspace.top - restoredMap.top && pixel.y <= restoredBottom - restoredMap.top;
+            assert(layer.displayed.has(leaf) === eligible, `Leaving fullscreen did not restore panel-aware culling at width ${width}`);
           });
         }
         assert(layer.group.getLayers().length === 3, 'Responsive culling changed stored features');

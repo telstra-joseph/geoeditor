@@ -708,9 +708,9 @@
     }
     return Promise.all(jobs);
   };
-  let fullscreenFallback = false;
+  let mapFullscreenActive = false;
   const updateMapFullscreen = () => {
-    const active = document.fullscreenElement === mapContainer || fullscreenFallback;
+    const active = mapFullscreenActive;
     const wasActive = mapContainer.classList.contains('map-fullscreen');
     const before = !active && wasActive ? fullscreenControlBounds() : null;
     mapContainer.classList.toggle('map-fullscreen', active);
@@ -734,28 +734,18 @@
       if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) fullscreenButton.animate([
         { transform: 'scale(1)' }, { transform: 'scale(.88)', offset: .3 }, { transform: 'scale(1)' },
       ], { duration: 280, easing: 'cubic-bezier(.22, 1, .36, 1)' });
-      if (document.fullscreenElement !== mapContainer && !fullscreenFallback) await animateEditorPanels(false);
-      if (document.fullscreenElement === mapContainer) await document.exitFullscreen();
-      else if (fullscreenFallback) fullscreenFallback = false;
-      else {
-        try {
-          if (!document.fullscreenEnabled || !mapContainer.requestFullscreen) fullscreenFallback = true;
-          else await mapContainer.requestFullscreen();
-        } catch {
-          fullscreenFallback = true;
-        }
-      }
+      if (!mapFullscreenActive) await animateEditorPanels(false);
+      mapFullscreenActive = !mapFullscreenActive;
     } finally {
       fullscreenButton.disabled = false;
       updateMapFullscreen();
     }
   });
-  document.addEventListener('fullscreenchange', updateMapFullscreen);
   document.addEventListener('keydown', event => {
-    if (event.key !== 'Escape' || !fullscreenFallback) return;
+    if (event.key !== 'Escape' || !mapFullscreenActive) return;
     event.preventDefault();
     event.stopPropagation();
-    fullscreenFallback = false;
+    mapFullscreenActive = false;
     updateMapFullscreen();
   }, true);
   updateMapFullscreen();
@@ -1092,12 +1082,12 @@
   function* placeSiteLabels(lyr) {
     let checkpoints = 0;
     const mapRect = map.getContainer().getBoundingClientRect();
-    const workspace = $('workspace').getBoundingClientRect();
+    const visible = uncoveredMapRect();
     const area = {
-      left: Math.max(0, workspace.left - mapRect.left) + 8,
-      top: Math.max(0, workspace.top - mapRect.top) + 8,
-      right: mapRect.width - 8,
-      bottom: Math.min(mapRect.height, $('splitter').getBoundingClientRect().top - mapRect.top) - 8,
+      left: visible.left - mapRect.left + 8,
+      top: visible.top - mapRect.top + 8,
+      right: visible.right - mapRect.left - 8,
+      bottom: visible.bottom - mapRect.top - 8,
     };
     const occupied = new Map();
     const cells = rectangle => {
@@ -1203,14 +1193,21 @@
     return distance >= 5000 && distance < 20000;
   }
 
+  function uncoveredMapRect() {
+    const mapRect = map.getContainer().getBoundingClientRect();
+    if (map.getContainer().classList.contains('map-fullscreen')) return mapRect;
+    const workspace = $('workspace').getBoundingClientRect();
+    const splitter = $('splitter');
+    const bottom = splitter.getClientRects().length && getComputedStyle(splitter).visibility !== 'hidden' ? splitter.getBoundingClientRect().top : workspace.bottom;
+    return {
+      left: Math.max(mapRect.left, workspace.left), top: Math.max(mapRect.top, workspace.top),
+      right: Math.min(mapRect.right, workspace.right), bottom: Math.min(mapRect.bottom, workspace.bottom, bottom),
+    };
+  }
+
   function uncoveredMapBounds() {
     const mapRect = map.getContainer().getBoundingClientRect();
-    const workspace = $('workspace').getBoundingClientRect();
-    const splitter = $('splitter').getBoundingClientRect();
-    const left = Math.max(mapRect.left, workspace.left);
-    const top = Math.max(mapRect.top, workspace.top);
-    const right = Math.min(mapRect.right, workspace.right);
-    const bottom = Math.min(mapRect.bottom, workspace.bottom, splitter.top);
+    const { left, top, right, bottom } = uncoveredMapRect();
     if (left >= right || top >= bottom) return null;
     return L.latLngBounds(
       map.containerPointToLatLng([left - mapRect.left, top - mapRect.top]),
@@ -1924,13 +1921,11 @@
     if (!bounds.isValid()) return;
     map.invalidateSize({ pan: false });
     const mapRect = map.getContainer().getBoundingClientRect();
-    const workspace = $('workspace').getBoundingClientRect();
-    const splitter = $('splitter');
-    const visibleBottom = splitter.getClientRects().length ? splitter.getBoundingClientRect().top : workspace.bottom;
+    const visible = uncoveredMapRect();
     map.fitBounds(bounds, {
       maxZoom,
-      paddingTopLeft: [Math.max(0, workspace.left - mapRect.left) + 20, Math.max(0, workspace.top - mapRect.top) + 20],
-      paddingBottomRight: [Math.max(0, mapRect.right - workspace.right) + 20, Math.max(0, mapRect.bottom - visibleBottom) + 20],
+      paddingTopLeft: [visible.left - mapRect.left + 20, visible.top - mapRect.top + 20],
+      paddingBottomRight: [mapRect.right - visible.right + 20, mapRect.bottom - visible.bottom + 20],
     });
   }
 
