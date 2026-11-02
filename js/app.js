@@ -1395,6 +1395,7 @@
     const opacity = Number(style['label-opacity'] ?? 1);
     const single = singleCharacterLabel(leaf);
     const site = isPointLeaf(leaf) && [...name].length === 4;
+    if (site && leaf._glayer?.siteLabelsVisible === false) { leaf.unbindTooltip(); return; }
     if (!name || scale <= 0 || opacity <= 0 || (single && !leaf._kmlLabelSize)) { leaf.unbindTooltip(); return; }
     const fontSize = site ? siteFontSize ?? siteLabelSize() : single ? Math.round(leaf._kmlLabelSize * 10) / 10 : Math.min(256, 16 * (Number.isFinite(scale) ? scale : 1));
     const centered = !site && (!isPointLeaf(leaf) || kmlLabelOnly(leaf));
@@ -1521,9 +1522,51 @@
     }
   }
 
+  const TECHNOLOGY_DIGITS = {
+    V: ['NR', '850'], W: ['NR', '850e'], Z: ['NR', '2600'], X: ['NR', '2600'],
+    C: ['NR', '3600'], R: ['NR', '3700'], D: ['NR', '26000'],
+    P: ['NR', '1800'], Y: ['NR', '2100'], U: ['NR', '700'],
+    F: ['LTE', '700'], E: ['LTE', '1800'], J: ['LTE', '2100'], A: ['LTE', '2600'],
+    B: ['LTE', '2600'], H: ['LTE', '850e'], K: ['LTE', '1800'],
+  };
+
+  function technologyIndex(lyr) {
+    if (lyr.technologyIndex) return lyr.technologyIndex;
+    const leaves = leavesOf(lyr);
+    const names = new Map(leaves.map(leaf => [leaf, String(leaf.feature?.properties?.name ?? '').trim().toUpperCase()]));
+    const sites = new Map();
+    names.forEach((name, leaf) => {
+      if (leaf.feature?.kml && isPointLeaf(leaf) && name.length === 4) sites.set(name, new Set());
+    });
+    const codes = new Map();
+    const available = new Set();
+    leaves.forEach(leaf => {
+      if (!leaf.feature?.kml) return;
+      const name = names.get(leaf);
+      const folders = (leaf.feature.kml.folderIds || []).map(id => String(lyr.kmlFolderMap.get(id)?.name ?? '').trim().toUpperCase());
+      const site = folders.find(folder => sites.has(folder)) || name.slice(0, 4);
+      const sector = [name, ...folders.slice().reverse()].find(candidate => candidate.startsWith(site) && /^[A-Z]$/.test(candidate[4] || ''));
+      const code = sector?.[4];
+      if (code) {
+        codes.set(leaf, new Set([code]));
+        available.add(code);
+        sites.get(site)?.add(code);
+      }
+    });
+    names.forEach((name, leaf) => {
+      if (!codes.has(leaf) && sites.has(name)) codes.set(leaf, sites.get(name));
+    });
+    lyr.technologyIndex = { codes, available, names };
+    return lyr.technologyIndex;
+  }
+
+  function technologyMatches(lyr, leaf) {
+    return lyr.technologyDigits === null || [...(technologyIndex(lyr).codes.get(leaf) || [])].some(code => lyr.technologyDigits.includes(code));
+  }
+
   function kmlLeafVisible(lyr, leaf) {
     return lyr.visible && leaf.feature?.style?.visibility !== false && String(leaf.feature?.style?.visibility ?? '1') !== '0' &&
-      (leaf.feature?.kml?.folderIds || []).every(id => lyr.kmlFolderMap.get(id)?.visible !== false);
+      (leaf.feature?.kml?.folderIds || []).every(id => lyr.kmlFolderMap.get(id)?.visible !== false) && technologyMatches(lyr, leaf);
   }
 
   function displayLimit() {
@@ -1902,6 +1945,7 @@
     group.addLayer = function(leaf) {
       if (this.hasLayer(leaf)) return this;
       lyr.sitePolygons = null;
+      lyr.technologyIndex = null;
       lyr.spatialVersion++;
       lyr.featureCount++;
       leaf.addEventParent(this);
@@ -1913,6 +1957,7 @@
     const removeLayer = group.removeLayer;
     group.removeLayer = function(leaf) {
       lyr.sitePolygons = null;
+      lyr.technologyIndex = null;
       if (this.hasLayer(leaf)) { lyr.spatialVersion++; lyr.featureCount--; }
       lyr.displayed.delete(typeof leaf === 'number' ? this.getLayer(leaf) : leaf);
       const result = removeLayer.call(this, leaf);
@@ -1938,6 +1983,10 @@
   function restyle(leaf) {
     const lyr = leaf._glayer;
     if (!lyr || !leaf.setStyle) return;
+    if (lyr.technologyIndex && lyr.technologyIndex.names.get(leaf) !== String(leaf.feature?.properties?.name ?? '').trim().toUpperCase()) {
+      lyr.technologyIndex = null;
+      if (lyr.technologyDigits !== null) scheduleMapDisplay();
+    }
     const st = (leaf.feature && leaf.feature.style) || {};
     const selected = state.selected === leaf;
     leaf._displaySelected = selected;
@@ -1996,7 +2045,7 @@
     });
   }
 
-  function createLayer({ name, features = [], fields = [], types = {}, geomType = 'Mixed', format = 'shp', kmlFolders = [], importing = false }) {
+  function createLayer({ name, features = [], fields = [], types = {}, geomType = 'Mixed', format = 'shp', kmlFolders = [], importing = false, siteLabelsVisible = true, technologyDigits = null }) {
     const lyr = {
       id: state.nextId++,
       name,
@@ -2006,6 +2055,8 @@
       types: { ...types },
       format,
       visible: true,
+      siteLabelsVisible: siteLabelsVisible !== false,
+      technologyDigits: Array.isArray(technologyDigits) ? [...new Set(technologyDigits.filter(code => typeof code === 'string' && /^[A-Z]$/.test(code)))] : null,
       importing,
       kmlFolders: kmlFolders.map(folder => ({ ...folder })),
       displayed: new Set(),
@@ -2731,7 +2782,8 @@
       $('sessionProgressStatus').textContent = `Saving “${lyr.name}”…`;
       layers.push({
         name: lyr.name, fields: lyr.fields.slice(), types: { ...lyr.types }, geomType: lyr.geomType,
-        format: lyr.format, color: lyr.color, visible: lyr.visible,
+        format: lyr.format, color: lyr.color, visible: lyr.visible, siteLabelsVisible: lyr.siteLabelsVisible,
+        technologyDigits: lyr.technologyDigits?.slice() ?? null,
         kmlFolders: structuredClone(lyr.kmlFolders), features: await collectLayerFeatures(lyr, signal),
         widths: [...(columnWidths.get(lyr) || new Map())],
       });
@@ -3194,9 +3246,99 @@
       );
       meta.append(info, sp, actions);
       li.append(layerReorderHandle(lyr, li), vis, color, name, renameButton, meta);
+      if (leavesOf(lyr).some(leaf => leaf.feature?.kml && isPointLeaf(leaf) && [...String(leaf.feature.properties.name ?? '').trim()].length === 4)) {
+        const labelToggle = document.createElement('label');
+        labelToggle.className = 'layer-label-toggle';
+        labelToggle.title = 'Show four-character site labels';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = lyr.siteLabelsVisible !== false;
+        checkbox.addEventListener('change', () => {
+          lyr.siteLabelsVisible = checkbox.checked;
+          syncLayerDisplay(lyr);
+        });
+        labelToggle.addEventListener('click', event => event.stopPropagation());
+        labelToggle.append(checkbox, 'Site labels');
+        li.appendChild(labelToggle);
+      }
+      if ((lyr.format === 'kml' || lyr.format === 'kmz') && [...technologyIndex(lyr).available].some(code => TECHNOLOGY_DIGITS[code])) li.appendChild(renderTechnologyFilter(lyr));
       if (lyr.kmlFolders.length) li.appendChild(renderKmlFolders(lyr));
       ul.appendChild(li);
     });
+  }
+
+  function renderTechnologyFilter(lyr) {
+    const details = document.createElement('details');
+    details.className = 'layer-technology-filter';
+    details.addEventListener('click', event => event.stopPropagation());
+    const summary = document.createElement('summary');
+    const summaryText = document.createElement('span');
+    summary.append(actionIcon('RadioTower'), summaryText);
+    const body = document.createElement('div');
+    body.className = 'technology-options';
+    const makeChoice = (text, value) => {
+      const label = document.createElement('label');
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.value = value;
+      label.append(input, text);
+      return { label, input };
+    };
+    const all = makeChoice('All technologies', 'all');
+    all.label.className = 'technology-all';
+    body.appendChild(all.label);
+    const choices = [];
+    const groups = [];
+    const unknown = [...technologyIndex(lyr).available].filter(code => !TECHNOLOGY_DIGITS[code]).sort();
+    for (const type of ['LTE', 'NR', ...(unknown.length ? ['Unmapped'] : [])]) {
+      const fieldset = document.createElement('fieldset');
+      const legend = document.createElement('legend');
+      const group = makeChoice(type, type);
+      legend.appendChild(group.label);
+      fieldset.appendChild(legend);
+      const codes = type === 'Unmapped' ? unknown : Object.keys(TECHNOLOGY_DIGITS).filter(code => TECHNOLOGY_DIGITS[code][0] === type);
+      const members = codes.map(code => {
+        const band = TECHNOLOGY_DIGITS[code]?.[1];
+        const choice = makeChoice(band ? `${code} · ${band} MHz` : code, code);
+        choices.push(choice.input);
+        fieldset.appendChild(choice.label);
+        return choice.input;
+      });
+      groups.push({ input: group.input, members });
+      group.input.addEventListener('change', () => {
+        members.forEach(input => { input.checked = group.input.checked; });
+        apply();
+      });
+      body.appendChild(fieldset);
+    }
+    const refresh = () => {
+      const selected = choices.filter(input => input.checked).length;
+      all.input.checked = lyr.technologyDigits === null;
+      all.input.indeterminate = selected > 0 && !all.input.checked;
+      groups.forEach(({ input, members }) => {
+        const count = members.filter(member => member.checked).length;
+        input.checked = count === members.length;
+        input.indeterminate = count > 0 && count < members.length;
+      });
+      summaryText.textContent = `Technology · ${lyr.technologyDigits === null ? 'All' : selected ? `${selected} selected` : 'None'}`;
+    };
+    const apply = () => {
+      const selected = choices.filter(input => input.checked).map(input => input.value);
+      lyr.technologyDigits = selected.length === choices.length ? null : selected;
+      refresh();
+      syncKmlVisibility(lyr);
+    };
+    choices.forEach(input => {
+      input.checked = lyr.technologyDigits === null || lyr.technologyDigits.includes(input.value);
+      input.addEventListener('change', apply);
+    });
+    all.input.addEventListener('change', () => {
+      choices.forEach(input => { input.checked = all.input.checked; });
+      apply();
+    });
+    refresh();
+    details.append(summary, body);
+    return details;
   }
 
   function renderKmlFolders(lyr) {
@@ -3273,7 +3415,7 @@
   }
 
   function filteredLeaves(lyr) {
-    let all = leavesOf(lyr);
+    let all = leavesOf(lyr).filter(leaf => technologyMatches(lyr, leaf));
     if (lyr.kmlFolders.some(folder => folder.visible)) {
       all = all.filter(leaf => {
         const folderIds = leaf.feature?.kml?.folderIds || [];
@@ -3312,7 +3454,7 @@
       wrap.appendChild(d);
       return;
     }
-    const leaves = leavesOf(lyr);
+    const leaves = leavesOf(lyr).filter(leaf => technologyMatches(lyr, leaf));
     const job = {
       rows: leaves.map((leaf, index) => ({ index, properties: leaf.feature.properties, folderIds: leaf.feature.kml?.folderIds })),
       fields: lyr.fields, types: lyr.types, filter: state.filter, sort: state.sort,

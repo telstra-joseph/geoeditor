@@ -2453,13 +2453,17 @@
           const choice = currentDoc.querySelector(`#dlgBody input[value="${action}"]`);
           assert(choice, `Missing session action ${action}`);
           choice.checked = true;
+          const closed = new Promise(resolve => currentDoc.getElementById('dlg').addEventListener('close', resolve, { once: true }));
           currentDoc.getElementById('dlgOk').click();
           currentDoc.getAnimations().filter(animation => animation.effect.getComputedTiming().iterations !== Infinity).forEach(animation => animation.finish());
+          await closed;
           await pause();
           if (action === 'clear' || confirmRestore) {
             await waitFor(() => currentDoc.getElementById('dlg').open);
+            const confirmed = new Promise(resolve => currentDoc.getElementById('dlg').addEventListener('close', resolve, { once: true }));
             currentDoc.getElementById('dlgOk').click();
             currentDoc.getAnimations().filter(animation => animation.effect.getComputedTiming().iterations !== Infinity).forEach(animation => animation.finish());
+            await confirmed;
             await pause();
           }
           await waitFor(() => !currentDoc.getElementById('dlg').open && !currentDoc.getElementById('sessionProgressDlg').open && !currentDoc.getElementById('btnSession').disabled);
@@ -2470,6 +2474,8 @@
         const seedDelete = doc.querySelector('#layerList button[aria-label="Delete layer"]');
         const layer = app.createLayer({ name: 'Sites', features, fields: ['name', 'amount'], types: { name: 'string', amount: 'number' }, format: 'kmz',
           kmlFolders: [{ id: 'site', parentId: null, name: 'Site', visible: true, expanded: false }] });
+        layer.siteLabelsVisible = false;
+        layer.technologyDigits = ['A', 'V'];
         const hidden = app.createLayer({ name: 'Hidden dataset', features: Array.from({ length: 1001 }, (_, index) => point({ name: `Record ${index}` })), fields: ['name'], types: { name: 'string' } });
         hidden.visible = false;
         app.map.removeLayer(hidden.group);
@@ -2492,6 +2498,8 @@
         [...doc.querySelectorAll('.leaflet-control-layers label')].find(label => label.textContent.trim() === 'Hybrid').click();
         await choose('save');
         const original = await new host.SessionStore().load();
+        assert(original.layers[0].siteLabelsVisible === false, 'Site label visibility was not saved');
+        assert(original.layers[0].technologyDigits.join(',') === 'A,V', 'Technology digit selection was not saved');
         assert(original.view.basemap === 'Hybrid', 'Hybrid selection was not saved');
         assert(original.layers[1].features.length === 1001 && original.selected.feature === 0, 'Save used sampled data or lost selection');
         layer.name = 'Replacement';
@@ -2516,6 +2524,8 @@
         assert(restored.state.layers.length === 2 && restored.state.layers[0].name === 'Replacement', 'Manual restore after reload did not restore the latest layer order/names');
         assert(restored.state.layers[1].group.getLayers().length === 1001 && !restored.state.layers[1].visible && !restored.map.hasLayer(restored.state.layers[1].group), 'Hidden dataset was lost or shown');
         const restoredLayer = restored.state.layers[0];
+        assert(restoredLayer.siteLabelsVisible === false, 'Hidden site labels were not retained on restore');
+        assert(restoredLayer.technologyDigits.join(',') === 'A,V', 'Technology digit selection was not restored');
         assert(restoredLayer.types.amount === 'number' && restoredLayer.format === 'kmz' && !restoredLayer.kmlFolders[0].expanded, 'Field types, format or folder state were lost');
         assert(restored.state.selected === restoredLayer.group.getLayers()[0] && restored.state.selected.feature.properties.amount === 99, 'Selected feature or edited attributes were lost');
         assert(restored.state.filter === 'Alpha' && restored.state.sort.direction === 'desc' && restored.map.getZoom() === 9, 'Table settings or zoom were lost');
@@ -2529,9 +2539,13 @@
         const valid = await new currentHost.SessionStore().load();
         const legacy = structuredClone(valid);
         legacy.view.basemap = 'OpenStreetMap';
+        delete legacy.layers[0].siteLabelsVisible;
+        delete legacy.layers[0].technologyDigits;
         await new currentHost.SessionStore().save(legacy);
         await choose('restore');
         assert(selectedBasemap() === 'Standard', 'Legacy OpenStreetMap session did not restore Standard');
+        assert(restored.state.layers[0].siteLabelsVisible === true, 'Legacy sessions must show site labels by default');
+        assert(restored.state.layers[0].technologyDigits === null, 'Legacy sessions must show all technologies by default');
         await new currentHost.SessionStore().save(valid);
         await choose('restore');
         assert(selectedBasemap() === 'Hybrid', 'Manual restore did not restore Hybrid');
@@ -3268,6 +3282,78 @@
         other.fire('click', { latlng: other.getLatLng() });
         app.map.closePopup();
         assert(node.getRadius() === 2, 'Deselection did not restore zoom-dependent size');
+      }));
+      await test('Technology digits filter sectors and their site markers without changing KML features', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        await app.handleFiles([jsonFile(collection([point()]), 'technology-anchor.geojson')]);
+        app.map.setView([-35, 149], 15, { animate: false });
+        const features = [
+          { ...point({ name: 'ABCD' }), kml: { folderIds: ['site'] } },
+          { type: 'Feature', properties: { name: 'ABCDVM1' }, geometry: { type: 'Polygon', coordinates: [[[149, -35], [149.001, -35], [149, -35.001], [149, -35]]] }, kml: { folderIds: ['site', 'nr'] } },
+          { ...point({ name: 'A' }), kml: { folderIds: ['site', 'lte'] } },
+          { ...point({ name: 'EFGH' }), kml: { folderIds: ['second-site'] } },
+          { ...point({ name: 'EFGHFM1' }), kml: { folderIds: ['second-site'] } },
+          { ...point({ name: 'ABCDQM1' }), kml: { folderIds: ['site'] } },
+        ];
+        const kmlFolders = [{ id: 'site', name: 'ABCD', visible: true }, { id: 'nr', parentId: 'site', name: 'ABCDVM1', visible: true }, { id: 'lte', parentId: 'site', name: 'ABCDFM1', visible: true }, { id: 'second-site', name: 'EFGH', visible: true }];
+        const layer = app.createLayer({ name: 'Technology sites', format: 'kml', features, fields: ['name'], types: { name: 'string' }, kmlFolders, technologyDigits: ['V'] });
+        const leaves = layer.group.getLayers();
+        assert(app.map.hasLayer(leaves[0]) && app.map.hasLayer(leaves[1]), 'NR filter removed a matching sector or its site marker');
+        assert(leaves.slice(2).every(leaf => !app.map.hasLayer(leaf)), 'NR filter retained nonmatching sectors, labels or site markers');
+        assert(layer.group.getLayers().length === features.length, 'Technology filtering discarded source features');
+        doc.querySelector('#layerList .lname').click();
+        doc.querySelector(`#layerList li[data-layer-id="${layer.id}"] .lname`).click();
+        const filter = doc.querySelector(`#layerList li[data-layer-id="${layer.id}"] .layer-technology-filter`);
+        const choice = code => filter.querySelector(`input[value="${code}"]`);
+        assert(choice('V').checked && !choice('F').checked && choice('Q'), 'Technology controls lost the filter or unmapped digits');
+        choice('V').click();
+        assert(layer.technologyDigits.length === 0 && leaves.every(leaf => !app.map.hasLayer(leaf)), 'Clearing all digits must hide all sites');
+        choice('F').click();
+        assert(app.map.hasLayer(leaves[0]) && app.map.hasLayer(leaves[3]) && app.map.hasLayer(leaves[4]) && !app.map.hasLayer(leaves[1]), 'Single-digit LTE filtering is incorrect');
+        choice('V').click();
+        assert(app.map.hasLayer(leaves[1]) && app.map.hasLayer(leaves[4]) && !app.map.hasLayer(leaves[5]), 'Multi-select filtering did not union LTE and NR matches');
+        assert(doc.querySelectorAll('#tableWrap tbody tr').length === 5, 'Attribute table does not follow technology filtering');
+        choice('all').click();
+        assert(layer.technologyDigits === null && app.map.hasLayer(leaves[5]), 'All technologies did not restore unmapped sectors');
+        const expected = { V: ['NR', '850'], W: ['NR', '850e'], Z: ['NR', '2600'], X: ['NR', '2600'], C: ['NR', '3600'], R: ['NR', '3700'], D: ['NR', '26000'], P: ['NR', '1800'], Y: ['NR', '2100'], U: ['NR', '700'], F: ['LTE', '700'], E: ['LTE', '1800'], J: ['LTE', '2100'], A: ['LTE', '2600'], B: ['LTE', '2600'], H: ['LTE', '850e'], K: ['LTE', '1800'] };
+        Object.entries(expected).forEach(([code, [type, band]]) => {
+          const input = choice(code);
+          assert(input.closest('fieldset').querySelector('legend').textContent === type && input.parentElement.textContent.includes(`${band} MHz`), `Incorrect technology mapping for ${code}`);
+        });
+        choice('all').click();
+        choice('NR').click();
+        assert(layer.technologyDigits.length === 10 && app.map.hasLayer(leaves[1]) && !app.map.hasLayer(leaves[4]) && !app.map.hasLayer(leaves[5]), 'NR group selection did not restrict the map to NR');
+        choice('LTE').click();
+        assert(layer.technologyDigits.length === 17 && app.map.hasLayer(leaves[4]) && !app.map.hasLayer(leaves[5]), 'Combining LTE and NR groups included unmapped codes');
+        choice('all').click();
+        filter.open = true;
+        for (const width of [1440, 390]) {
+          host.frameElement.style.width = `${width}px`;
+          await pause();
+          const bounds = filter.getBoundingClientRect();
+          assert(filter.scrollWidth <= filter.clientWidth + 1 && bounds.left >= 0 && bounds.right <= host.innerWidth, `Technology choices overflow at ${width}px`);
+        }
+      }));
+      await test('Site labels can be hidden without hiding KML sites or other labels', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        const kml = '<?xml version="1.0"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document>' +
+          ['AB12', 'Other'].map((name, index) => `<Placemark><name>${name}</name><Point><coordinates>${149 + index * .001},-35</coordinates></Point></Placemark>`).join('') + '</Document></kml>';
+        await app.handleFiles([new host.File([kml], 'site-labels.kml', { type: 'application/vnd.google-earth.kml+xml' })]);
+        app.map.setView([-35, 149], 15, { animate: false });
+        const layer = app.state.active;
+        const [site, other] = layer.group.getLayers();
+        const original = JSON.stringify(layer.group.toGeoJSON());
+        const toggle = doc.querySelector('.layer-label-toggle input');
+        assert(toggle?.checked && site.getTooltip() && other.getTooltip(), 'KML site label control or initial labels are missing');
+        toggle.click();
+        assert(!layer.siteLabelsVisible && !site.getTooltip() && other.getTooltip(), 'Hiding site codes also hid other labels or failed to hide codes');
+        assert(app.map.hasLayer(site), 'Hiding the site label removed its marker');
+        app.map.setZoom(16, { animate: false });
+        await pause();
+        assert(!site.getTooltip() && app.map.hasLayer(site), 'Zooming restored hidden site labels or removed the marker');
+        toggle.click();
+        assert(layer.siteLabelsVisible && site.getTooltip(), 'Showing site labels did not restore the code');
+        assert(JSON.stringify(layer.group.toGeoJSON()) === original, 'Label visibility changed the source KML features');
       }));
       await test('Site labels avoid collisions and give selected names placement priority', () => withEditor(async host => {
         const app = host.__geoEditor;
