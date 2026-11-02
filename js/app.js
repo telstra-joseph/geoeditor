@@ -6,6 +6,8 @@
   const PALETTE = ['#2563eb', '#dc2626', '#16a34a', '#d97706', '#9333ea', '#0891b2', '#db2777', '#65a30d'];
   const PAGE_SIZE = 200;
   const columnWidths = new WeakMap();
+  let pendingAttributeEdit = null;
+  const redoHistory = [];
   const sessionStore = new SessionStore();
   let sessionBusy = false;
   let hasSavedSession = false;
@@ -276,23 +278,77 @@
     setTimeout(() => URL.revokeObjectURL(a.href), 10000);
   }
 
-  function recordUndo(label, undo) {
-    state.undo.push({ label, undo });
+  function recordUndo(label, undo, redo) {
+    state.undo.push({ label, undo, redo });
+    redoHistory.length = 0;
     if (state.undo.length > 100) state.undo.shift();
+    updateUndoButton();
+  }
+
+  function updateUndoButton() {
+    if (pendingAttributeEdit && !pendingAttributeEdit.input.isConnected) pendingAttributeEdit = null;
+    const label = pendingAttributeEdit?.label || state.undo[state.undo.length - 1]?.label;
     const button = $('btnUndo');
-    button.disabled = false;
-    button.title = `Undo ${label}`;
+    button.disabled = !label;
+    button.title = label ? `Undo ${label}` : 'Undo last table edit';
+    button.setAttribute('aria-label', button.title);
+    const redoLabel = redoHistory[redoHistory.length - 1]?.label;
+    const redoButton = $('btnRedo');
+    redoButton.disabled = !redoLabel;
+    redoButton.title = redoLabel ? `Redo ${redoLabel}` : 'Redo last table edit';
+    redoButton.setAttribute('aria-label', redoButton.title);
+  }
+
+  function trackAttributeEdit(input, lyr, leaf, field, readValue) {
+    input.addEventListener('input', () => {
+      pendingAttributeEdit = input.value === readValue() ? null : {
+        input, label: `cell edit in ${field}`, readValue,
+        commit: () => {
+          if (parseValue(lyr.types[field] || 'string', input.value).ok) setValue(lyr, leaf, field, input.value);
+        },
+      };
+      updateUndoButton();
+    });
+    const clearPending = () => {
+      if (pendingAttributeEdit?.input !== input) return;
+      pendingAttributeEdit = null;
+      updateUndoButton();
+    };
+    input.addEventListener('change', clearPending);
+    input.addEventListener('blur', clearPending);
   }
 
   function undoLastTableEdit() {
+    updateUndoButton();
+    if (pendingAttributeEdit) {
+      const pending = pendingAttributeEdit;
+      const previousValue = pending.readValue();
+      const previousEntry = state.undo[state.undo.length - 1];
+      pending.commit();
+      pending.input.value = previousValue;
+      pendingAttributeEdit = null;
+      if (state.undo[state.undo.length - 1] === previousEntry) {
+        updateUndoButton();
+        return;
+      }
+    }
     const entry = state.undo.pop();
     if (!entry) return;
     entry.undo();
+    redoHistory.push(entry);
     map.closePopup();
     renderTable();
-    const button = $('btnUndo');
-    button.disabled = state.undo.length === 0;
-    button.title = state.undo.length ? `Undo ${state.undo[state.undo.length - 1].label}` : 'Undo last table edit';
+    updateUndoButton();
+  }
+
+  function redoLastTableEdit() {
+    const entry = redoHistory.pop();
+    if (!entry) return;
+    entry.redo();
+    state.undo.push(entry);
+    map.closePopup();
+    renderTable();
+    updateUndoButton();
   }
 
   function askForm(title, fields, { message = '', okLabel = 'OK', destructive = false, compact = false, anchor = null } = {}) {
@@ -2254,6 +2310,9 @@
         if (hadValue) currentProperties[field] = previousValue;
         else delete currentProperties[field];
         restyle(leaf);
+      }, () => {
+        leaf.feature.properties[field] = r.v;
+        restyle(leaf);
       });
     }
     properties[field] = r.v;
@@ -2356,6 +2415,7 @@
         if (!setValue(lyr, leaf, f, input.value)) input.value = f === descriptionField ? descriptionText(properties[f]) : display(properties[f]);
         else { renderDescription(); renderTable(); }
       });
+      trackAttributeEdit(input, lyr, leaf, f, () => f === descriptionField ? descriptionText(leaf.feature.properties[f]) : display(leaf.feature.properties[f]));
       label.appendChild(input);
       if (f === descriptionField) {
         const editor = document.createElement('details');
@@ -2508,6 +2568,7 @@
     if (lyr.fields.includes(name)) return toast(`Field “${name}” already exists.`, 'error');
     const parsed = parseValue(r.type, r.value);
     if (!parsed.ok) return toast(`“${r.value}” is not a valid ${r.type}.`, 'error');
+    const fieldIndex = lyr.fields.length;
     lyr.fields.push(name);
     lyr.types[name] = r.type;
     leavesOf(lyr).forEach((leaf) => { leaf.feature.properties[name] = parsed.v; });
@@ -2515,6 +2576,10 @@
       lyr.fields = lyr.fields.filter((field) => field !== name);
       delete lyr.types[name];
       leavesOf(lyr).forEach((leaf) => { delete leaf.feature.properties[name]; });
+    }, () => {
+      lyr.fields.splice(fieldIndex, 0, name);
+      lyr.types[name] = r.type;
+      leavesOf(lyr).forEach((leaf) => { leaf.feature.properties[name] = parsed.v; });
     });
     renderTable();
   }
@@ -2561,6 +2626,10 @@
     lyr.fields[idx] = name;
     delete lyr.types[field];
     lyr.types[name] = r.type;
+    const updated = {
+      fields: [...lyr.fields], types: { ...lyr.types },
+      properties: new Map(leaves.map(leaf => [leaf, { ...leaf.feature.properties }])),
+    };
     recordUndo(`edit field ${field}`, () => {
       leavesOf(lyr).forEach((leaf) => {
         const saved = previous.properties.get(leaf);
@@ -2577,6 +2646,18 @@
       });
       lyr.fields.splice(0, lyr.fields.length, ...previous.fields);
       lyr.types = { ...previous.types };
+    }, () => {
+      leavesOf(lyr).forEach(leaf => {
+        const saved = updated.properties.get(leaf);
+        if (saved) leaf.feature.properties = { ...saved };
+        else {
+          const value = leaf.feature.properties[field] ?? null;
+          if (name !== field) delete leaf.feature.properties[field];
+          leaf.feature.properties[name] = value === null ? null : parseValue(r.type, String(value)).v ?? null;
+        }
+      });
+      lyr.fields.splice(0, lyr.fields.length, ...updated.fields);
+      lyr.types = { ...updated.types };
     });
     renderTable();
   }
@@ -2596,6 +2677,10 @@
         leaf.feature.properties = { ...(properties.get(leaf) || leaf.feature.properties) };
         if (!Object.prototype.hasOwnProperty.call(leaf.feature.properties, field)) leaf.feature.properties[field] = null;
       });
+    }, () => {
+      lyr.fields = lyr.fields.filter(name => name !== field);
+      delete lyr.types[field];
+      leavesOf(lyr).forEach(leaf => { delete leaf.feature.properties[field]; });
     });
     renderTable();
   }
@@ -2707,8 +2792,9 @@
       state.page = Number.isInteger(saved.page) ? Math.max(0, saved.page) : 0;
       state.colorIdx = Number.isInteger(saved.colorIdx) ? saved.colorIdx : staged.length;
       state.undo = [];
-      $('btnUndo').disabled = true;
-      $('btnUndo').title = 'Undo last table edit';
+      redoHistory.length = 0;
+      pendingAttributeEdit = null;
+      updateUndoButton();
       $('filter').value = state.filter;
       if (state.active) $('fmt').value = state.active.format;
       const base = { ...basemaps, OpenStreetMap: osm };
@@ -3440,6 +3526,7 @@
         input.addEventListener('change', () => {
           if (!setValue(lyr, leaf, f, input.value)) input.value = display(leaf.feature.properties[f]);
         });
+        trackAttributeEdit(input, lyr, leaf, f, () => display(leaf.feature.properties[f]));
         input.addEventListener('keydown', (e) => {
           if (e.key === 'Enter') { input.blur(); }
           if (e.key === 'Escape') { input.value = display(leaf.feature.properties[f]); input.blur(); }
@@ -4260,7 +4347,21 @@
     toast('Layer created. Use the drawing tools on the map to add features.');
   });
 
+  $('btnUndo').addEventListener('pointerdown', event => { if (pendingAttributeEdit) event.preventDefault(); });
   $('btnUndo').addEventListener('click', undoLastTableEdit);
+  $('btnRedo').addEventListener('click', redoLastTableEdit);
+  document.addEventListener('keydown', event => {
+    if (event.defaultPrevented || event.isComposing || event.altKey || !(event.ctrlKey || event.metaKey)) return;
+    const key = event.key.toLowerCase();
+    const redo = key === 'y' && event.ctrlKey && !event.shiftKey || key === 'z' && event.metaKey && event.shiftKey;
+    const undo = key === 'z' && !event.shiftKey;
+    if (!undo && !redo) return;
+    if (event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])') || document.querySelector('dialog[open]')) return;
+    if (redo ? !redoHistory.length : !pendingAttributeEdit && !state.undo.length) return;
+    event.preventDefault();
+    if (redo) redoLastTableEdit();
+    else undoLastTableEdit();
+  });
   $('btnToggleLayers').addEventListener('click', () => {
     const sidebar = $('sidebar');
     const content = $('sidebarContent');

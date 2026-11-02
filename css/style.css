@@ -484,6 +484,7 @@ dialog.analysis-complete h3 { overflow-wrap: anywhere; }
 #btnFilter[aria-pressed="true"] { color: var(--accent-dark); border-color: var(--accent); background: var(--hover-fill); }
 #tableActions { display: flex; flex: 1 1 auto; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; max-width: 100%; margin-left: auto; }
 #tableBar button { height: 28px; flex-shrink: 0; white-space: nowrap; }
+#btnUndo, #btnRedo { width: 28px; padding: 0; }
 #filter { padding: 5px 9px; border: 1px solid #cbd5e1; border-radius: 6px; width: 200px; background: var(--surface); transition: border-color var(--ease-ui), box-shadow var(--ease-ui); }
 #filter:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); outline: 0; }
 .pager { display: inline-flex; align-items: center; gap: 6px; }
@@ -743,7 +744,7 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
   table.attrs { --geometry-column-width: 188px; font-size: 16px; }
   table.attrs .geometry-preview { width: 28px; height: 28px; flex-basis: 28px; }
   #tablePanel { min-height: 120px; }
-  #tableBar { display: grid; grid-template-columns: minmax(0, 1fr) repeat(4, 44px); gap: 8px; align-items: center; }
+  #tableBar { display: grid; grid-template-columns: minmax(0, 1fr) repeat(5, 44px); gap: 8px; align-items: center; }
   #tableBar button { height: 44px; }
   #tableHeading { grid-column: 1; grid-row: 1; }
   #tableTitle { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -751,8 +752,9 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
   #tableActions > button { grid-row: 1; width: 44px; padding: 0; }
   #btnFilter { display: inline-flex; grid-column: 2; }
   #btnUndo { grid-column: 3; }
-  #btnAddField { grid-column: 4; }
-  #btnBulkDelete { grid-column: 5; }
+  #btnRedo { grid-column: 4; }
+  #btnAddField { grid-column: 5; }
+  #btnBulkDelete { grid-column: 6; }
   #tableActions .button-label { display: none; }
   #filter { display: none; }
   #pager { grid-column: 1 / -1; justify-self: end; margin-left: 0; }
@@ -806,7 +808,7 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
   table.attrs .fname { min-height: 32px; }
   table.attrs .geometry-preview { width: 22px; height: 22px; flex-basis: 22px; }
   #tablePanel { min-height: 96px; }
-  #tableBar { grid-template-columns: minmax(0, 1fr) repeat(4, 36px); gap: 6px; }
+  #tableBar { grid-template-columns: minmax(0, 1fr) repeat(5, 36px); gap: 6px; }
   #tableBar button { height: 36px; }
   #tableActions > button { width: 36px; }
 }

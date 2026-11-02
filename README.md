@@ -81,7 +81,7 @@ Drag a layer's grip handle to change its drawing order; the top layer in the lis
 
 ### Attribute table
 - Edit cells directly; edits are validated against each column's type (text, number, true/false).
-- Click a column name to rename it or change its type; use the adjacent sort button to sort ascending or descending; add or delete columns. **Undo** reverses recent cell edits and field changes.
+- Click a column name to rename it or change its type; use the adjacent sort button to sort ascending or descending; add or delete columns. **Undo** reverses recent cell edits and field changes, including an edit still in progress. Outside text fields and open dialogs, use **Ctrl+Z** to undo and **Ctrl+Y** to redo on Windows; on Mac use **Command+Z** and **Shift+Command+Z**. Text fields retain their browser-native text undo/redo. A new committed edit clears redo history.
 - Drag a column edge to resize it, double-click it to fit its contents, or focus the resize handle and use the arrow keys. Widths are remembered per layer for the current session.
 - Filter rows with the desktop search field. On mobile, open the filter dialog; **Apply** updates the search, **Cancel** preserves it, and **Clear filter** immediately restores all rows. Clear filter appears only when there is something to clear.
 - Layers with at least 2,000 features use a background worker when text filtering, sorting, or folder filtering is active. Only attribute data and folder membership are sent; ordered row indices come back for rendering. New queries and layer changes cancel obsolete work, preventing stale results from replacing the current table. Smaller tables stay synchronous to avoid worker startup overhead.
