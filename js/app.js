@@ -3012,7 +3012,7 @@
       const actions = document.createElement('div');
       actions.className = 'layer-actions';
       actions.append(
-        iconButton('Search', 'Zoom to layer', () => zoomToLayer(lyr)),
+        iconButton('LocateFixed', 'Zoom to layer', () => zoomToLayer(lyr)),
         iconButton('VenetianMask', 'Mask layer', () => maskLayer(lyr)),
         iconButton('ChartNoAxesCombined', 'Analyze layer', () => analyzeLayer(lyr)),
         downloadButton,
@@ -3082,7 +3082,7 @@
         const count = document.createElement('span');
         count.className = 'kml-folder-count';
         count.textContent = members.get(folder.id).length;
-        const zoom = iconButton('Search', `Zoom to folder ${folder.name}`, () => {
+        const zoom = iconButton('LocateFixed', `Zoom to folder ${folder.name}`, () => {
           const bounds = L.latLngBounds([]);
           members.get(folder.id).forEach(leaf => bounds.extend(leaf.getBounds ? leaf.getBounds() : leaf.getLatLng()));
           fitVisibleBounds(bounds);
@@ -3337,7 +3337,7 @@
       const rowActions = document.createElement('span');
       rowActions.className = 'rn-actions';
       rowActions.append(
-        iconButton('Search', 'Zoom to feature', () => selectLeaf(leaf, { fromTable: true, pan: true })),
+        iconButton('LocateFixed', 'Zoom to feature', () => selectLeaf(leaf, { fromTable: true, pan: true })),
         iconButton('Download', 'Download this feature', () => downloadFeature(lyr, leaf)),
         iconButton('Trash2', 'Delete feature', () => deleteFeature(lyr, leaf))
       );
