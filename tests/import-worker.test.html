@@ -1223,7 +1223,7 @@
               const style = host.getComputedStyle(button);
               assert(style.boxShadow === 'none' && style.borderTopWidth === '0px' && style.backgroundColor === 'rgba(0, 0, 0, 0)', 'Folder glyph retains a button box');
               const disclosure = button.matches('.kml-folder-row > button:first-child');
-              const minimum = width === 390 ? disclosure ? 36 : 44 : 24;
+              const minimum = width === 390 ? 32 : 24;
               const bounds = button.getBoundingClientRect();
               if (bounds.width) assert(bounds.width >= minimum && bounds.height >= minimum, 'Folder icon lost its click target');
             }
@@ -1390,8 +1390,10 @@
         undo.click();
         assert(leaf.feature.properties.name === 'Original', 'Earlier history was lost after discarding invalid text');
         const submit = async () => {
+          const closed = new Promise(resolve => doc.getElementById('dlg').addEventListener('close', resolve, { once: true }));
           doc.getElementById('dlgOk').click();
           doc.getAnimations().filter(animation => animation.effect.getComputedTiming().iterations !== Infinity).forEach(animation => animation.finish());
+          await closed;
           await pause();
         };
         const layer = app.state.active;
@@ -1427,7 +1429,7 @@
           await pause();
           const undoBounds = undo.getBoundingClientRect();
           const redoBounds = redo.getBoundingClientRect();
-          const buttonSize = width <= 760 ? 44 : width <= 1024 ? 36 : 28;
+          const buttonSize = width <= 1024 ? 32 : 28;
           assert(undoBounds.width === buttonSize && undoBounds.height === buttonSize, `History button sizing is incorrect at ${width}px`);
           assert(undoBounds.width === redoBounds.width && Math.abs(undoBounds.top - redoBounds.top) < 1 && redoBounds.left >= undoBounds.right && redoBounds.right <= host.innerWidth, `History buttons are not adjacent and in bounds at ${width}px`);
         }
@@ -1562,7 +1564,7 @@
             const controlBounds = control.getBoundingClientRect();
             const trayBounds = tray.getBoundingClientRect();
             assert(host.getComputedStyle(tray).visibility === 'visible', `Map action tray did not open at width ${width}`);
-            assert(controlBounds.height === (width <= 760 ? 44 : width <= 1024 ? 36 : 32), `Map control has an unexpected height at width ${width}`);
+            assert(controlBounds.height === (width <= 1024 ? 36 : 32), `Map control has an unexpected height at width ${width}`);
             if (width <= 1024) {
               assert(Math.abs(trayBounds.top - controlBounds.bottom - 5) < 1 && Math.abs(trayBounds.left - controlBounds.left) < 1, `Compact action tray is not below its button at width ${width}`);
               assert(trayBounds.left >= 0 && trayBounds.right <= host.innerWidth, `Compact action tray overflows the viewport at width ${width}`);
@@ -1657,7 +1659,7 @@
           assert(buttonBounds.top < nameBounds.bottom && buttonBounds.bottom > nameBounds.top, 'Rename is not aligned with the name');
           assert(name.scrollWidth > name.clientWidth && host.getComputedStyle(name).textOverflow === 'ellipsis', 'Long name does not truncate');
           assert(name.title === longName && rename.getAttribute('aria-label') === 'Rename layer', 'Name tooltip or accessible rename label was lost');
-          assert(buttonBounds.width === (width <= 1024 ? 44 : 28), 'Rename has the wrong desktop or touch size');
+          assert(buttonBounds.width === (width <= 1024 ? 32 : 28), 'Rename has the wrong desktop or touch size');
           assert(row.querySelectorAll('.layer-actions > button').length === 5, 'Rename remains in the lower actions');
         }
         doc.querySelector('.layer-rename').click();
@@ -1679,17 +1681,19 @@
           host.frameElement.style.width = `${width}px`;
           host.frameElement.style.height = '800px';
           await new Promise(resolve => host.setTimeout(resolve, 100));
-          doc.getElementById('sidebar').getAnimations().forEach(animation => animation.finish());
+          doc.getElementById('sidebar').getAnimations({ subtree: true }).forEach(animation => animation.finish());
           const mobile = width <= 1024;
           const tablet = width > 760 && mobile;
-          const expected = tablet ? 148 : mobile ? 188 : 112;
+          const expected = 112;
           const preview = doc.querySelector('table.attrs td.geometry-cell');
           assert(Math.abs(preview.getBoundingClientRect().width - expected) < 1, 'Action column width does not follow mobile mode');
           assert(parseFloat(host.getComputedStyle(doc.querySelector('table.attrs td.rn')).left) === expected, 'Sticky row numbers use the wrong action column offset');
           if (mobile) {
-            assert(host.getComputedStyle(doc.body).fontSize === (tablet ? '14px' : '16px'), 'Incorrect responsive body text size');
-            assert(host.getComputedStyle(doc.querySelector('table.attrs')).fontSize === (tablet ? '13px' : '16px'), 'Incorrect responsive table text size');
-            assert(doc.querySelector('.geometry-preview').getBoundingClientRect().width === (tablet ? 22 : 28), 'Incorrect responsive geometry preview size');
+            assert(host.getComputedStyle(doc.body).fontSize === '14px', 'Incorrect responsive body text size');
+            assert(host.getComputedStyle(doc.querySelector('table.attrs')).fontSize === '12px', 'Incorrect responsive table text size');
+            assert(doc.querySelector('.geometry-preview').getBoundingClientRect().width === 18, 'Incorrect responsive geometry preview size');
+            assert(doc.querySelector('table.attrs tbody tr').getBoundingClientRect().height <= 32, 'Mobile table rows are oversized');
+            assert(doc.querySelector('table.attrs thead th:nth-child(3)').getBoundingClientRect().width <= 130, 'Automatic mobile data columns are oversized');
             if (tablet) {
               assert(doc.getElementById('sidebar').getBoundingClientRect().width === 300, 'Tablet sidebar leaves too little map space');
               assert(doc.querySelector('.kml-folder-row').getBoundingClientRect().height <= 36, 'Tablet folder rows are oversized');
@@ -1714,18 +1718,18 @@
             for (const input of doc.querySelectorAll('#layerList input[type=checkbox], #layerList input[type=color]')) {
               const rect = input.getBoundingClientRect();
               if (!rect.width || !rect.height) continue;
-              assert(rect.width === (tablet ? 24 : 36) && rect.height === (tablet ? 24 : 36), 'Layer checkbox or colour swatch has the wrong touch size');
+              assert(rect.width === 24 && rect.height === 24, 'Layer checkbox or colour swatch has the wrong touch size');
             }
-            for (const button of doc.querySelectorAll('button, #map .leaflet-buttons-control-button, #map .leaflet-control-layers-toggle')) {
+            for (const button of doc.querySelectorAll('button:not(#splitter), #map .leaflet-buttons-control-button, #map .leaflet-control-layers-toggle')) {
               const rect = button.getBoundingClientRect();
               if (!rect.width || !rect.height) continue;
               const disclosure = button.matches('.kml-folder-row > button:first-child');
-              const targetSize = tablet ? button.closest('#layerList, table.attrs') ? 32 : 36 : disclosure ? 36 : 44;
+              const targetSize = button.closest('table.attrs') ? 24 : button.closest('#tableBar, #layerList') ? 32 : 36;
               assert(rect.width >= targetSize - .5 && rect.height >= targetSize - .5, `Small mobile target: ${button.getAttribute('aria-label') || button.title || button.textContent}`);
               const icon = button.querySelector('svg');
               if (icon) {
                 const glyph = icon.getBoundingClientRect();
-                const glyphSize = tablet ? button.closest('#layerList') ? 16 : 18 : disclosure ? 20 : 24;
+                const glyphSize = button.closest('table.attrs, #layerList') ? 16 : 18;
                 assert(Math.abs(glyph.width - glyphSize) < .5 && Math.abs(glyph.height - glyphSize) < .5, `Small mobile glyph: ${button.getAttribute('aria-label') || button.title || button.textContent}`);
               }
             }
@@ -3294,6 +3298,7 @@
           { ...point({ name: 'EFGH' }), kml: { folderIds: ['second-site'] } },
           { ...point({ name: 'EFGHFM1' }), kml: { folderIds: ['second-site'] } },
           { ...point({ name: 'ABCDQM1' }), kml: { folderIds: ['site'] } },
+          { ...point({ name: 'ABCDFM1' }), kml: { folderIds: ['site', 'lte'] } },
         ];
         const kmlFolders = [{ id: 'site', name: 'ABCD', visible: true }, { id: 'nr', parentId: 'site', name: 'ABCDVM1', visible: true }, { id: 'lte', parentId: 'site', name: 'ABCDFM1', visible: true }, { id: 'second-site', name: 'EFGH', visible: true }];
         const layer = app.createLayer({ name: 'Technology sites', format: 'kml', features, fields: ['name'], types: { name: 'string' }, kmlFolders, technologyDigits: ['V'] });
@@ -3312,9 +3317,29 @@
         assert(app.map.hasLayer(leaves[0]) && app.map.hasLayer(leaves[3]) && app.map.hasLayer(leaves[4]) && !app.map.hasLayer(leaves[1]), 'Single-digit LTE filtering is incorrect');
         choice('V').click();
         assert(app.map.hasLayer(leaves[1]) && app.map.hasLayer(leaves[4]) && !app.map.hasLayer(leaves[5]), 'Multi-select filtering did not union LTE and NR matches');
-        assert(doc.querySelectorAll('#tableWrap tbody tr').length === 5, 'Attribute table does not follow technology filtering');
+        assert(doc.querySelectorAll('#tableWrap tbody tr').length === 6, 'Attribute table does not follow technology filtering');
+        const doubleClick = target => {
+          for (const detail of [1, 2]) target.dispatchEvent(new host.MouseEvent('click', { bubbles: true, cancelable: true, detail }));
+          target.dispatchEvent(new host.MouseEvent('dblclick', { bubbles: true, cancelable: true, detail: 2 }));
+        };
+        for (const code of ['V', 'NR', 'F']) {
+          const target = code === 'F' ? choice(code).parentElement : choice(code);
+          doubleClick(target);
+          assert(code === 'NR' ? layer.technologyDigits.length === 10 : layer.technologyDigits.join(',') === code, `Double-click did not isolate ${code}`);
+          assert(code === 'F' ? !app.map.hasLayer(leaves[1]) && app.map.hasLayer(leaves[4]) : app.map.hasLayer(leaves[1]) && !app.map.hasLayer(leaves[4]), `Isolating ${code} did not update the map`);
+          doubleClick(target);
+          assert([...layer.technologyDigits].sort().join(',') === 'F,V' && doc.querySelectorAll('#tableWrap tbody tr').length === 6, `Double-click did not restore the previous filter after ${code}`);
+        }
         choice('all').click();
         assert(layer.technologyDigits === null && app.map.hasLayer(leaves[5]), 'All technologies did not restore unmapped sectors');
+        doubleClick(choice('V'));
+        doubleClick(choice('V'));
+        assert(layer.technologyDigits === null, 'Double-click did not restore All technologies');
+        choice('all').click();
+        doubleClick(choice('F'));
+        doubleClick(choice('F'));
+        assert(layer.technologyDigits.length === 0 && leaves.every(leaf => !app.map.hasLayer(leaf)), 'Double-click did not restore an empty selection');
+        choice('all').click();
         const expected = { V: ['NR', '850'], W: ['NR', '850e'], Z: ['NR', '2600'], X: ['NR', '2600'], C: ['NR', '3600'], R: ['NR', '3700'], D: ['NR', '26000'], P: ['NR', '1800'], Y: ['NR', '2100'], U: ['NR', '700'], F: ['LTE', '700'], E: ['LTE', '1800'], J: ['LTE', '2100'], A: ['LTE', '2600'], B: ['LTE', '2600'], H: ['LTE', '850e'], K: ['LTE', '1800'] };
         Object.entries(expected).forEach(([code, [type, band]]) => {
           const input = choice(code);
@@ -3326,13 +3351,71 @@
         choice('LTE').click();
         assert(layer.technologyDigits.length === 17 && app.map.hasLayer(leaves[4]) && !app.map.hasLayer(leaves[5]), 'Combining LTE and NR groups included unmapped codes');
         choice('all').click();
-        filter.open = true;
+        const summary = filter.querySelector('summary');
+        const chevron = summary.querySelector('.technology-chevron');
+        assert(chevron && summary.lastElementChild === chevron, 'Technology disclosure is missing its trailing chevron');
+        const settleDisclosure = async () => {
+          filter.getAnimations({ subtree: true }).forEach(animation => animation.finish());
+          await pause();
+        };
+        summary.click();
+        assert(filter.open && summary.getAttribute('aria-expanded') === 'true', 'Technology filter did not expand');
+        if (!host.matchMedia('(prefers-reduced-motion: reduce)').matches) assert(filter.getAnimations().length > 0, 'Technology expansion was not animated');
+        await settleDisclosure();
+        summary.click();
+        assert(summary.getAttribute('aria-expanded') === 'false', 'Technology chevron did not update on collapse');
+        await settleDisclosure();
+        assert(!filter.open && !filter.style.overflow, 'Technology collapse did not finish and clean up');
+        summary.click();
+        summary.click();
+        summary.click();
+        await settleDisclosure();
+        assert(filter.open && summary.getAttribute('aria-expanded') === 'true' && !filter.style.overflow, 'Rapid technology toggles left the disclosure in the wrong state');
         for (const width of [1440, 390]) {
           host.frameElement.style.width = `${width}px`;
           await pause();
           const bounds = filter.getBoundingClientRect();
           assert(filter.scrollWidth <= filter.clientWidth + 1 && bounds.left >= 0 && bounds.right <= host.innerWidth, `Technology choices overflow at ${width}px`);
+          const iconBounds = chevron.getBoundingClientRect();
+          assert(Math.abs(iconBounds.right - summary.getBoundingClientRect().right) < 1, `Technology chevron is not right-aligned at ${width}px`);
         }
+      }));
+      await test('Technology digits come only from full cell names, never descriptive or cell-like folder names', () => withEditor(async host => {
+        const app = host.__geoEditor;
+        await app.handleFiles([jsonFile(collection([point()]), 'cell-names-anchor.geojson')]);
+        app.map.setView([-35, 149], 15, { animate: false });
+        const examples = [
+          ['HELE', 'HELENSVALE R/T', ['C', 'V', 'A', 'B', 'J', 'E', 'F']],
+          ['SADD', 'SADDLEBACK MOUNTAIN CMTS', ['V', 'E', 'H', 'F']],
+          ['ACTO', 'ACTON ANU WARD RD', ['C', 'Z', 'B', 'J', 'E', 'F']],
+          ['LOXT', 'LOXTON WATER TOWER MOB', ['C', 'R', 'Z', 'V', 'A', 'B', 'J', 'K', 'E', 'H', 'F']],
+        ];
+        const features = [];
+        const kmlFolders = [];
+        examples.forEach(([site, description, digits]) => {
+          kmlFolders.push({ id: site, name: site, visible: true }, { id: `${site}-description`, parentId: site, name: description, visible: true });
+          features.push({ ...point({ name: site, description: `${site}NM1` }), kml: { folderIds: [site, `${site}-description`] } });
+          digits.forEach(digit => {
+            const id = `${site}-${digit}`;
+            kmlFolders.push({ id, parentId: site, name: 'Sector geometry', visible: true });
+            features.push({ ...point({ name: `${site}${digit}M1` }), kml: { folderIds: [site, id] } });
+            features.push({ ...point({ name: digit }), kml: { folderIds: [site, id] } });
+          });
+        });
+        kmlFolders.push({ id: 'decoy', parentId: 'HELE', name: 'HELENM1', visible: true });
+        features.push({ ...point({ name: 'N' }), kml: { folderIds: ['HELE', 'decoy'] } });
+        const layer = app.createLayer({ name: 'Full cell names only', format: 'kml', features, kmlFolders, technologyDigits: ['N', 'L', 'O'] });
+        const leaves = layer.group.getLayers();
+        assert(leaves.every(leaf => !app.map.hasLayer(leaf)), 'Descriptive folders or descriptions generated false technology matches');
+        assert(['N', 'L', 'O'].every(code => !layer.technologyIndex.available.has(code)), 'Unmapped choices include digits from folder names');
+        examples.forEach(([site, description, digits]) => {
+          const marker = leaves.find(leaf => leaf.feature.properties.name === site);
+          const actual = [...layer.technologyIndex.codes.get(marker)].sort().join(',');
+          assert(actual === [...digits].sort().join(','), `${site} did not inherit only its real cell technology digits`);
+        });
+        const label = leaves.find(leaf => leaf.feature.properties.name === 'C');
+        assert(layer.technologyIndex.codes.get(label).has('C'), 'Child labels did not inherit their actual cell feature technology');
+        assert(!layer.technologyIndex.codes.has(leaves.at(-1)), 'A cell-looking folder with no actual cell feature classified a label');
       }));
       await test('Site labels can be hidden without hiding KML sites or other labels', () => withEditor(async (host, doc) => {
         const app = host.__geoEditor;
@@ -3592,8 +3675,8 @@
         await app.handleFiles([jsonFile(collection(features), 'table-columns.geojson')]);
         app.state.page = 9999;
         doc.getElementById('pgNext').click();
-        const table = doc.querySelector('table.attrs');
-        const row = table.tBodies[0].rows[0];
+        let table = doc.querySelector('table.attrs');
+        let row = table.tBodies[0].rows[0];
         assert(row.cells[0].querySelector('.geometry-preview'), 'Missing leading geometry preview');
         assert(row.cells[0].querySelectorAll('button').length === 3, 'Feature actions missing from preview column');
         assert(!row.cells[1].querySelector('button'), 'Feature actions remain in row-number column');
@@ -3601,6 +3684,9 @@
         assert(row.cells[1].querySelector('.rn-content > span').textContent === '1001', 'Expected four-digit row number');
         for (const width of ['100%', '360px']) {
           host.frameElement.style.width = width;
+          await new Promise(resolve => host.setTimeout(resolve, 100));
+          table = doc.querySelector('table.attrs');
+          row = table.tBodies[0].rows[0];
           for (const cell of [row.cells[0], row.cells[1]]) {
             const bounds = cell.getBoundingClientRect();
             for (const element of cell.querySelectorAll('button, .geometry-preview, .rn-content > span')) {

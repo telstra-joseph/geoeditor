@@ -1540,21 +1540,29 @@
     });
     const codes = new Map();
     const available = new Set();
+    const cellFolders = new Map();
     leaves.forEach(leaf => {
       if (!leaf.feature?.kml) return;
       const name = names.get(leaf);
-      const folders = (leaf.feature.kml.folderIds || []).map(id => String(lyr.kmlFolderMap.get(id)?.name ?? '').trim().toUpperCase());
-      const site = folders.find(folder => sites.has(folder)) || name.slice(0, 4);
-      const sector = [name, ...folders.slice().reverse()].find(candidate => candidate.startsWith(site) && /^[A-Z]$/.test(candidate[4] || ''));
-      const code = sector?.[4];
+      const code = /^[A-Z0-9]{4}([A-Z])[A-Z0-9]*\d[A-Z0-9]*$/.exec(name)?.[1];
       if (code) {
         codes.set(leaf, new Set([code]));
         available.add(code);
-        sites.get(site)?.add(code);
+        sites.get(name.slice(0, 4))?.add(code);
+        const folderId = leaf.feature.kml.folderIds?.at(-1);
+        if (folderId) {
+          if (!cellFolders.has(folderId)) cellFolders.set(folderId, new Set());
+          cellFolders.get(folderId).add(code);
+        }
       }
     });
     names.forEach((name, leaf) => {
-      if (!codes.has(leaf) && sites.has(name)) codes.set(leaf, sites.get(name));
+      if (codes.has(leaf) || !leaf.feature?.kml) return;
+      if (sites.has(name)) codes.set(leaf, sites.get(name));
+      else if (name.length <= 4) {
+        const folderId = (leaf.feature.kml.folderIds || []).slice().reverse().find(id => cellFolders.has(id));
+        if (folderId) codes.set(leaf, cellFolders.get(folderId));
+      }
     });
     lyr.technologyIndex = { codes, available, names };
     return lyr.technologyIndex;
@@ -3273,9 +3281,51 @@
     details.addEventListener('click', event => event.stopPropagation());
     const summary = document.createElement('summary');
     const summaryText = document.createElement('span');
-    summary.append(actionIcon('RadioTower'), summaryText);
+    const chevron = actionIcon('ChevronDown');
+    chevron.classList.add('technology-chevron');
+    chevron.setAttribute('aria-hidden', 'true');
+    summary.setAttribute('aria-expanded', 'false');
+    summary.setAttribute('aria-controls', `technology-options-${lyr.id}`);
+    summary.append(actionIcon('RadioTower'), summaryText, chevron);
     const body = document.createElement('div');
+    body.id = `technology-options-${lyr.id}`;
     body.className = 'technology-options';
+    let disclosureMotion = null;
+    summary.addEventListener('click', event => {
+      event.preventDefault();
+      const expanding = summary.getAttribute('aria-expanded') !== 'true';
+      const height = details.getBoundingClientRect().height;
+      disclosureMotion?.cancel();
+      disclosureMotion = null;
+      summary.setAttribute('aria-expanded', String(expanding));
+      body.inert = !expanding;
+      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        details.open = expanding;
+        details.style.removeProperty('overflow');
+        return;
+      }
+      details.open = true;
+      const style = getComputedStyle(details);
+      const collapsedHeight = summary.getBoundingClientRect().height + parseFloat(style.paddingTop) + parseFloat(style.paddingBottom) + parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth);
+      const targetHeight = expanding ? details.getBoundingClientRect().height : collapsedHeight;
+      details.style.overflow = 'hidden';
+      const motion = details.animate([{ height: `${height}px` }, { height: `${targetHeight}px` }], {
+        duration: 180, easing: 'cubic-bezier(.22, 1, .36, 1)', fill: 'both',
+      });
+      disclosureMotion = motion;
+      motion.finished.then(() => {
+        if (disclosureMotion !== motion) return;
+        details.open = expanding;
+        motion.cancel();
+        details.style.removeProperty('overflow');
+        disclosureMotion = null;
+      }).catch(() => {});
+    });
+    details.addEventListener('toggle', () => {
+      if (disclosureMotion) return;
+      summary.setAttribute('aria-expanded', String(details.open));
+      body.inert = !details.open;
+    });
     const makeChoice = (text, value) => {
       const label = document.createElement('label');
       const input = document.createElement('input');
@@ -3322,7 +3372,9 @@
       });
       summaryText.textContent = `Technology · ${lyr.technologyDigits === null ? 'All' : selected ? `${selected} selected` : 'None'}`;
     };
+    let isolation = null;
     const apply = () => {
+      isolation = null;
       const selected = choices.filter(input => input.checked).map(input => input.value);
       lyr.technologyDigits = selected.length === choices.length ? null : selected;
       refresh();
@@ -3335,6 +3387,23 @@
     all.input.addEventListener('change', () => {
       choices.forEach(input => { input.checked = all.input.checked; });
       apply();
+    });
+    [{ input: all.input, members: choices }, ...groups, ...choices.map(input => ({ input, members: [input] }))].forEach(({ input, members }) => {
+      let beforeClick = null;
+      const label = input.parentElement;
+      label.addEventListener('click', event => {
+        if (event.detail === 1) beforeClick = { selected: lyr.technologyDigits?.slice() ?? null, isolation };
+      });
+      label.addEventListener('dblclick', event => {
+        event.preventDefault();
+        const previous = beforeClick || { selected: lyr.technologyDigits?.slice() ?? null, isolation };
+        const restoring = previous.isolation?.value === input.value;
+        const selected = restoring ? previous.isolation.selected : members.map(member => member.value);
+        choices.forEach(choice => { choice.checked = selected === null || selected.includes(choice.value); });
+        apply();
+        if (!restoring) isolation = { value: input.value, selected: previous.selected };
+        beforeClick = null;
+      });
     });
     refresh();
     details.append(summary, body);
@@ -3515,6 +3584,9 @@
 
     const table = document.createElement('table');
     table.className = 'attrs';
+    const compactTable = window.matchMedia('(max-width: 1024px)').matches;
+    const minimumColumnWidth = compactTable ? 96 : MIN_COLUMN_WIDTH;
+    const columnScale = compactTable ? .65 : 1;
     const savedWidths = columnWidths.get(lyr) || new Map();
     columnWidths.set(lyr, savedWidths);
     const colgroup = document.createElement('colgroup');
@@ -3523,10 +3595,10 @@
     table.appendChild(colgroup);
     let sizes;
     const resizeColumn = (index, width) => {
-      sizes[index] = Math.max(MIN_COLUMN_WIDTH, Math.round(width));
+      sizes[index] = Math.max(minimumColumnWidth, Math.round(width));
       columns[index].style.width = `${sizes[index]}px`;
       table.style.width = `calc(var(--geometry-column-width) + ${sizes.slice(1).reduce((total, size) => total + size, 0)}px)`;
-      savedWidths.set(lyr.fields[index - 2], sizes[index]);
+      savedWidths.set(lyr.fields[index - 2], sizes[index] / columnScale);
       table.tHead.rows[0].cells[index].querySelector('.column-resizer').setAttribute('aria-valuenow', sizes[index]);
     };
     const thead = table.createTHead().insertRow();
@@ -3575,7 +3647,7 @@
       resizer.setAttribute('role', 'separator');
       resizer.setAttribute('aria-label', resizer.title);
       resizer.setAttribute('aria-orientation', 'vertical');
-      resizer.setAttribute('aria-valuemin', MIN_COLUMN_WIDTH);
+      resizer.setAttribute('aria-valuemin', minimumColumnWidth);
       resizer.title = `Resize column ${f}; double-click to fit`;
       const fitColumn = async () => {
         await document.fonts.ready;
@@ -3678,13 +3750,13 @@
     });
     wrap.appendChild(table);
     sizes = [...thead.cells].map((cell, index) => index === 0 ? parseFloat(getComputedStyle(previewHeader).minWidth) : index === 1
-      ? Math.max(40, String(items.length).length * 10 + 16)
-      : savedWidths.get(lyr.fields[index - 2]) || Math.max(MIN_COLUMN_WIDTH, cell.getBoundingClientRect().width));
+      ? Math.max(compactTable ? 32 : 40, String(items.length).length * (compactTable ? 8 : 10) + 12)
+      : savedWidths.has(lyr.fields[index - 2]) ? Math.max(minimumColumnWidth, Math.round(savedWidths.get(lyr.fields[index - 2]) * columnScale))
+      : Math.max(minimumColumnWidth, compactTable ? Math.min(128, cell.getBoundingClientRect().width) : cell.getBoundingClientRect().width));
     columns.forEach((column, index) => { column.style.width = index === 0 ? 'var(--geometry-column-width)' : `${sizes[index]}px`; });
     table.style.tableLayout = 'fixed';
     table.style.width = `calc(var(--geometry-column-width) + ${sizes.slice(1).reduce((total, size) => total + size, 0)}px)`;
     lyr.fields.forEach((field, index) => {
-      savedWidths.set(field, sizes[index + 2]);
       thead.cells[index + 2].querySelector('.column-resizer').setAttribute('aria-valuenow', sizes[index + 2]);
     });
   }
@@ -4733,6 +4805,7 @@
   }
   const panelObserver = new ResizeObserver(updatePanelLayout);
   [$('main'), $('sidebar'), $('tablePanel')].forEach(panel => panelObserver.observe(panel));
+  touchControls.addEventListener('change', () => { updatePanelLayout(); renderTable(); });
 
   let tableCollapsed = false;
   const setTableCollapsed = (collapsed, animated = false) => {

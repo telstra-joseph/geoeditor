@@ -1,4 +1,4 @@
-/* Geo Editor - Version 3.7 | October 2026 */
+/* Geo Editor - Version 3.9 | November 2026 */
 @font-face {
   font-family: 'Geist';
   src: url('../lib/geist.woff2') format('woff2');
@@ -201,6 +201,9 @@ button:disabled { opacity: .48; cursor: not-allowed; box-shadow: none; transform
 #layerList .layer-technology-filter { grid-column: 1 / -1; min-width: 0; border-top: 1px solid var(--line); padding-top: 4px; }
 #layerList .layer-technology-filter summary { display: flex; align-items: center; gap: 6px; min-height: 28px; cursor: pointer; }
 #layerList .layer-technology-filter summary svg { width: 16px; height: 16px; flex: 0 0 16px; }
+#layerList .layer-technology-filter summary > span { min-width: 0; overflow-wrap: anywhere; }
+#layerList .layer-technology-filter .technology-chevron { margin-left: auto; transition: transform 180ms cubic-bezier(.22, 1, .36, 1); }
+#layerList .layer-technology-filter summary[aria-expanded="true"] .technology-chevron { transform: rotate(180deg); }
 #layerList .technology-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 6px 0; }
 #layerList .technology-all { grid-column: 1 / -1; }
 #layerList .technology-options fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
@@ -210,7 +213,7 @@ button:disabled { opacity: .48; cursor: not-allowed; box-shadow: none; transform
 #layerList .technology-options input:indeterminate::after { width: 8px; height: 0; border: 0; border-top: 2px solid #fff; opacity: 1; transform: none; }
 @media (max-width: 1024px) {
   #layerList .technology-options { grid-template-columns: minmax(0, 1fr); }
-  #layerList .layer-technology-filter summary, #layerList .technology-options label { min-height: 44px; font-size: 14px; }
+  #layerList .layer-technology-filter summary, #layerList .technology-options label { min-height: 36px; font-size: 13px; }
 }
 #layerList .layer-actions { display: flex; align-items: center; gap: 4px; }
 #layerList .lmeta button, #layerList .layer-rename { width: 28px; height: 28px; min-height: 28px; flex: 0 0 28px; padding: 0; font-size: 13px; }
@@ -713,8 +716,8 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
 }
 
 @media (max-width: 1024px) {
-  body { font-size: 16px; }
-  button { min-width: 44px; min-height: 44px; font-size: 16px; }
+  body { font-size: 14px; }
+  button { min-width: 36px; min-height: 36px; font-size: 14px; }
   #sidebar h2 { font-size: 14px; }
   #layerList .lmeta, #layerList .kml-folder-count, #tableCount, .popup-form label { font-size: 14px; }
   #layerList .kml-folder-name, #emptyUpload { font-size: 15px; }
@@ -725,46 +728,57 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
   #layerList .layer-reorder svg, #layerList .layer-rename svg, #layerList .lmeta button svg, #layerList .kml-folder-row button svg,
   #tableBar button svg, table.attrs button svg, #aboutDlg .action-icon,
   #map .leaflet-control-zoom svg, #map .leaflet-pm-toolbar svg, #map .leaflet-control-layers-toggle svg, #map .map-fullscreen-toggle svg {
-    width: 24px; height: 24px; flex: 0 0 24px;
+    width: 18px; height: 18px; flex: 0 0 18px;
   }
-  #map .leaflet-pm-toolbar .control-icon { width: 24px; height: 24px; }
-  #btnTheme, #btnToggleLayers, #btnEditHelp { width: 44px; height: 44px; flex-basis: 44px; }
-  #headerActions > button { width: 44px; height: 44px; padding: 0; }
+  #map .leaflet-pm-toolbar .control-icon { width: 18px; height: 18px; }
+  #btnTheme, #btnToggleLayers, #btnEditHelp { width: 36px; height: 36px; flex-basis: 36px; }
+  #headerActions > button { width: 36px; height: 36px; padding: 0; }
   #headerActions .button-label { display: none; }
-  .progress-cancel, #aboutDlg .about-close { width: 44px; height: 44px; }
-  #aboutDlg .about-feedback { min-height: 44px; }
+  .progress-cancel, #aboutDlg .about-close { width: 36px; height: 36px; }
+  #aboutDlg .about-feedback { min-height: 36px; }
   dialog menu { flex-wrap: wrap; }
-  #layerList .layer-reorder, #layerList .layer-rename, #layerList .lmeta button, #layerList .kml-folder-row button { width: 44px; height: 44px; min-height: 44px; flex-basis: 44px; }
+  #layerList .layer-reorder, #layerList .layer-rename, #layerList .lmeta button, #layerList .kml-folder-row button { width: 32px; height: 32px; min-width: 32px; min-height: 32px; flex-basis: 32px; }
+  #layerList .layer-reorder svg, #layerList .layer-rename svg, #layerList .lmeta button svg, #layerList .kml-folder-row button svg { width: 16px; height: 16px; flex-basis: 16px; }
   #layerList > li > .layer-reorder, #layerList > li > input { grid-row: 1 / span 2; }
   #layerList > li > .lname { grid-column: -3 / -2; grid-row: 1; align-self: end; }
   #layerList > li > .layer-rename { grid-column: -2 / -1; grid-row: 1 / span 2; }
   #layerList .lmeta { display: contents; }
   #layerList .lmeta > span:first-child { grid-column: -3 / -2; grid-row: 2; align-self: start; min-width: 0; overflow-wrap: anywhere; }
   #layerList .lmeta .spacer { display: none; }
-  #layerList .layer-actions { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(5, 44px); gap: 4px; margin-top: 4px; }
-  #layerList input[type=checkbox], #layerList input[type=color] { width: 36px; height: 36px; }
-  #layerList input[type=checkbox]::after { width: 7px; height: 13px; border-width: 0 3px 3px 0; }
-  #layerList .kml-folder-row { grid-template-columns: 36px 36px minmax(0, 1fr) auto 44px; min-height: 44px; }
-  #layerList .kml-folder-row > button:first-child { width: 36px; height: 36px; min-width: 36px; min-height: 36px; flex-basis: 36px; }
-  #layerList .kml-folder-row > button:first-child svg { width: 20px; height: 20px; flex-basis: 20px; }
+  #layerList .layer-actions { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(5, 32px); gap: 4px; margin-top: 4px; }
+  #layerList input[type=checkbox], #layerList input[type=color] { width: 24px; height: 24px; }
+  #layerList input[type=checkbox]::after { width: 5px; height: 9px; border-width: 0 2px 2px 0; }
+  #layerList .kml-folder-row { grid-template-columns: 32px 24px minmax(0, 1fr) auto 32px; min-height: 32px; }
+  #layerList .kml-folder-row > button:first-child { width: 32px; height: 32px; min-width: 32px; min-height: 32px; flex-basis: 32px; }
+  #layerList .kml-folder-row > button:first-child svg { width: 16px; height: 16px; flex-basis: 16px; }
   #map .leaflet-control-zoom a, #map .leaflet-pm-toolbar .leaflet-buttons-control-button,
-  #map .leaflet-control-layers-toggle { width: 44px; height: 44px; }
-  #map .leaflet-pm-toolbar .leaflet-pm-actions-container .leaflet-pm-action { min-width: 44px; height: 44px; }
-  #map .leaflet-control-layers label { min-height: 44px; }
-  #map .leaflet-popup-close-button { display: grid; place-items: center; width: 44px; height: 44px; font-size: 28px; line-height: 1; }
+  #map .leaflet-control-layers-toggle, #map.compact-controls .map-fullscreen-toggle { width: 36px; height: 36px; flex-basis: 36px; }
+  #map .leaflet-control-address button .action-icon { width: 18px; height: 18px; flex-basis: 18px; }
+  #map .leaflet-pm-toolbar .leaflet-pm-actions-container .leaflet-pm-action { min-width: 36px; height: 36px; }
+  #map .leaflet-control-layers label { min-height: 36px; }
+  #map .leaflet-popup-close-button { display: grid; place-items: center; width: 36px; height: 36px; font-size: 24px; line-height: 1; }
   .popup-form h4 { padding-right: 28px; }
-  table.attrs .sort, table.attrs .x { width: 44px; height: 44px; min-height: 44px; flex-basis: 44px; }
-  table.attrs .fname { min-height: 44px; }
-  table.attrs .rn-actions button { width: 44px; height: 44px; min-height: 44px; }
-  table.attrs { --geometry-column-width: 188px; font-size: 16px; }
-  table.attrs .geometry-preview { width: 28px; height: 28px; flex-basis: 28px; }
+  table.attrs button { min-width: 24px; min-height: 24px; font-size: 12px; }
+  table.attrs .sort, table.attrs .x, table.attrs .rn-actions button { width: 24px; height: 24px; min-height: 24px; flex-basis: 24px; }
+  table.attrs .fname { min-width: 0; min-height: 24px; }
+  table.attrs { --geometry-column-width: 112px; font-size: 12px; }
+  table.attrs .th { min-height: 30px; gap: 2px; padding: 2px; }
+  table.attrs .preview-content { gap: 4px; padding: 0 4px; }
+  table.attrs .geometry-preview { width: 18px; height: 18px; flex-basis: 18px; }
+  table.attrs button svg { width: 16px; height: 16px; flex-basis: 16px; }
+  table.attrs td input { height: 28px; padding: 3px 6px; font-size: 12px; }
+  table.attrs td input:focus { font-size: 16px; }
+  table.attrs td.rn { min-width: 32px; padding: 0 4px; }
   #tablePanel { min-height: 120px; }
-  #tableBar { display: grid; grid-template-columns: minmax(0, 1fr) repeat(5, 44px); gap: 8px; align-items: center; }
-  #tableBar button { height: 44px; }
+  #tableBar { display: grid; grid-template-columns: minmax(0, 1fr) repeat(5, 32px); gap: 5px; align-items: center; }
+  #tableBar button { min-width: 32px; min-height: 32px; height: 32px; font-size: 12px; }
+  #tableBar button svg { width: 18px; height: 18px; flex-basis: 18px; }
+  #tableTitle { font-size: 13px; }
+  #tableCount, #pgInfo { font-size: 12px; }
   #tableHeading { grid-column: 1; grid-row: 1; }
   #tableTitle { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #tableActions { display: contents; }
-  #tableActions > button { grid-row: 1; width: 44px; padding: 0; }
+  #tableActions > button { grid-row: 1; width: 32px; padding: 0; }
   #btnFilter { display: inline-flex; grid-column: 2; }
   #btnUndo { grid-column: 3; }
   #btnRedo { grid-column: 4; }
@@ -790,7 +804,7 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
   .feature-description { font-size: 12px; }
   #tableTitle, dialog p, dialog output, #aboutDlg p { font-size: 14px; }
   button .action-icon,
-  #tableBar button svg, table.attrs button svg, #aboutDlg .action-icon,
+  #tableBar button svg, #aboutDlg .action-icon,
   #map .leaflet-control-zoom svg, #map .leaflet-pm-toolbar svg, #map .leaflet-control-layers-toggle svg, #map .map-fullscreen-toggle svg {
     width: 18px; height: 18px; flex-basis: 18px;
   }
@@ -818,17 +832,14 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
   #map .leaflet-pm-toolbar .leaflet-pm-actions-container .leaflet-pm-action { min-width: 36px; height: 36px; }
   #map .leaflet-control-layers label { min-height: 36px; }
   #map .leaflet-popup-close-button { width: 36px; height: 36px; font-size: 24px; }
-  table.attrs { --geometry-column-width: 148px; font-size: 13px; }
-  table.attrs .sort, table.attrs .x, table.attrs .rn-actions button { width: 32px; height: 32px; min-width: 32px; min-height: 32px; flex-basis: 32px; }
-  table.attrs .fname { min-height: 32px; }
-  table.attrs .geometry-preview { width: 22px; height: 22px; flex-basis: 22px; }
   #tablePanel { min-height: 96px; }
-  #tableBar { grid-template-columns: minmax(0, 1fr) repeat(5, 36px); gap: 6px; }
-  #tableBar button { height: 36px; }
-  #tableActions > button { width: 36px; }
 }
 
 @media (max-width: 760px) {
+  #map .leaflet-control-address, #map .address-toggle, #map .address-form { height: 36px; }
+  #map .leaflet-control-address, #map .address-toggle { width: 36px; }
+  #map .address-form input { height: 36px; }
+  #map .address-form > button { width: 36px; height: 36px; flex-basis: 36px; }
   #emptyState { padding: 0 48px 32px; }
   #emptyUpload { width: min(240px, 100%); padding: 10px 12px; gap: 2px; border-radius: 8px; font-size: 14px; }
   #emptyState .big { font-size: 16px; margin-bottom: 2px; }
@@ -908,7 +919,7 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
   button, select, #sidebar, #btnToggleLayers svg, #layerList li, #splitter, table.attrs tbody tr, .toast, dialog[open],
   #map .leaflet-bar a, #map .leaflet-control-layers-toggle,
   #map .leaflet-control-layers-list, #map .leaflet-control-layers label,
-  #map .leaflet-pm-actions-container, #layerList input[type=checkbox], #layerList input[type=checkbox]::after,
+  #map .leaflet-pm-actions-container, #layerList input[type=checkbox], #layerList input[type=checkbox]::after, #layerList .technology-chevron,
   dialog .radio-options label, dialog .radio-options input, dialog .radio-options input::before {
     animation-duration: .01ms !important;
     transition-duration: .01ms !important;
