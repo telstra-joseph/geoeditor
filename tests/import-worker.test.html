@@ -1230,6 +1230,10 @@
         const toolbars = [...doc.querySelectorAll('.leaflet-pm-toolbar')];
         const draw = doc.querySelector('.leaflet-pm-icon-polygon').closest('a');
         const checkDisabled = disabled => {
+          assert(doc.querySelector('.map-fullscreen-toggle').disabled === disabled, 'Fullscreen availability does not match the layer state');
+          assert(doc.querySelector('.leaflet-control-layers-toggle').getAttribute('aria-disabled') === String(disabled), 'Basemap availability does not match the layer state');
+          assert(app.map.zoomControl._disabled === disabled && app.map.zoomControl.getContainer().inert === disabled, 'Zoom availability does not match the layer state');
+          assert(doc.getElementById('btnSession').disabled === disabled, 'Session availability does not match the unsaved layer state');
           assert(toolbars.every(toolbar => toolbar.inert === disabled && toolbar.getAttribute('aria-disabled') === String(disabled)), 'Toolbar interaction does not match the layer state');
           assert(doc.getElementById('emptyState').classList.contains('hidden') !== disabled, 'Import prompt does not match the layer state');
           for (const id of ['sidebar', 'tablePanel']) {
@@ -1240,6 +1244,11 @@
           }
         };
         checkDisabled(true);
+        const zoom = app.map.getZoom();
+        doc.querySelector('.map-fullscreen-toggle').click();
+        doc.querySelector('.leaflet-control-layers-toggle').click();
+        doc.querySelector('.leaflet-control-zoom-in').click();
+        assert(!app.map.getContainer().classList.contains('map-fullscreen') && !doc.querySelector('.leaflet-control-layers-expanded') && app.map.getZoom() === zoom, 'An empty-map control remained actionable');
         draw.click();
         assert(!app.map.pm.globalDrawModeEnabled(), 'Drawing started without a layer');
         for (const width of [1440, 390]) {
@@ -1945,6 +1954,7 @@
         assert(!container.classList.contains('map-fullscreen') && button.getAttribute('aria-pressed') === 'false' && nativeRequests === 0, 'Escape did not restore the editor without browser fullscreen');
       }));
       await test('Basemap button toggles its pop-up on desktop and phones with keyboard dismissal', () => withEditor(async (host, doc) => {
+        await host.__geoEditor.handleFiles([jsonFile(collection([point()]), 'basemap-controls.geojson')]);
         const errors = [];
         const captureError = event => errors.push(event.message);
         host.addEventListener('error', captureError);
@@ -2164,7 +2174,7 @@
         await store.clear();
         assert(await store.load() === null, 'Deleting the saved session failed');
       }));
-      await test('A saved session restores full layers and view settings after reload and can be cleared', () => withEditor(async (host, doc) => {
+      await test('A saved session restores full layers and view settings only when requested after reload and can be cleared', () => withEditor(async (host, doc) => {
         let currentHost = host;
         let currentDoc = doc;
         const waitFor = async predicate => {
@@ -2175,6 +2185,7 @@
           assert(predicate(), 'Session operation timed out');
         };
         const choose = async action => {
+          const confirmRestore = action === 'restore' && currentHost.__geoEditor.state.layers.length > 0;
           currentDoc.getElementById('btnSession').click();
           await waitFor(() => currentDoc.getElementById('dlg').open);
           const choice = currentDoc.querySelector(`#dlgBody input[value="${action}"]`);
@@ -2183,7 +2194,7 @@
           currentDoc.getElementById('dlgOk').click();
           currentDoc.getAnimations().filter(animation => animation.effect.getComputedTiming().iterations !== Infinity).forEach(animation => animation.finish());
           await pause();
-          if (action === 'clear' || action === 'restore') {
+          if (action === 'clear' || confirmRestore) {
             await waitFor(() => currentDoc.getElementById('dlg').open);
             currentDoc.getElementById('dlgOk').click();
             currentDoc.getAnimations().filter(animation => animation.effect.getComputedTiming().iterations !== Infinity).forEach(animation => animation.finish());
@@ -2193,11 +2204,17 @@
         };
         const app = host.__geoEditor;
         const features = [{ ...point({ name: 'Alpha', amount: 12 }), kml: { folderIds: ['site'] }, style: { 'marker-color': '#16a34a' } }];
+        await app.handleFiles([jsonFile(collection([point()]), 'session-seed.geojson')]);
+        const seedDelete = doc.querySelector('#layerList button[aria-label="Delete layer"]');
         const layer = app.createLayer({ name: 'Sites', features, fields: ['name', 'amount'], types: { name: 'string', amount: 'number' }, format: 'kmz',
           kmlFolders: [{ id: 'site', parentId: null, name: 'Site', visible: true, expanded: false }] });
         const hidden = app.createLayer({ name: 'Hidden dataset', features: Array.from({ length: 1001 }, (_, index) => point({ name: `Record ${index}` })), fields: ['name'], types: { name: 'string' } });
         hidden.visible = false;
         app.map.removeLayer(hidden.group);
+        seedDelete.click();
+        await waitFor(() => doc.getElementById('dlg').open);
+        doc.getElementById('dlgOk').click();
+        await waitFor(() => app.state.layers.length === 2 && !doc.getElementById('dlg').open);
         layer.group.getLayers()[0].fire('click', { latlng: host.L.latLng(-35, 149) });
         app.state.filter = 'Alpha';
         app.state.sort = { field: 'name', direction: 'desc' };
@@ -2229,8 +2246,12 @@
         await currentHost.__geoEditor.sessionReady;
         const restored = currentHost.__geoEditor;
         const selectedBasemap = () => [...currentDoc.querySelectorAll('.leaflet-control-layers label')].find(label => label.querySelector('input').checked)?.textContent.trim();
-        assert(selectedBasemap() === 'Hybrid', 'Reload did not restore Hybrid');
-        assert(restored.state.layers.length === 2 && restored.state.layers[0].name === 'Replacement', 'Reload did not restore the latest layer order/names');
+        assert(restored.state.layers.length === 0 && selectedBasemap() === 'Standard', 'Reload automatically restored the saved workspace');
+        assert(!currentDoc.getElementById('btnSession').disabled && currentDoc.querySelector('.map-fullscreen-toggle').disabled, 'Reload did not preserve manual restore access and empty-map control state');
+        assert(!currentDoc.querySelector('dialog[open]') && !currentDoc.getElementById('emptyState').classList.contains('hidden'), 'Reload opened a restore dialog or hid the import prompt');
+        await choose('restore');
+        assert(selectedBasemap() === 'Hybrid', 'Manual restore after reload did not restore Hybrid');
+        assert(restored.state.layers.length === 2 && restored.state.layers[0].name === 'Replacement', 'Manual restore after reload did not restore the latest layer order/names');
         assert(restored.state.layers[1].group.getLayers().length === 1001 && !restored.state.layers[1].visible && !restored.map.hasLayer(restored.state.layers[1].group), 'Hidden dataset was lost or shown');
         const restoredLayer = restored.state.layers[0];
         assert(restoredLayer.types.amount === 'number' && restoredLayer.format === 'kmz' && !restoredLayer.kmlFolders[0].expanded, 'Field types, format or folder state were lost');
@@ -2260,6 +2281,22 @@
         assert(restored.state.layers.filter(item => item.visible).every(item => restored.map.hasLayer(item.group)), 'Failed restoration hid existing layers');
         assert(currentDoc.getElementById('toasts').textContent.includes('Session failed'), 'Failed restoration lacked feedback');
         await new currentHost.SessionStore().save(valid);
+        while (restored.state.layers.length) {
+          const count = restored.state.layers.length;
+          currentDoc.querySelector('#layerList button[aria-label="Delete layer"]').click();
+          await waitFor(() => currentDoc.getElementById('dlg').open);
+          currentDoc.getElementById('dlgOk').click();
+          await waitFor(() => restored.state.layers.length === count - 1);
+        }
+        assert(!currentDoc.getElementById('btnSession').disabled, 'Empty workspace cannot access its saved session');
+        currentDoc.getElementById('btnSession').click();
+        await waitFor(() => currentDoc.getElementById('dlg').open);
+        assert(currentDoc.querySelector('#dlgBody input[value="save"]').disabled, 'Empty workspace can overwrite its saved session');
+        assert(currentDoc.querySelector('#dlgBody input[value="restore"]').checked, 'Empty workspace does not default to restoring its saved session');
+        currentDoc.querySelector('#dlg button[value="cancel"]').click();
+        await waitFor(() => !currentDoc.getElementById('dlg').open);
+        await choose('restore');
+        assert(restored.state.layers.length === valid.layers.length && !currentDoc.querySelector('.map-fullscreen-toggle').disabled, 'Restoring into an empty workspace did not restore layers and map controls');
         await choose('clear');
         assert(await new currentHost.SessionStore().load() === null, 'Saved snapshot was not cleared');
         assert(JSON.stringify(restored.state.layers.map(item => item.group.toGeoJSON(false))) === JSON.stringify(before), 'Clearing the saved session changed the current workspace');

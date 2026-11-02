@@ -361,6 +361,7 @@ button[value="cancel"]:hover:not(:disabled),
 }
 #map .map-fullscreen-toggle svg { width: 16px; height: 16px; flex: 0 0 16px; }
 #map .map-fullscreen-toggle:hover { background: var(--hover-fill); }
+#map .leaflet-control-layers-toggle[aria-disabled="true"] { opacity: .48; cursor: not-allowed; }
 #map .map-fullscreen-toggle:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 2px; }
 #map.compact-controls .map-fullscreen-toggle { width: 44px; height: 44px; flex-basis: 44px; }
 #map .leaflet-control-layers .leaflet-control-layers-list {

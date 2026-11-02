@@ -8,6 +8,7 @@
   const columnWidths = new WeakMap();
   const sessionStore = new SessionStore();
   let sessionBusy = false;
+  let hasSavedSession = false;
   let sessionStartupPending = true;
   const MIN_COLUMN_WIDTH = 120;
   const GEOM_LABEL = { Mixed: 'Mixed', Point: 'Points', Line: 'Lines', Polygon: 'Polygons' };
@@ -311,12 +312,13 @@
           const group = document.createElement('fieldset');
           group.className = 'radio-options';
           group.setAttribute('aria-label', f.label);
-          f.options.forEach(([value, text]) => {
+          f.options.forEach(([value, text, disabled = false]) => {
             const choice = document.createElement('label');
             const radio = document.createElement('input');
             radio.type = 'radio';
             radio.name = f.key;
             radio.value = value;
+            radio.disabled = disabled;
             radio.checked = value === f.value;
             choice.append(radio, text);
             group.appendChild(choice);
@@ -655,6 +657,7 @@
   L.DomEvent.off(basemapToggle, 'click keydown');
   const toggleBasemap = event => {
     L.DomEvent.stop(event);
+    if (!state.layers.length) return;
     if (basemapContainer.classList.contains('leaflet-control-layers-expanded')) basemapControl.collapse();
     else basemapControl.expand();
     updateBasemapExpanded();
@@ -928,6 +931,7 @@
     if (wasActive && !active) requestAnimationFrame(() => fullscreenButton.focus());
   };
   fullscreenButton.addEventListener('click', async () => {
+    if (!state.layers.length) return;
     basemapControl.collapse();
     fullscreenButton.disabled = true;
     try {
@@ -937,7 +941,7 @@
       if (!mapFullscreenActive) await animateEditorPanels(false);
       mapFullscreenActive = !mapFullscreenActive;
     } finally {
-      fullscreenButton.disabled = false;
+      fullscreenButton.disabled = !state.layers.length;
       updateMapFullscreen();
     }
   });
@@ -2512,6 +2516,15 @@
   function renderAll() {
     const noLayers = state.layers.length === 0;
     $('main').classList.toggle('no-layers', noLayers);
+    fullscreenButton.disabled = noLayers;
+    basemapToggle.inert = noLayers;
+    basemapToggle.tabIndex = noLayers ? -1 : 0;
+    basemapToggle.setAttribute('aria-disabled', String(noLayers));
+    if (noLayers) basemapControl.collapse();
+    map.zoomControl[noLayers ? 'disable' : 'enable']();
+    map.zoomControl.getContainer().inert = noLayers;
+    map.zoomControl.getContainer().setAttribute('aria-disabled', String(noLayers));
+    updateSessionAvailability();
     if (noLayers) resetAddressSearch();
     renderLayers();
     renderTable();
@@ -2636,6 +2649,10 @@
     }
   }
 
+  function updateSessionAvailability() {
+    $('btnSession').disabled = sessionBusy || sessionStartupPending || (!state.layers.length && !hasSavedSession);
+  }
+
   async function runSessionTask(label, action) {
     if (sessionBusy) return;
     sessionBusy = true;
@@ -2658,12 +2675,12 @@
       await closeDialog(dialog, 'ok');
       progressView.disconnect();
       sessionBusy = false;
-      $('btnSession').disabled = false;
+      updateSessionAvailability();
     }
   }
 
   $('btnSession').addEventListener('click', async () => {
-    if (sessionBusy) return;
+    if (sessionBusy || sessionStartupPending) return;
     if (state.layers.some(lyr => lyr.importing) || $('maskProgressDlg').open) {
       toast('Wait for the current operation to finish before managing the session.', 'warn');
       return;
@@ -2671,23 +2688,29 @@
     try {
       await importQueue;
       const saved = await sessionStore.load();
-      const options = [['save', saved ? 'Replace saved session' : 'Save current session']];
+      hasSavedSession = Boolean(saved);
+      updateSessionAvailability();
+      const noLayers = !state.layers.length;
+      if (noLayers && !saved) return;
+      const options = [['save', saved ? 'Replace saved session' : 'Save current session', noLayers]];
       if (saved) options.push(['restore', 'Restore saved session'], ['clear', 'Delete saved session']);
-      const result = await askForm('Session', [{ key: 'action', label: 'Session action', type: 'radio', value: 'save', options }], {
+      const result = await askForm('Session', [{ key: 'action', label: 'Session action', type: 'radio', value: noLayers ? 'restore' : 'save', options }], {
         message: saved ? `Saved ${new Date(saved.savedAt).toLocaleString()}` : 'No saved session.', okLabel: 'Continue',
       });
       if (!result) return;
       if (result.action === 'save') {
+        if (!state.layers.length) return;
         await runSessionTask('Saving session…', async () => {
           await importQueue;
           await sessionStore.save(await sessionSnapshot());
+          hasSavedSession = true;
           toast('Session saved in this browser.');
         });
       } else if (result.action === 'restore') {
         if (state.layers.length && !await confirmBox('Restore session', 'Replace the current workspace with the saved session? Unsaved edits will be discarded.', 'Restore', true)) return;
         await runSessionTask('Restoring session…', async () => { await importQueue; await restoreSession(saved); });
       } else if (await confirmBox('Delete saved session', 'Delete the saved copy from this browser? The current workspace will not change.', 'Delete', true)) {
-        await runSessionTask('Deleting saved session…', async () => { await sessionStore.clear(); toast('Saved session deleted.'); });
+        await runSessionTask('Deleting saved session…', async () => { await sessionStore.clear(); hasSavedSession = false; toast('Saved session deleted.'); });
       }
     } catch (error) {
       toast(`Session storage is unavailable: ${error.message}`, 'warn', 9000);
@@ -4419,16 +4442,14 @@
   const sessionReady = (async () => {
     try {
       const saved = await sessionStore.load();
+      hasSavedSession = Boolean(saved);
       await importQueue;
-      if (saved && !state.layers.length && !document.querySelector('dialog[open]')) {
-        await runSessionTask('Restoring session…', () => restoreSession(saved));
-      }
     } catch (error) {
-      toast(`Could not open the saved session: ${error.message}`, 'warn', 9000);
+      toast(`Could not check the saved session: ${error.message}`, 'warn', 9000);
     } finally {
       sessionStartupPending = false;
       fitInitialMapView();
-      $('btnSession').disabled = false;
+      updateSessionAvailability();
     }
   })();
 
