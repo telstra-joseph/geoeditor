@@ -393,6 +393,206 @@
   /* ---------- map ---------- */
   const vectorRenderer = new L.GpuCanvas({ padding: 0.2 });
   const map = L.map('map', { zoomSnap: 0.5 }).setView([-25, 134], 4);
+  const addressControl = L.control({ position: 'bottomright' });
+  const addressContainer = L.DomUtil.create('div', 'leaflet-control-address');
+  const addressToggle = document.createElement('button');
+  addressToggle.type = 'button';
+  addressToggle.className = 'address-toggle';
+  addressToggle.title = 'Search address';
+  addressToggle.setAttribute('aria-label', 'Open address search');
+  addressToggle.setAttribute('aria-expanded', 'false');
+  addressToggle.setAttribute('aria-controls', 'map-address-search');
+  addressToggle.appendChild(actionIcon('Search'));
+  const addressForm = document.createElement('form');
+  addressForm.className = 'address-form';
+  addressForm.id = 'map-address-search';
+  addressForm.setAttribute('role', 'search');
+  const addressInput = document.createElement('input');
+  addressInput.type = 'search';
+  addressInput.placeholder = 'Search address';
+  addressInput.setAttribute('aria-label', 'Search address');
+  addressInput.autocomplete = 'off';
+  addressInput.maxLength = 300;
+  const addressSubmit = document.createElement('button');
+  addressSubmit.type = 'submit';
+  addressSubmit.title = 'Search address';
+  addressSubmit.setAttribute('aria-label', 'Find address');
+  addressSubmit.appendChild(actionIcon('Search'));
+  const addressClear = document.createElement('button');
+  addressClear.type = 'reset';
+  addressClear.title = 'Clear address search';
+  addressClear.setAttribute('aria-label', 'Clear address search');
+  addressClear.appendChild(actionIcon('X'));
+  const addressResults = document.createElement('div');
+  addressResults.className = 'address-results';
+  addressResults.hidden = true;
+  const addressStatus = document.createElement('div');
+  addressStatus.className = 'address-status';
+  addressStatus.setAttribute('role', 'status');
+  addressResults.appendChild(addressStatus);
+  addressForm.append(addressInput, addressSubmit, addressClear, addressResults);
+  addressContainer.append(addressToggle, addressForm);
+  addressControl.onAdd = () => addressContainer;
+  addressControl.addTo(map);
+  L.DomEvent.disableClickPropagation(addressContainer);
+  L.DomEvent.disableScrollPropagation(addressContainer);
+  const addressMobile = window.matchMedia('(max-width: 760px)');
+  const updateAddressSearchAccessibility = () => {
+    addressForm.inert = addressMobile.matches && !addressContainer.classList.contains('address-open');
+    addressClear.title = addressMobile.matches ? 'Close address search' : 'Clear address search';
+    addressClear.setAttribute('aria-label', addressClear.title);
+  };
+  addressMobile.addEventListener('change', updateAddressSearchAccessibility);
+  updateAddressSearchAccessibility();
+  function setAddressSearchOpen(open, restoreFocus = false) {
+    addressContainer.classList.toggle('address-open', open);
+    addressToggle.inert = open;
+    updateAddressSearchAccessibility();
+    addressToggle.setAttribute('aria-expanded', String(open));
+    addressToggle.setAttribute('aria-label', open ? 'Close address search' : 'Open address search');
+    addressToggle.title = open ? 'Close address search' : 'Search address';
+    if (open) addressInput.focus();
+    else {
+      cancelAddressLookup();
+      addressResults.hidden = true;
+      if (restoreFocus) addressToggle.focus();
+    }
+  }
+  addressToggle.addEventListener('click', () => setAddressSearchOpen(!addressContainer.classList.contains('address-open'), true));
+  addressClear.addEventListener('click', event => {
+    if (addressMobile.matches) {
+      event.preventDefault();
+      setAddressSearchOpen(false, true);
+    }
+  });
+  document.addEventListener('pointerdown', event => {
+    if (!addressContainer.contains(event.target)) setAddressSearchOpen(false);
+  });
+  addressForm.addEventListener('keydown', event => {
+    event.stopPropagation();
+    if (event.key === 'Escape') {
+      cancelAddressLookup();
+      addressResults.hidden = true;
+      if (addressMobile.matches) setAddressSearchOpen(false, true);
+      else addressInput.focus();
+    }
+    if (event.key === 'ArrowDown' && event.target === addressInput && !addressResults.hidden) {
+      event.preventDefault();
+      addressResults.querySelector('button')?.focus();
+    }
+  });
+  let addressRequest = null;
+  let addressMarker = null;
+  let addressSuggestionTimer = null;
+  function cancelAddressLookup() {
+    clearTimeout(addressSuggestionTimer);
+    addressSuggestionTimer = null;
+    addressRequest?.abort();
+    addressRequest = null;
+    addressSubmit.disabled = false;
+    addressForm.removeAttribute('aria-busy');
+  }
+  function resetAddressSearch() {
+    cancelAddressLookup();
+    addressInput.value = '';
+    addressResults.replaceChildren(addressStatus);
+    addressResults.hidden = true;
+    setAddressSearchOpen(false);
+    if (addressMarker) map.removeLayer(addressMarker);
+    addressMarker = null;
+  }
+  addressForm.addEventListener('reset', resetAddressSearch);
+  function queueAddressSuggestions(event) {
+    cancelAddressLookup();
+    addressResults.replaceChildren(addressStatus);
+    addressResults.hidden = true;
+    if (event.isComposing || addressInput.value.trim().length < 3 || !state.layers.length) return;
+    addressSuggestionTimer = setTimeout(() => searchAddresses({ suggestions: true }), 200);
+  }
+  addressInput.addEventListener('input', queueAddressSuggestions);
+  addressInput.addEventListener('compositionend', queueAddressSuggestions);
+  addressForm.addEventListener('submit', event => {
+    event.preventDefault();
+    searchAddresses();
+  });
+  function showAddress(candidate) {
+    const location = L.latLng(candidate.location.y, candidate.location.x);
+    const extent = candidate.extent;
+    const bounds = extent && [extent.xmin, extent.ymin, extent.xmax, extent.ymax].every(Number.isFinite)
+      ? L.latLngBounds([extent.ymin, extent.xmin], [extent.ymax, extent.xmax]) : L.latLngBounds([location]);
+    fitVisibleBounds(bounds, 17);
+    if (addressMarker) map.removeLayer(addressMarker);
+    addressMarker = L.circleMarker(location, { radius: 7, color: '#0066ff', weight: 3, fillColor: '#ffffff', fillOpacity: 1 }).addTo(map);
+    const label = document.createElement('span');
+    label.textContent = candidate.address;
+    addressMarker.bindTooltip(label);
+    addressInput.value = candidate.address;
+    cancelAddressLookup();
+    addressResults.hidden = true;
+    if (addressMobile.matches) setAddressSearchOpen(false, true);
+    else addressInput.focus();
+  }
+  async function searchAddresses({ suggestions = false, magicKey = '', selectFirst = false } = {}) {
+    cancelAddressLookup();
+    const query = addressInput.value.trim();
+    if (!query || !state.layers.length) return;
+    const request = new AbortController();
+    addressRequest = request;
+    addressResults.replaceChildren(addressStatus);
+    addressStatus.textContent = 'Searching...';
+    addressResults.hidden = false;
+    addressSubmit.disabled = !suggestions;
+    addressForm.setAttribute('aria-busy', 'true');
+    try {
+      const mapRect = map.getContainer().getBoundingClientRect();
+      const visible = uncoveredMapRect();
+      const center = map.containerPointToLatLng([
+        (visible.left + visible.right) / 2 - mapRect.left,
+        (visible.top + visible.bottom) / 2 - mapRect.top,
+      ]).wrap();
+      const url = new URL(`https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/${suggestions ? 'suggest' : 'findAddressCandidates'}`);
+      url.search = new URLSearchParams({
+        f: 'json',
+        ...(suggestions ? { text: query, maxSuggestions: '2' } : { SingleLine: query, outSR: '4326', maxLocations: '2' }),
+        location: JSON.stringify({ x: center.lng, y: center.lat, spatialReference: { wkid: 4326 } }),
+      });
+      if (suggestions && center.lat >= -44 && center.lat <= -10 && center.lng >= 112 && center.lng <= 154) url.searchParams.set('countryCode', 'AUS');
+      if (magicKey) url.searchParams.set('magicKey', magicKey);
+      const response = await fetch(url, { signal: request.signal });
+      if (!response.ok) throw new Error('Address lookup failed');
+      const data = await response.json();
+      const matches = suggestions ? data.suggestions : data.candidates;
+      if (data.error || !Array.isArray(matches)) throw new Error('Address lookup failed');
+      if (request.signal.aborted || addressRequest !== request || !state.layers.length) return;
+      const candidates = matches.filter(candidate => suggestions
+        ? typeof candidate.text === 'string' && typeof candidate.magicKey === 'string' && !candidate.isCollection
+        : Number.isFinite(candidate.location?.x) && Number.isFinite(candidate.location?.y)).slice(0, 2);
+      if (selectFirst && candidates.length) {
+        showAddress(candidates[0]);
+        return;
+      }
+      addressStatus.textContent = candidates.length ? 'Addresses by Esri' : 'No addresses found';
+      candidates.forEach(candidate => {
+        const result = document.createElement('button');
+        result.type = 'button';
+        result.textContent = suggestions ? candidate.text : candidate.address;
+        result.addEventListener('click', () => {
+          if (suggestions) {
+            addressInput.value = candidate.text;
+            searchAddresses({ magicKey: candidate.magicKey, selectFirst: true });
+          } else showAddress(candidate);
+        });
+        addressResults.appendChild(result);
+      });
+    } catch (error) {
+      if (!request.signal.aborted && addressRequest === request) addressStatus.textContent = 'Address search unavailable. Check your connection and try again.';
+    } finally {
+      if (addressRequest === request) {
+        addressSubmit.disabled = false;
+        addressForm.removeAttribute('aria-busy');
+      }
+    }
+  }
   const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19, attribution: '&copy; OpenStreetMap contributors',
   }).addTo(map);
@@ -652,9 +852,10 @@
   const fullscreenControlBounds = () => [...mapContainer.querySelectorAll('.leaflet-top, .leaflet-bottom')].map(element => ({ element, bounds: element.getBoundingClientRect() }));
   const animateEditorPanels = (showing, before = fullscreenControlBounds()) => {
     stopFullscreenControlAnimations();
+    const headerSpace = $('mapWrap').getBoundingClientRect().top;
     const jobs = editorPanels.map(([panel, offset]) => animatePanel(panel,
       panel === $('sidebarSplitter') ? `translateX(-${$('sidebar').getBoundingClientRect().width}px)` :
-        panel === $('sidebar') && mobileControls.matches ? 'translateY(-100%)' : offset, showing, undefined, !showing));
+        panel === $('sidebar') && mobileControls.matches ? `translateY(calc(-100% - ${headerSpace}px))` : offset, showing, undefined, !showing));
     if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
       const timing = { duration: 360, easing: 'cubic-bezier(.22, 0, .18, 1)', fill: 'both' };
       before.forEach(({ element, bounds }) => {
@@ -677,7 +878,6 @@
         element.classList.add('panel-animating');
         fullscreenControlAnimations.push({ element, animation, inlineStyle });
       });
-      const headerSpace = $('mapWrap').getBoundingClientRect().top;
       const inlineStyle = mapContainer.getAttribute('style');
       const viewportAnimation = mapContainer.animate(showing ? [
         { top: `${-headerSpace}px` }, { top: '0px' },
@@ -2312,6 +2512,7 @@
   function renderAll() {
     const noLayers = state.layers.length === 0;
     $('main').classList.toggle('no-layers', noLayers);
+    if (noLayers) resetAddressSearch();
     renderLayers();
     renderTable();
     $('btnDownload').disabled = noLayers;
@@ -3872,11 +4073,23 @@
   $('fileInput').addEventListener('change', (e) => { handleFiles(e.target.files); e.target.value = ''; });
 
   $('btnNewLayer').addEventListener('click', async () => {
-    const source = await askForm('New layer', [
-      { key: 'source', label: 'New layer', hideLabel: true, type: 'radio', value: 'blank', options: [['blank', 'Blank layer'], ['upload', 'Upload layer']] },
-    ], { okLabel: 'Continue', compact: true });
-    if (!source) return;
-    if (source.source === 'upload') { openFilePicker(); return; }
+    const sourceForm = $('dlgForm');
+    const uploadFromSource = event => {
+      if (event.defaultPrevented || event.submitter?.value !== 'ok' || sourceForm.querySelector('input[name="source"]:checked')?.value !== 'upload') return;
+      event.preventDefault();
+      $('dlg').close('ok');
+      openFilePicker();
+    };
+    sourceForm.addEventListener('submit', uploadFromSource);
+    let source;
+    try {
+      source = await askForm('New layer', [
+        { key: 'source', label: 'New layer', hideLabel: true, type: 'radio', value: 'blank', options: [['blank', 'Blank layer'], ['upload', 'Upload layer']] },
+      ], { okLabel: 'Continue', compact: true });
+    } finally {
+      sourceForm.removeEventListener('submit', uploadFromSource);
+    }
+    if (!source || source.source === 'upload') return;
     const r = await askForm('New layer', [
       { key: 'name', label: 'Layer name', value: 'New layer', required: true },
       { key: 'geom', label: 'Geometry type', type: 'select', value: 'Polygon', options: [['Point', 'Points'], ['Line', 'Lines'], ['Polygon', 'Polygons'], ['Mixed', 'Mixed (KML / GeoJSON style)']] },
@@ -4114,7 +4327,7 @@
       map.getContainer().classList.toggle('compact-controls', compact);
       resetMapToolbars.forEach(reset => reset());
     }
-    const scalePosition = visibleWidth < 800 || visibleHeight < 440 ? 'bottomright' : 'bottomleft';
+    const scalePosition = !addressMobile.matches && (visibleWidth < 800 || visibleHeight < 440) ? 'bottomright' : 'bottomleft';
     if (scaleControl.getPosition() !== scalePosition) scaleControl.setPosition(scalePosition);
     fitInitialMapView();
     scheduleMapDisplay();

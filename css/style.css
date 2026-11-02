@@ -263,6 +263,36 @@ body:has(#map.map-fullscreen) #mapWrap > :not(#map) { visibility: hidden; }
   border: 1px solid var(--line); border-radius: 6px; background: var(--surface);
   box-shadow: 0 1px 3px rgba(16, 26, 58, .16);
 }
+#main.no-layers .leaflet-control-address { display: none; }
+#map .leaflet-control-address { position: relative; z-index: 1000; width: min(280px, calc(100vw - var(--panel-left) - 24px)); max-width: 100%; color: var(--ink); }
+#map .address-form { display: flex; align-items: center; position: relative; height: 40px; padding: 3px 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); box-shadow: 0 1px 3px rgba(16, 26, 58, .16); }
+#map .address-toggle { display: none; }
+#map .leaflet-control-address input { flex: 1; min-width: 0; width: 0; height: 32px; padding: 0 8px; border: 0; border-radius: 0; appearance: none; -webkit-appearance: none; background: transparent; box-shadow: none; color: inherit; line-height: 20px; outline-offset: -2px; }
+#map .leaflet-control-address input::-webkit-search-cancel-button,
+#map .leaflet-control-address input::-webkit-search-decoration { appearance: none; -webkit-appearance: none; }
+:root:not([data-modal-focus="true"]) #map .leaflet-control-address input:focus { outline: none; box-shadow: none; }
+#map .address-form > button { display: flex; align-items: center; justify-content: center; flex: 0 0 32px; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 4px; background: transparent; box-shadow: none; }
+#map .address-form > button .action-icon { width: 16px; height: 16px; flex-basis: 16px; }
+#map .address-form > button[type="reset"]:hover { color: #dc2626; background: rgba(220, 38, 38, .12); }
+#map .address-results { position: absolute; bottom: calc(100% + 4px); right: 0; width: 100%; max-height: min(300px, 40dvh); overflow: auto; padding: 4px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 4px 12px rgba(16, 26, 58, .16); z-index: 1100; }
+#map .address-status { padding: 6px; color: var(--muted); font-size: 12px; }
+#map .address-results button { display: block; width: 100%; padding: 9px 6px; border: 0; border-radius: 3px; background: transparent; box-shadow: none; text-align: left; line-height: 1.4; overflow-wrap: anywhere; }
+#map .address-results button:hover { background: var(--hover-fill); }
+@media (max-width: 760px) {
+  #map .leaflet-control-address { width: 44px; height: 44px; border-radius: 6px; background: var(--surface); box-shadow: 0 0 0 1px var(--line), 0 1px 3px rgba(16, 26, 58, .16); transition: width 260ms cubic-bezier(.22, 0, .18, 1); }
+  #map .leaflet-control-address.address-open { width: min(280px, calc(100vw - var(--panel-left) - 148px)); }
+  #map .address-toggle { display: flex; align-items: center; justify-content: center; position: absolute; right: 0; top: 0; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: inherit; box-shadow: none; opacity: 1; visibility: visible; transition: opacity 100ms 100ms, visibility 0s; }
+  #map .address-open .address-toggle { opacity: 0; visibility: hidden; transition: opacity 100ms, visibility 0s 100ms; }
+  #map .address-form { display: flex; position: absolute; bottom: 0; right: 0; width: 100%; height: 44px; padding: 0; border: 0; background: transparent; box-shadow: none; visibility: hidden; pointer-events: none; transition: visibility 0s 260ms; }
+  #map .address-open .address-form { visibility: visible; pointer-events: auto; transition-delay: 0s; }
+  #map .address-form > * { opacity: 0; transition: opacity 100ms; }
+  #map .address-open .address-form > * { opacity: 1; transition-delay: 100ms; }
+  #map .address-form input { height: 44px; font-size: 16px; }
+  #map .address-form > button { flex-basis: 44px; width: 44px; height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #map .leaflet-control-address, #map .address-toggle, #map .address-form, #map .address-form > * { transition: none; }
+}
 #map .leaflet-control-zoom a, #map .leaflet-pm-toolbar .leaflet-buttons-control-button {
   display: flex; align-items: center; justify-content: center; width: 32px; height: 32px;
   padding: 0; background-color: var(--surface); color: var(--navy); border-bottom: 1px solid var(--line);
@@ -373,7 +403,6 @@ button[value="cancel"]:hover:not(:disabled),
 #map.compact-controls .leaflet-pm-toolbar .button-container:last-child > a { border-radius: 0 5px 5px 0; border-right: 0; }
 #map.compact-controls .leaflet-pm-toolbar .leaflet-pm-actions-container { top: calc(100% + 5px); left: 0; max-width: min(260px, calc(100vw - 120px)); }
 #map.compact-controls .leaflet-pm-toolbar:not(.mobile-tools-open) > .mobile-tool-current > a { border-radius: 5px; border-right: 0; }
-#map.compact-controls .leaflet-pm-toolbar:not(.mobile-tools-open) .leaflet-pm-actions-container { top: 0; left: calc(100% + 5px); max-width: calc(100vw - 100px); }
 @media (prefers-reduced-motion: no-preference) {
   #map.compact-controls .leaflet-pm-toolbar > .button-container:not(.mobile-tool-current) {
     transition: max-width 220ms cubic-bezier(.22, 1, .36, 1), opacity 180ms ease, transform 220ms cubic-bezier(.22, 1, .36, 1), visibility 0s linear 220ms;

@@ -1277,26 +1277,37 @@
         assert(app.state.layers.length === 1 && app.state.active.group.getLayers().length === 0, 'Blank layer creation did not complete');
         checkDisabled(false);
       }));
-      await test('Map action trays match their controls in height and alignment across viewport sizes', () => withEditor(async (host, doc) => {
+      await test('Map action trays align below compact controls without overlapping basemap or fullscreen', () => withEditor(async (host, doc) => {
         await host.__geoEditor.handleFiles([jsonFile(collection([point()]), 'map-controls.geojson')]);
         for (const width of [1440, 820, 390, 320]) {
           host.frameElement.style.width = `${width}px`;
           host.frameElement.style.height = '1000px';
           await new Promise(resolve => host.setTimeout(resolve, 150));
-          const control = doc.querySelector('.leaflet-pm-icon-edit').closest('a');
-          control.click();
-          doc.getAnimations().forEach(animation => animation.finish());
-          const tray = control.parentElement.querySelector('.leaflet-pm-actions-container');
-          const controlBounds = control.getBoundingClientRect();
-          const trayBounds = tray.getBoundingClientRect();
-          assert(host.getComputedStyle(tray).visibility === 'visible', `Map action tray did not open at width ${width}`);
-          assert(controlBounds.height === (width <= 760 ? 44 : width <= 1024 ? 36 : 32), `Map control has an unexpected height at width ${width}`);
-          assert(trayBounds.height === controlBounds.height, `Map action tray height differs from its control at width ${width}`);
-          assert(Math.abs(trayBounds.top - controlBounds.top) < 1, `Map action tray is misaligned at width ${width}`);
-          tray.querySelectorAll('.leaflet-pm-action').forEach(action => {
-            assert(action.getBoundingClientRect().height === controlBounds.height, `Map action button height differs from its control at width ${width}`);
-          });
-          control.click();
+          for (const selector of ['.leaflet-pm-icon-polygon', '.leaflet-pm-icon-edit']) {
+            const control = doc.querySelector(selector).closest('a');
+            control.click();
+            doc.getAnimations().forEach(animation => animation.finish());
+            const tray = control.parentElement.querySelector('.leaflet-pm-actions-container');
+            const controlBounds = control.getBoundingClientRect();
+            const trayBounds = tray.getBoundingClientRect();
+            assert(host.getComputedStyle(tray).visibility === 'visible', `Map action tray did not open at width ${width}`);
+            assert(controlBounds.height === (width <= 760 ? 44 : width <= 1024 ? 36 : 32), `Map control has an unexpected height at width ${width}`);
+            if (width <= 1024) {
+              assert(Math.abs(trayBounds.top - controlBounds.bottom - 5) < 1 && Math.abs(trayBounds.left - controlBounds.left) < 1, `Compact action tray is not below its button at width ${width}`);
+              assert(trayBounds.left >= 0 && trayBounds.right <= host.innerWidth, `Compact action tray overflows the viewport at width ${width}`);
+              for (const overlay of doc.querySelectorAll('.leaflet-control-layers-toggle, .map-fullscreen-toggle')) {
+                const bounds = overlay.getBoundingClientRect();
+                assert(trayBounds.bottom <= bounds.top || trayBounds.top >= bounds.bottom || trayBounds.right <= bounds.left || trayBounds.left >= bounds.right, `Compact action tray overlaps right-hand controls at width ${width}`);
+              }
+            } else assert(Math.abs(trayBounds.top - controlBounds.top) < 1, 'Desktop action tray alignment changed');
+            tray.querySelectorAll('.leaflet-pm-action').forEach(action => {
+              assert(action.getBoundingClientRect().height === controlBounds.height, `Map action button height differs from its control at width ${width}`);
+            });
+            const action = tray.querySelector('.action-cancel') || tray.querySelector('.leaflet-pm-action');
+            const actionBounds = action.getBoundingClientRect();
+            assert(action.contains(doc.elementFromPoint(actionBounds.left + actionBounds.width / 2, actionBounds.top + actionBounds.height / 2)), `Map action is obstructed at width ${width}`);
+            control.click();
+          }
         }
       }));
       await test('Compact map tool groups animate double-tap toggles and selections while respecting reduced motion', () => withEditor(async (host, doc) => {
@@ -1598,8 +1609,13 @@
             outside.focus();
             assert(host.getComputedStyle(outside).outlineStyle !== 'none', 'Modal preference suppressed keyboard focus outside dialogs');
             outside.remove();
+            await host.__geoEditor.handleFiles([jsonFile(collection([point()]), 'search-focus.geojson')]);
+            const search = doc.querySelector('.address-form input');
+            search.focus();
+            assert(doc.activeElement === search && host.getComputedStyle(search).outlineStyle === 'none' && host.getComputedStyle(search).boxShadow === 'none', 'Address search highlights focus while accessibility indicators are off');
             toggle.checked = true;
             toggle.dispatchEvent(new host.Event('change'));
+            assert(doc.activeElement === search && host.getComputedStyle(search).outlineStyle === 'solid', 'Address search does not restore accessible focus indicators');
             await withEditor(async (restoredHost, restoredDoc) => {
               assert(restoredDoc.getElementById('toggleModalFocus').checked && restoredDoc.documentElement.dataset.modalFocus === 'true', 'Modal focus preference was not restored in a new editor');
             });
@@ -1609,6 +1625,172 @@
           else localStorage.setItem('geoeditor-modal-focus', saved);
         }
       });
+      await test('Address search appears bottom-right only with loaded layers and safely navigates results', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        const control = doc.querySelector('.leaflet-control-address');
+        const form = control.querySelector('.address-form');
+        const toggle = control.querySelector('.address-toggle');
+        const input = form.querySelector('input');
+        const results = form.querySelector('.address-results');
+        const settleAddressMotion = async () => {
+          await new Promise(resolve => host.requestAnimationFrame(() => host.requestAnimationFrame(resolve)));
+          const animations = control.getAnimations({ subtree: true });
+          animations.forEach(animation => animation.finish());
+          return animations;
+        };
+        assert(host.getComputedStyle(control).display === 'none', 'Address search appears without a loaded layer');
+        await app.handleFiles([jsonFile(collection([point()]), 'address-search.geojson')]);
+        for (const width of [1440, 390]) {
+          host.frameElement.style.width = `${width}px`;
+          await settleAddressMotion();
+          const rect = control.getBoundingClientRect();
+          const mapRect = app.map.getContainer().getBoundingClientRect();
+          const tableRect = doc.getElementById('splitter').getBoundingClientRect();
+          assert(host.getComputedStyle(control).display !== 'none' && control.parentElement.matches('.leaflet-bottom.leaflet-right'), `Address search is not bottom-right at width ${width}`);
+          assert(Math.abs(mapRect.right - rect.right - 10) < 2 && rect.bottom <= tableRect.top && rect.top >= mapRect.top, `Address search is outside the visible map at width ${width}`);
+          if (width === 1440) {
+            const submit = form.querySelector('[type="submit"]');
+            const clear = form.querySelector('[type="reset"]');
+            const fieldRect = input.getBoundingClientRect();
+            const center = fieldRect.top + fieldRect.height / 2;
+            assert(host.getComputedStyle(toggle).display === 'none' && host.getComputedStyle(submit).display !== 'none', 'Desktop search has an extra search button');
+            for (const button of [submit, clear]) {
+              const buttonRect = button.getBoundingClientRect();
+              assert(buttonRect.height === fieldRect.height && Math.abs(buttonRect.top + buttonRect.height / 2 - center) < 1, 'Desktop address icons are not aligned with the field');
+              assert(host.getComputedStyle(button).borderWidth === '0px' && host.getComputedStyle(button).boxShadow === 'none', 'Desktop address action has a separate frame');
+            }
+            const fieldStyle = host.getComputedStyle(input);
+            assert(form.getBoundingClientRect().height === 40 && fieldStyle.borderWidth === '0px' && fieldStyle.boxShadow === 'none' && fieldStyle.appearance === 'none', 'Desktop address field does not share the integrated frame');
+          }
+          if (width === 390) {
+            assert(doc.querySelector('.leaflet-control-scale').parentElement.matches('.leaflet-bottom.leaflet-left'), 'Phone map scale is not bottom-left');
+            assert(rect.width === 44 && host.getComputedStyle(form).visibility === 'hidden' && form.inert, 'Phone address search is not initially an icon button');
+            toggle.click();
+            const opening = await settleAddressMotion();
+            assert(opening.some(animation => animation.transitionProperty === 'width'), 'Phone address search does not animate its width on opening');
+            assert(toggle.getAttribute('aria-expanded') === 'true' && doc.activeElement === input && control.getBoundingClientRect().width > 200 && Math.abs(form.getBoundingClientRect().bottom - rect.bottom) < 1 && host.getComputedStyle(toggle).visibility === 'hidden', 'Phone address button does not become an expanded search bar');
+            assert(control.getBoundingClientRect().left >= doc.querySelector('.leaflet-control-scale').getBoundingClientRect().right + 5, 'Expanded phone search overlaps the bottom-left scale');
+            input.value = 'Retained query';
+            form.querySelector('[type="reset"]').click();
+            const closing = await settleAddressMotion();
+            assert(closing.some(animation => animation.transitionProperty === 'width') && control.getBoundingClientRect().width === 44 && form.inert && doc.activeElement === toggle && input.value === 'Retained query', 'Phone close button does not animate back to search without clearing the query');
+            toggle.click();
+            await settleAddressMotion();
+            input.dispatchEvent(new host.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            await settleAddressMotion();
+            assert(host.getComputedStyle(form).visibility === 'hidden' && doc.activeElement === toggle, 'Escape does not close address search and restore focus');
+            toggle.click();
+            await settleAddressMotion();
+            doc.getElementById('sidebar').dispatchEvent(new host.Event('pointerdown', { bubbles: true }));
+            assert(toggle.getAttribute('aria-expanded') === 'false', 'Outside press did not dismiss address search');
+            await settleAddressMotion();
+            toggle.click();
+            await settleAddressMotion();
+          }
+          const clear = form.querySelector('[type="reset"]');
+          const clearRect = clear.getBoundingClientRect();
+          assert(clear.contains(doc.elementFromPoint(clearRect.left + clearRect.width / 2, clearRect.top + clearRect.height / 2)), `Address clear button overlaps other map controls at width ${width}`);
+        }
+        const originalFetch = host.fetch;
+        let requests = 0;
+        const searchCenters = [];
+        host.fetch = async (url, options) => {
+          if (!String(url).includes('/GeocodeServer/')) return originalFetch(url, options);
+          requests++;
+          const parameters = new host.URL(url).searchParams;
+          const suggesting = new host.URL(url).pathname.endsWith('/suggest');
+          assert(parameters.get(suggesting ? 'text' : 'SingleLine') === (parameters.has('magicKey') ? '<b>Sydney</b>' : 'Sydney'), 'Address query was not encoded correctly');
+          assert(parameters.get(suggesting ? 'maxSuggestions' : 'maxLocations') === '2', 'Address suggestions do not request a two-result limit');
+          if (suggesting) assert(parameters.get('countryCode') === 'AUS', 'Autocomplete does not prioritize Australian addresses over the Australian map');
+          else assert(!parameters.has('sourceCountry'), 'Explicit search is restricted to Australia');
+          if (parameters.has('magicKey')) assert(parameters.get('magicKey') === 'address-choice-0', 'Selected suggestion was not resolved using its exact identity');
+          const center = JSON.parse(new host.URL(url).searchParams.get('location'));
+          const mapRect = app.map.getContainer().getBoundingClientRect();
+          const workspace = doc.getElementById('workspace').getBoundingClientRect();
+          const bottom = doc.getElementById('splitter').getBoundingClientRect().top;
+          const expected = app.map.containerPointToLatLng([
+            (Math.max(mapRect.left, workspace.left) + Math.min(mapRect.right, workspace.right)) / 2 - mapRect.left,
+            (Math.max(mapRect.top, workspace.top) + Math.min(mapRect.bottom, workspace.bottom, bottom)) / 2 - mapRect.top,
+          ]).wrap();
+          assert(center?.spatialReference?.wkid === 4326 && Math.abs(center.x - expected.lng) < 1e-7 && Math.abs(center.y - expected.lat) < 1e-7, 'Address search is not biased to the current visible map center');
+          assert(center.x >= -180 && center.x <= 180, 'Address search center did not normalize wrapped longitude');
+          assert(!new host.URL(url).searchParams.has('searchExtent'), 'Address search excludes matches outside the map instead of prioritizing nearby matches');
+          searchCenters.push(center);
+          const addresses = ['<b>Sydney</b>', 'Sydney Harbour', 'Sydney Airport'];
+          return { ok: true, json: async () => suggesting
+            ? { suggestions: addresses.map((text, index) => ({ text, magicKey: `address-choice-${index}`, isCollection: false })) }
+            : { candidates: (parameters.has('magicKey') ? addresses.slice(0, 1) : addresses).map(address => ({ address, location: { x: 151.2, y: -33.8 } })) } };
+        };
+        const search = async () => {
+          form.dispatchEvent(new host.Event('submit', { bubbles: true, cancelable: true }));
+          while (form.getAttribute('aria-busy') === 'true') await new Promise(resolve => host.setTimeout(resolve, 10));
+        };
+        try {
+          app.map.options.zoomAnimation = false;
+          app.map.setView([-33.8688, 151.2093], 14, { animate: false });
+          app.map.stop();
+          for (const query of ['Sy', 'Syd', 'Sydney']) {
+            input.value = query;
+            input.dispatchEvent(new host.Event('input', { bubbles: true }));
+          }
+          assert(requests === 0, 'Address suggestions are not debounced');
+          for (let attempt = 0; attempt < 200 && (results.querySelectorAll('button').length !== 2 || form.getAttribute('aria-busy') === 'true'); attempt++) await new Promise(resolve => host.setTimeout(resolve, 10));
+          assert(requests === 1 && !results.hidden && results.querySelectorAll('button').length === 2, 'Typing did not produce at most two suggestions in a single lookup');
+          input.dispatchEvent(new host.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+          assert(doc.activeElement === results.querySelector('button'), 'Address suggestions cannot be reached with the keyboard');
+          results.querySelector('button').click();
+          while (form.getAttribute('aria-busy') === 'true') await new Promise(resolve => host.setTimeout(resolve, 10));
+          assert(requests === 2 && results.hidden && input.value === '<b>Sydney</b>', 'Choosing autocomplete did not resolve and navigate to that address');
+          toggle.click();
+          await settleAddressMotion();
+          input.value = 'Sydney';
+          input.focus();
+          app.map.setView([-37.8136, 504.9631], 14, { animate: false });
+          app.map.stop();
+          await search();
+          assert(requests === 3 && results.querySelectorAll('button').length === 2, 'Explicit search did not preserve the two-result limit');
+          assert(app.map.distance([searchCenters[0].y, searchCenters[0].x], [searchCenters[2].y, searchCenters[2].x]) > 500000, 'Address proximity did not follow map navigation');
+          const result = results.querySelector('button');
+          assert(result && result.textContent === '<b>Sydney</b>' && !result.querySelector('b'), 'Address result markup was interpreted as HTML');
+          for (const width of [1440, 390]) {
+            host.frameElement.style.width = `${width}px`;
+            await settleAddressMotion();
+            const rect = result.getBoundingClientRect();
+            assert(results.getBoundingClientRect().bottom <= form.getBoundingClientRect().top, `Address results do not open upward at width ${width}`);
+            assert(result.contains(doc.elementFromPoint(rect.left + 5, rect.top + rect.height / 2)), `Address results are covered by map controls at width ${width}`);
+          }
+          app.map.options.zoomAnimation = false;
+          result.click();
+          app.map.stop();
+          await settleAddressMotion();
+          assert(results.hidden && app.state.active.group.getLayers().length === 1, 'Address navigation changed feature data or left results open');
+          assert(host.getComputedStyle(form).visibility === 'hidden' && toggle.getAttribute('aria-expanded') === 'false', 'Address selection did not collapse the phone bar');
+          assert(app.map.getZoom() > 4, 'Address selection did not zoom the map');
+          form.reset();
+          assert(input.value === '' && results.hidden, 'Clear address search did not reset the control');
+          let finishStale = null;
+          let staleSignal = null;
+          host.fetch = (url, options) => {
+            staleSignal = options.signal;
+            return new Promise(resolve => { finishStale = () => resolve({ ok: true, json: async () => ({ suggestions: [{ text: 'Old result', magicKey: 'old-result', isCollection: false }] }) }); });
+          };
+          toggle.click();
+          input.value = 'Melbourne';
+          input.dispatchEvent(new host.Event('input', { bubbles: true }));
+          for (let attempt = 0; attempt < 200 && !finishStale; attempt++) await new Promise(resolve => host.setTimeout(resolve, 10));
+          assert(finishStale, 'Typing did not start the pending suggestion lookup');
+          input.value = '';
+          input.dispatchEvent(new host.Event('input', { bubbles: true }));
+          assert(staleSignal.aborted, 'Clearing the field did not abort suggestions');
+          finishStale();
+          await new Promise(resolve => host.setTimeout(resolve, 0));
+          assert(results.hidden && !results.querySelector('button') && !form.hasAttribute('aria-busy'), 'Stale suggestions reopened after the query was cleared');
+          host.fetch = async () => { throw new Error('Offline'); };
+          input.value = 'Sydney';
+          await search();
+          assert(results.textContent.includes('unavailable') && !form.querySelector('[type="submit"]').disabled, 'Address search failure leaves the control unusable');
+        } finally { host.fetch = originalFetch; }
+      }));
       await test('Map fullscreen preserves the view and restores the editor on desktop and phones', () => withEditor(async (host, doc) => {
         await host.__geoEditor.handleFiles([jsonFile(collection([point({ name: 'Fullscreen motion' })]), 'fullscreen-motion.geojson')]);
         const map = host.__geoEditor.map;
@@ -1638,7 +1820,7 @@
           await new Promise(resolve => host.requestAnimationFrame(() => host.requestAnimationFrame(resolve)));
         };
         const controlBounds = () => [...container.querySelectorAll('.leaflet-top, .leaflet-bottom')].map(element => ({ element, bounds: element.getBoundingClientRect() }));
-        const assertFullscreenControlMotion = (before, anchorBefore) => {
+        const assertFullscreenControlMotion = (before, anchorBefore, showing = false) => {
           if (host.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
           doc.querySelectorAll('.toast').forEach(toast => toast.remove());
           const panelMotion = doc.getElementById('topbar').getAnimations().find(animation => animation.effect.getKeyframes().some(frame => 'transform' in frame));
@@ -1655,6 +1837,7 @@
           }
           const synchronized = doc.getAnimations().filter(animation => animation.effect.getComputedTiming().iterations !== Infinity);
           synchronized.forEach(animation => { animation.pause(); animation.currentTime = 0; });
+          if (host.innerWidth <= 760 && showing) assert(doc.getElementById('sidebar').getBoundingClientRect().bottom <= 1, 'Mobile sidebar reappears onscreen before its fullscreen exit animation');
           before.forEach(({ element, bounds }) => {
             const current = element.getBoundingClientRect();
             assert(Math.abs(current.left - bounds.left) < 1 && Math.abs(current.top - bounds.top) < 1, 'Fullscreen map controls jump before starting their transition');
@@ -1674,7 +1857,7 @@
               const bottom = Math.min(host.innerHeight, bounds.bottom);
               if (right - left > 4 && bottom - top > 4) {
                 const hit = doc.elementFromPoint((left + right) / 2, (top + bottom) / 2);
-                assert(hit && panel.contains(hit), `${id} is obscured while the fullscreen panels animate together`);
+                assert(hit && (panel.contains(hit) || hit.closest('.leaflet-control')), `${id} is obscured while the fullscreen panels animate together`);
               }
             }
           }
@@ -1692,6 +1875,7 @@
             }
           }
           synchronized.forEach(animation => { animation.currentTime = animation.effect.getTiming().duration * .999; });
+          if (host.innerWidth <= 760 && !showing) assert(doc.getElementById('sidebar').getBoundingClientRect().bottom <= 1, 'Mobile sidebar still occupies the header area when fullscreen hides it');
           const handoff = anchor.getBoundingClientRect();
           synchronized.forEach(animation => animation.play());
           return handoff;
@@ -1730,7 +1914,7 @@
           const exiting = controlBounds();
           const exitingAnchor = anchor.getBoundingClientRect();
           button.click();
-          const exited = assertFullscreenControlMotion(exiting, exitingAnchor);
+          const exited = assertFullscreenControlMotion(exiting, exitingAnchor, true);
           await settle();
           assertMapHandoff(exited);
           assert(viewResets === resetsBefore, 'Fullscreen resets the map view after resizing');
@@ -3168,6 +3352,8 @@
           doc.getElementById('btnNewLayer').click();
           doc.querySelector('#dlgBody input[value="upload"]').click();
           doc.getElementById('dlgOk').click();
+          assert(picked, 'Upload picker was deferred beyond the confirmation tap');
+          assert(!doc.getElementById('dlg').open, 'Upload picker opened behind a modal dialog');
           doc.getAnimations().forEach(animation => animation.finish());
           for (let attempt = 0; attempt < 500; attempt++) {
             if (picked && host.__geoEditor.state.layers.length && progress.hidden) break;

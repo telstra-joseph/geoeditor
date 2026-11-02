@@ -1,10 +1,10 @@
 # Geo Editor
 
-**Version 3.7 | October 2026**
+**Version 3.8 | November 2026**
 
 A browser-based editor for geospatial files. Load shapefiles, KML, KMZ or GeoJSON, edit shapes and attribute data on a map, then export the result — including QGIS-ready shapefiles with customisable, toggleable symbol styles.
 
-Imported files and edits are processed locally in your browser, not uploaded to a server. There is no build step. Basemap tiles and the Doto heading font are fetched from external services.
+Imported files and edits are processed locally in your browser, not uploaded to a server. There is no build step. Basemap tiles and the Doto heading font are fetched from external services. Address search sends typed queries and the visible map center to Esri's online autocomplete service after a 200ms pause; imported layer data is not sent. Typing at least three characters offers up to two address completions, prioritizing nearby matches and limiting completions to Australia while viewing the Australian region. Selecting a completion resolves that exact address. Enter or the search icon still performs a worldwide address search biased toward the map center.
 
 See [FLOWCHART.md](./FLOWCHART.md) for diagrams of how the app works.
 
@@ -30,6 +30,7 @@ See [FLOWCHART.md](./FLOWCHART.md) for diagrams of how the app works.
 ### Map and layers
 Drag a layer's grip handle to change its drawing order; the top layer in the list draws on top. Focus the handle and use Arrow Up/Down to reorder with the keyboard. Ordering is retained through selection, visibility changes and map refreshes, without changing feature data. Reordering moves existing sidebar rows without rescanning feature collections or rebuilding folder controls. Drag previews use cached geometry and at most one update per animation frame; hidden-layer moves do not redraw the map unless displayed-layer stacking changes.
 - Leaflet map with Standard (OpenStreetMap), Satellite (Esri imagery), Hybrid (Esri Open Basemap imagery with roads and labels), and Blank basemaps. Hybrid uses the public Open Basemap Hybrid Reference vector style over Esri World Imagery.
+- Address search appears at the bottom-right of the map only while a layer is loaded. On phones, the search button animates into a bar; its X, an outside tap or Escape animates it closed. The X turns red on hover. The mobile map scale stays bottom-left. Results open upward. Submit a query and select a result to zoom to a temporary marker without modifying the layer data. Desktop's clear button removes the marker. An internet connection is required.
 - Press the basemap button to open its options; press it again, press Escape, or click the map to dismiss them. Enter and Space also toggle the options. Small square previews appear to the left of each name, and the active row is highlighted. Radio circles are visually hidden while native exclusive selection and keyboard focus remain. Saved sessions retain Hybrid, and older OpenStreetMap selections restore as Standard.
 - Modal focus indicators are off by default without removing focus or keyboard navigation. Enable **Show modal focus indicators** in About to restore them; the preference is remembered in this browser. Keyboard focus indicators outside dialogs are unchanged.
 - Automatic WebGL rendering through PixiJS for layer points, lines and polygons, with retained geometry between updates. Same-zoom pans reuse unchanged projected polygon geometry; zooms, coordinate edits and style changes rebuild it without changing source coordinates. Canvas is used automatically if WebGL is unavailable; Leaflet's native SVG guides preserve drawing-tool interactions.
