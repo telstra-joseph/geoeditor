@@ -2429,6 +2429,42 @@
     const h = document.createElement('h4');
     h.textContent = lyr.name;
     form.appendChild(h);
+    if (leaf instanceof L.Polygon) {
+      const style = leaf.feature.style || (leaf.feature.style = {});
+      const controls = document.createElement('fieldset');
+      controls.className = 'polygon-style';
+      const legend = document.createElement('legend');
+      legend.textContent = 'Polygon style';
+      const fillLabel = document.createElement('label');
+      fillLabel.className = 'polygon-fill-toggle';
+      const filled = document.createElement('input');
+      filled.type = 'checkbox';
+      filled.checked = Number(style['fill-opacity'] ?? .25) > 0;
+      const filledOpacity = Number(style['fill-opacity']) > 0 ? Number(style['fill-opacity']) : .25;
+      filled.addEventListener('change', () => {
+        leaf.feature.style['fill-opacity'] = filled.checked ? filledOpacity : 0;
+        restyle(leaf);
+        renderTable();
+      });
+      fillLabel.append(filled, 'Filled');
+      controls.append(legend, fillLabel);
+      for (const [key, text] of [['stroke', 'Outline colour'], ['fill', 'Fill colour']]) {
+        const label = document.createElement('label');
+        label.append(text);
+        const colour = document.createElement('input');
+        colour.type = 'color';
+        colour.value = style[key] || lyr.color;
+        colour.setAttribute('aria-label', text);
+        colour.addEventListener('input', () => {
+          leaf.feature.style[key] = colour.value;
+          restyle(leaf);
+          renderTable();
+        });
+        label.appendChild(colour);
+        controls.appendChild(label);
+      }
+      form.appendChild(controls);
+    }
     const properties = leaf.feature.properties;
     const descriptionField = Object.keys(properties).find(field => field.toLowerCase() === 'description');
     const popupWidth = descriptionField ? Math.min(320, Math.max(100, map.getSize().x - 64)) : 320;
@@ -2512,11 +2548,12 @@
     if (leaf instanceof L.CircleMarker) leaf.options.radius = 3;
     const props = {};
     lyr.fields.forEach((f) => { props[f] = null; });
-    leaf.feature = { type: 'Feature', properties: props, geometry: null, style: {} };
+    leaf.feature = { type: 'Feature', properties: props, geometry: null, style: leaf instanceof L.Polygon ? { 'fill-opacity': 0 } : {} };
     lyr.group.addLayer(leaf);
     wireLeaf(lyr, leaf);
     state.selected = null;
     selectLeaf(leaf, { fromMap: true });
+    if (leaf instanceof L.Polygon) openPopup(leaf);
   });
 
   map.on('pm:remove', (e) => {

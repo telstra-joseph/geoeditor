@@ -2774,6 +2774,48 @@
         await waitFor(() => !doc.getElementById('dlg').open && !doc.getElementById('maskProgressDlg').open);
         assert(app.state.layers.length === 5 && doc.getElementById('toasts').textContent.includes('No features intersect'), 'Empty intersection created a layer or lacked feedback');
       }));
+      await test('Drawn polygons default to outlines and expose independent outline and fill colours', () => withEditor(async (host, doc) => {
+        const app = host.__geoEditor;
+        await app.handleFiles([jsonFile(collection([host.turf.bboxPolygon([148, -36, 150, -34])]), 'polygon-style.geojson')]);
+        const layer = app.state.active;
+        const imported = layer.group.getLayers()[0];
+        const polygon = host.L.polygon([[-35, 149], [-35, 149.01], [-35.01, 149]]);
+        app.map.fire('pm:create', { layer: polygon, shape: 'Polygon' });
+        const controls = () => doc.querySelector('.polygon-style');
+        const filled = () => controls().querySelector('input[type="checkbox"]');
+        const colour = name => controls().querySelector(`input[aria-label="${name} colour"]`);
+        assert(polygon.options.fillOpacity === 0 && !filled().checked, 'Drawn polygon is not outline-only by default');
+        assert(imported.options.fillOpacity === .25, 'Drawing changed the imported polygon default');
+        for (const [name, value] of [['Outline', '#ff0000'], ['Fill', '#00ff00']]) {
+          colour(name).value = value;
+          colour(name).dispatchEvent(new host.Event('input', { bubbles: true }));
+        }
+        assert(polygon.feature.style.stroke === '#ff0000' && polygon.feature.style.fill === '#00ff00' && polygon.options.fillOpacity === 0, 'Independent colours changed transparency or were not saved');
+        filled().click();
+        assert(polygon.options.fillOpacity === .25 && polygon.options.fillColor === '#00ff00', 'Filled mode did not apply the chosen fill colour');
+        filled().click();
+        assert(polygon.options.fillOpacity === 0 && polygon.feature.style.fill === '#00ff00', 'Outline-only mode lost the fill colour');
+        app.map.closePopup();
+        imported.fire('click', { latlng: imported.getBounds().getCenter() });
+        assert(polygon.options.color === '#ff0000', 'Chosen outline colour was not applied after deselection');
+        polygon.fire('click', { latlng: polygon.getBounds().getCenter() });
+        assert(!filled().checked && colour('Outline').value === '#ff0000' && colour('Fill').value === '#00ff00', 'Reopening the polygon lost its style controls');
+        const exported = layer.group.toGeoJSON(false).features.find(feature => feature.style?.stroke === '#ff0000');
+        assert(exported?.style['fill-opacity'] === 0 && exported.style.fill === '#00ff00', 'Feature serialization lost polygon styling');
+        const layerColour = doc.querySelector(`#layerList li[data-layer-id="${layer.id}"] input[type="color"]`);
+        layerColour.value = '#0000ff';
+        layerColour.dispatchEvent(new host.Event('input', { bubbles: true }));
+        colour('Outline').value = '#ff0000';
+        colour('Outline').dispatchEvent(new host.Event('input', { bubbles: true }));
+        filled().click();
+        assert(polygon.feature.style.stroke === '#ff0000' && polygon.feature.style.fill === '#0000ff' && polygon.options.fillOpacity === .25, 'Layer colour changes invalidated open polygon style controls');
+        for (const width of [1440, 390, 320]) {
+          host.frameElement.style.width = `${width}px`;
+          await pause();
+          const bounds = controls().getBoundingClientRect();
+          assert(controls().scrollWidth <= controls().clientWidth + 1 && bounds.width > 0, `Polygon style controls overflow at ${width}px`);
+        }
+      }));
       await test('Drawn masks do not enter the source layer and cancelled drawing restores normal creation', () => withEditor(async (host, doc) => {
         const app = host.__geoEditor;
         const target = app.createLayer({ name: 'Target', features: [host.turf.bboxPolygon([-1, -1, 4, 3])] });

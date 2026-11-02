@@ -663,6 +663,11 @@ dialog menu { display: flex; flex-direction: row-reverse; gap: 8px; padding: 0; 
 .popup-form input, .popup-form textarea { display: block; width: 100%; padding: 3px 6px; border: 1px solid #cbd5e1; border-radius: 4px; font-weight: 400; background: var(--surface); color: var(--ink); }
 .popup-form textarea { min-height: 67px; resize: vertical; }
 .popup-form summary { cursor: pointer; margin-bottom: 6px; }
+.popup-form .polygon-style { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin: 0 0 8px; padding: 0; border: 0; }
+.polygon-style legend { margin-bottom: 6px; font-size: 12px; font-weight: 600; }
+.popup-form .polygon-fill-toggle { grid-column: 1 / -1; display: flex; align-items: center; gap: 6px; }
+.popup-form .polygon-fill-toggle input { width: 16px; height: 16px; padding: 0; }
+.popup-form .polygon-style input[type="color"] { width: 32px; height: 28px; padding: 2px; cursor: pointer; }
 .feature-description { max-height: min(180px, 30vh); overflow: auto; overflow-wrap: anywhere; white-space: pre-wrap; margin-bottom: 6px; font-size: 12px; line-height: 1.4; }
 .feature-description.formatted { white-space: normal; }
 .feature-description :is(p, h1, h2, h3, h4, h5, h6, ul, ol, dl, blockquote, pre) { margin-top: 4px; margin-bottom: 4px; }
