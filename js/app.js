@@ -347,7 +347,65 @@
           if (f.placeholder) input.placeholder = f.placeholder;
         }
         if (f.hideLabel) input.setAttribute('aria-label', f.label);
-        label.appendChild(input);
+        if (f.contained && f.type === 'select') {
+          const picker = document.createElement('details');
+          picker.className = 'contained-picker';
+          const summary = document.createElement('summary');
+          const selectedLabel = document.createElement('span');
+          const updateLabel = () => {
+            selectedLabel.textContent = input.selectedOptions[0]?.textContent || '';
+            summary.title = selectedLabel.textContent;
+          };
+          summary.append(selectedLabel, actionIcon('ChevronDown'));
+          input.size = Math.min(6, Math.max(2, f.options.length));
+          input.setAttribute('aria-label', f.label);
+          let expanded = false;
+          let pickerMotion = null;
+          const setExpanded = async (open, restoreFocus = true) => {
+            const current = getComputedStyle(input);
+            const from = picker.open ? { opacity: current.opacity, translate: current.translate, scale: current.scale } : { opacity: 0, translate: '0px -6px', scale: '.98' };
+            expanded = open;
+            summary.setAttribute('aria-expanded', String(open));
+            pickerMotion?.cancel();
+            if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+              picker.open = open;
+              if (open) input.focus();
+              else if (restoreFocus) summary.focus();
+              return;
+            }
+            picker.open = true;
+            const motion = input.animate([from, open ? { opacity: 1, translate: '0px 0px', scale: '1' } : { opacity: 0, translate: '0px -6px', scale: '.98' }], {
+              duration: open ? 180 : 140, easing: 'cubic-bezier(.22, 1, .36, 1)', fill: 'both',
+            });
+            pickerMotion = motion;
+            if (open) input.focus();
+            else if (restoreFocus) summary.focus();
+            await motion.finished.catch(() => {});
+            if (pickerMotion !== motion) return;
+            picker.open = open;
+            motion.cancel();
+            pickerMotion = null;
+          };
+          summary.setAttribute('aria-expanded', 'false');
+          summary.addEventListener('click', event => { event.preventDefault(); setExpanded(!expanded); });
+          input.addEventListener('change', updateLabel);
+          input.addEventListener('click', event => {
+            if (event.target.tagName !== 'OPTION') return;
+            setExpanded(false);
+          });
+          input.addEventListener('keydown', event => {
+            if (event.key !== 'Enter' && event.key !== 'Escape') return;
+            event.preventDefault();
+            event.stopPropagation();
+            setExpanded(false);
+          });
+          const dismissPicker = event => { if (expanded && !picker.contains(event.target)) setExpanded(false, false); };
+          dlg.addEventListener('click', dismissPicker);
+          dlg.addEventListener('close', () => { pickerMotion?.cancel(); dlg.removeEventListener('click', dismissPicker); }, { once: true });
+          updateLabel();
+          picker.append(summary, input);
+          label.appendChild(picker);
+        } else label.appendChild(input);
         if (f.hint) {
           const small = document.createElement('small');
           small.textContent = f.hint;
@@ -385,7 +443,7 @@
       dlg.returnValue = 'cancel';
       dlg.showModal();
       const field = Object.values(inputs)[0];
-      const first = field?.querySelector('input:checked') || field;
+      const first = field?.closest('details')?.querySelector('summary') || field?.querySelector('input:checked') || field;
       if (first) { first.focus(); if (first.select) first.select(); }
     });
   }
@@ -3996,19 +4054,64 @@
   async function exportBaseName(lyr, feature = null) {
     const base = safeName(lyr.name);
     const selected = feature || (state.selected && state.selected._glayer === lyr ? state.selected : null);
-    if (!selected || !lyr.fields.length) return base;
-    const options = [['', 'Use layer name'], ...lyr.fields.map((field) => {
+    const fields = selected ? lyr.fields : [];
+    const options = [['', 'Use layer name'], ...fields.map((field, index) => {
       const value = display(selected.feature.properties[field]).replace(/\s+/g, ' ').trim();
-      return [field, `${field}: ${value || '(empty)'}`];
-    })];
-    const choice = await askForm('Export filename', [
-      { key: 'field', label: 'Name from selected row', type: 'select', value: '', options },
-    ], { message: `Choose an attribute from the selected feature in “${lyr.name}”.` });
+      return [`field:${index}`, `${field}: ${value || '(empty)'}`];
+    }), ['custom', 'Custom name']];
+    const pending = askForm('Export filename', [
+      { key: 'field', label: 'Filename source', type: 'select', value: '', options, contained: true },
+      { key: 'custom', label: 'Custom name', value: base, required: true },
+    ], { compact: true });
+    const source = $('dlgBody').querySelector('select');
+    const custom = $('dlgBody').querySelector('input');
+    custom.disabled = true;
+    custom.parentElement.hidden = true;
+    let customMotion = null;
+    const updateCustom = () => {
+      const showing = source.value === 'custom';
+      if (showing === custom.disabled) {
+        const panel = custom.parentElement;
+        const current = getComputedStyle(panel);
+        const from = panel.hidden ? { height: '0px', marginBottom: '0px', opacity: 0, translate: '0px -4px' } : { height: current.height, marginBottom: current.marginBottom, opacity: current.opacity, translate: current.translate };
+        customMotion?.cancel();
+        custom.disabled = !showing;
+        if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+          panel.hidden = !showing;
+          panel.style.removeProperty('overflow');
+        }
+        else {
+          panel.hidden = false;
+          const height = getComputedStyle(panel).height;
+          const marginBottom = getComputedStyle(panel).marginBottom;
+          panel.style.overflow = 'hidden';
+          const motion = panel.animate([from, showing ? { height, marginBottom, opacity: 1, translate: '0px 0px' } : { height: '0px', marginBottom: '0px', opacity: 0, translate: '0px -4px' }], {
+            duration: 160, easing: 'cubic-bezier(.22, 1, .36, 1)', fill: 'both',
+          });
+          customMotion = motion;
+          motion.finished.then(() => {
+            if (customMotion !== motion) return;
+            panel.hidden = !showing;
+            motion.cancel();
+            panel.style.removeProperty('overflow');
+            customMotion = null;
+          }).catch(() => {});
+        }
+      }
+      custom.setCustomValidity(custom.disabled || custom.value.trim() ? '' : 'Enter a filename.');
+    };
+    source.addEventListener('change', updateCustom);
+    custom.addEventListener('input', updateCustom);
+    updateCustom();
+    const choice = await pending;
+    customMotion?.cancel();
     if (!choice) return null;
     if (!choice.field) return base;
-    const value = display(selected.feature.properties[choice.field]).trim();
+    if (choice.field === 'custom') return safeName(choice.custom);
+    const field = fields[Number(choice.field.slice('field:'.length))];
+    const value = display(selected.feature.properties[field]).trim();
     if (!value) {
-      toast(`The selected row has no value in “${choice.field}”; using the layer name.`, 'warn');
+      toast(`The selected row has no value in “${field}”; using the layer name.`, 'warn');
       return base;
     }
     return safeName(value);

@@ -201,10 +201,18 @@
         host.URL.createObjectURL = blob => { downloads.push({ blob }); return 'blob:worker-export-test'; };
         host.HTMLAnchorElement.prototype.click = function() { downloads.at(-1).name = this.download; };
         host.ExportCore.generate = host.ExportCore.pack = () => { throw new Error('Export unexpectedly used the main thread'); };
+        const acceptName = async () => {
+          for (let attempt = 0; attempt < 100 && !doc.getElementById('dlg').open; attempt++) await new Promise(resolve => host.setTimeout(resolve, 10));
+          assert(doc.getElementById('dlgTitle').textContent === 'Export filename' && doc.getElementById('dlg').open, 'Filename dialog did not open');
+          doc.getElementById('dlgOk').click();
+          doc.getAnimations().filter(animation => animation.effect.getComputedTiming().iterations !== Infinity).forEach(animation => animation.finish());
+        };
         try {
           for (const format of ['geojson', 'csv', 'kml', 'kmz']) {
             doc.getElementById('fmt').value = format;
-            await app.downloadLayers([layer]);
+            const pending = app.downloadLayers([layer]);
+            await acceptName();
+            await pending;
             const download = downloads.at(-1);
             assert(download.name === `worker-export.${format}`, `Wrong download filename for ${format}`);
             if (format === 'geojson') assert(JSON.parse(await download.blob.text()).features[0].properties.count === 7, 'GeoJSON download lost attributes');
@@ -214,6 +222,7 @@
           }
           doc.getElementById('fmt').value = 'shp';
           const pending = app.downloadLayers([layer]);
+          await acceptName();
           for (let attempt = 0; attempt < 100 && !doc.getElementById('shapefileExportDlg').open; attempt++) await new Promise(resolve => host.setTimeout(resolve, 20));
           assert(doc.getElementById('shapefileExportDlg').open, 'Shapefile options did not open');
           const category = doc.getElementById('shapefileCategoryField');
@@ -232,10 +241,108 @@
           const qml = await archive.file('worker-export.qml').async('string');
           assert(qml.includes('18,52,86,255') && host.QgisStyle.read(qml).entries[0].category.getAttribute('value') === 'A, "B"', 'Worker export lost edited symbols or category values');
           doc.getElementById('fmt').value = 'geojson';
-          await app.downloadLayers([layer, layer]);
+          const multiplePending = app.downloadLayers([layer, layer]);
+          await acceptName();
+          await pause();
+          await acceptName();
+          await multiplePending;
           const multiple = await host.JSZip.loadAsync(await downloads.at(-1).blob.arrayBuffer());
           assert(multiple.file('worker-export.geojson') && multiple.file('worker-export_2.geojson'), 'Worker archive lost unique filenames');
           assert(layer.group.getLayers()[0].feature.properties.count === 7, 'Export changed source attributes');
+          const leaf = layer.group.getLayers()[0];
+          const originalName = leaf.feature.properties.name;
+          let attributePickerHeight = 0;
+          leaf.feature.properties.name = 'Very long attribute value '.repeat(60);
+          for (const width of [1440, 390, 320]) {
+            host.frameElement.style.width = `${width}px`;
+            await pause();
+            const namedPending = app.downloadLayers([layer], leaf);
+            const dialog = doc.getElementById('dlg');
+            const picker = dialog.querySelector('details');
+            const source = dialog.querySelector('select');
+            const custom = dialog.querySelector('input');
+            doc.getAnimations().filter(animation => animation.effect.getComputedTiming().iterations !== Infinity).forEach(animation => animation.finish());
+            const initialHeight = dialog.getBoundingClientRect().height;
+            assert(host.getComputedStyle(custom.parentElement).display === 'none' && custom.disabled, 'Custom name is visible or validates before it is selected');
+            picker.querySelector('summary').click();
+            assert(source.getAnimations().length > 0, 'Filename picker opens without an animation');
+            await Promise.all(source.getAnimations().map(animation => animation.finished));
+            await pause();
+            const bounds = dialog.getBoundingClientRect();
+            const rect = source.getBoundingClientRect();
+            attributePickerHeight = rect.height;
+            if (width >= 390) assert(rect.width > bounds.width, 'Filename picker does not use its bounded extra width');
+            assert(Math.abs(bounds.height - initialHeight) < 1, 'Opening the filename picker resizes the modal');
+            assert(rect.left >= bounds.left - 24 && rect.right <= bounds.right + 24 && rect.left >= 8 && rect.right <= host.innerWidth - 8 && rect.bottom <= host.innerHeight - 8, `Filename picker exceeds its bounded overhang at width ${width}`);
+            source.value = 'custom';
+            source.dispatchEvent(new host.Event('change', { bubbles: true }));
+            assert(custom.parentElement.getAnimations().length > 0, 'Custom name appears without an animation');
+            await Promise.all(custom.parentElement.getAnimations().map(animation => animation.finished));
+            await pause();
+            assert(dialog.getBoundingClientRect().height > initialHeight + 30, 'Custom name does not expand the modal to fit its field');
+            source.value = '';
+            source.dispatchEvent(new host.Event('change', { bubbles: true }));
+            assert(custom.parentElement.getAnimations().length > 0, 'Hiding custom name does not animate the modal shrink');
+            await Promise.all(custom.parentElement.getAnimations().map(animation => animation.finished));
+            await pause();
+            assert(custom.parentElement.hidden && Math.abs(dialog.getBoundingClientRect().height - initialHeight) < 1, 'Hidden custom name leaves unused space in the modal');
+            source.value = 'custom';
+            source.dispatchEvent(new host.Event('change', { bubbles: true }));
+            await Promise.all(custom.parentElement.getAnimations().map(animation => animation.finished));
+            source.dispatchEvent(new host.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+            assert(source.getAnimations().length > 0, 'Filename picker closes without an animation');
+            await Promise.all(source.getAnimations().map(animation => animation.finished));
+            await pause();
+            assert(!picker.open && dialog.open, 'Closing the filename picker also closes the modal');
+            assert(!custom.disabled && host.getComputedStyle(custom.parentElement).display !== 'none', 'Custom name did not become editable');
+            custom.value = '   ';
+            custom.dispatchEvent(new host.Event('input', { bubbles: true }));
+            doc.getElementById('dlgOk').click();
+            assert(dialog.open && !custom.checkValidity(), 'Blank custom name was accepted');
+            custom.value = `Custom / export ${width}`;
+            custom.dispatchEvent(new host.Event('input', { bubbles: true }));
+            await acceptName();
+            await namedPending;
+            assert(downloads.at(-1).name === `Custom _ export ${width}.geojson`, 'Custom filename was not sanitized or used for the download');
+          }
+          leaf.feature.properties.name = originalName;
+          const attributePending = app.downloadLayers([layer], leaf);
+          const source = doc.querySelector('#dlgBody select');
+          source.value = `field:${layer.fields.indexOf('count')}`;
+          source.dispatchEvent(new host.Event('change', { bubbles: true }));
+          await acceptName();
+          await attributePending;
+          assert(downloads.at(-1).name === '7.geojson', 'Attribute-based filename changed');
+          const count = downloads.length;
+          const canceled = app.downloadLayers([layer]);
+          doc.querySelector('#dlg button[value="cancel"]').click();
+          doc.getAnimations().filter(animation => animation.effect.getComputedTiming().iterations !== Infinity).forEach(animation => animation.finish());
+          await canceled;
+          assert(downloads.length === count, 'Canceling the filename dialog downloaded a file');
+          const matchMedia = host.matchMedia;
+          host.matchMedia = query => query === '(prefers-reduced-motion: reduce)' ? { matches: true } : matchMedia.call(host, query);
+          try {
+            host.frameElement.style.height = '360px';
+            await pause();
+            const reducedPending = app.downloadLayers([layer]);
+            const dialog = doc.getElementById('dlg');
+            const picker = dialog.querySelector('details');
+            const source = dialog.querySelector('select');
+            const custom = dialog.querySelector('input');
+            doc.getAnimations().filter(animation => animation.effect.getComputedTiming().iterations !== Infinity).forEach(animation => animation.finish());
+            picker.querySelector('summary').click();
+            assert(picker.open && source.getAnimations().length === 0, 'Reduced-motion filename picker still animates');
+            const rect = source.getBoundingClientRect();
+            assert(rect.height < attributePickerHeight && rect.bottom <= host.innerHeight - 8, 'Short filename picker does not fit its content or short viewport');
+            source.value = 'custom';
+            source.dispatchEvent(new host.Event('change', { bubbles: true }));
+            assert(!custom.disabled && !custom.parentElement.hidden && custom.parentElement.getAnimations().length === 0, 'Reduced-motion custom name still animates');
+            source.dispatchEvent(new host.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+            assert(!picker.open && dialog.open, 'Reduced-motion picker does not close immediately without dismissing the modal');
+            doc.querySelector('#dlg button[value="cancel"]').click();
+            doc.getAnimations().filter(animation => animation.effect.getComputedTiming().iterations !== Infinity).forEach(animation => animation.finish());
+            await reducedPending;
+          } finally { host.matchMedia = matchMedia; }
         } finally {
           host.URL.createObjectURL = originalUrl;
           host.HTMLAnchorElement.prototype.click = originalClick;
@@ -579,6 +686,7 @@
           assert(doc.getElementById('toasts').lastElementChild.textContent.includes(`(${count} ${noun})`), 'Import notification has incorrect plural form');
           doc.getElementById('fmt').value = 'shp';
           const exporting = app.downloadLayers([app.state.active]);
+          await closeWith(doc.getElementById('dlg'), 'ok');
           await new Promise(resolve => host.setTimeout(resolve, 0));
           assert(doc.getElementById('shapefileExportSummary').textContent === `${count} of ${count} attribute ${count === 1 ? 'column' : 'columns'} selected.`, 'Export column count has incorrect plural form');
           await closeWith(doc.getElementById('shapefileExportDlg'), 'cancel');
@@ -2383,7 +2491,10 @@
         try {
           for (const format of ['kml', 'kmz']) {
             doc.getElementById('fmt').value = format;
-            await app.downloadLayers([result]);
+            const exporting = app.downloadLayers([result]);
+            doc.getElementById('dlgOk').click();
+            doc.getAnimations().filter(animation => animation.effect.getComputedTiming().iterations !== Infinity).forEach(animation => animation.finish());
+            await exporting;
             const blob = downloads.at(-1);
             const text = format === 'kml' ? await blob.text() : await (await host.JSZip.loadAsync(await blob.arrayBuffer())).file('doc.kml').async('string');
             const xml = new host.DOMParser().parseFromString(text, 'text/xml');

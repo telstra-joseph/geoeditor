@@ -107,7 +107,7 @@ Notes:
 
 ### Export
 Choose **Download**, select **Active layer** or **All layers**, then choose a format. Download is unavailable until a layer exists.
-When a feature is selected in the active layer, choose one of its attribute columns to use its value as the export filename.
+Choose the layer name or **Custom name** in the filename dialog; selecting **Custom name** reveals a text field. When a feature is selected, its attribute values are also available. The modal sizes to its visible content, smoothly growing or shrinking with the custom-name field; hiding that field leaves no reserved space. The picker overlays the modal with a content-sized height and a small, viewport-bounded width overhang. Picker opening/closing, custom-field visibility and responsive sizing animate unless reduced motion is enabled. Blank custom names are rejected and filename-unsafe characters are replaced automatically.
 To export just one feature, use its row's download icon. It uses the current format and the clicked feature's filename values, with the usual column and style options for shapefiles. Other features and the current selection are unchanged. The layer-list download icon also reuses the current format.
 
 | Format | Output |

@@ -565,6 +565,23 @@ dialog { border: 1px solid var(--line); border-radius: 8px; padding: 18px 20px; 
 #dlg.compact :is(form, #dlgBody, label, select) { min-width: 0; max-width: 100%; }
 #dlg.compact .radio-options label { overflow-wrap: anywhere; }
 #dlg.compact menu { flex-wrap: wrap; }
+#dlg.compact:has(.contained-picker) { overflow: visible; transition: width 180ms ease; }
+#dlg.compact:has(.contained-picker) form { display: flex; flex-direction: column; min-height: 0; }
+#dlg.compact:has(.contained-picker) menu { margin-top: auto; margin-bottom: 0; }
+#dlgBody > [hidden] { display: none; }
+#dlg .contained-picker { position: relative; min-width: 0; margin-top: 4px; font-weight: 400; }
+#dlg .contained-picker summary { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px; cursor: pointer; list-style: none; }
+#dlg .contained-picker summary::-webkit-details-marker { display: none; }
+#dlg .contained-picker summary span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#dlg .contained-picker summary svg { transition: rotate 180ms ease; }
+#dlg .contained-picker summary[aria-expanded="true"] svg { rotate: 180deg; }
+#dlg .contained-picker select { appearance: auto; display: block; position: absolute; z-index: 2; top: calc(100% + 4px); left: 50%; transform: translateX(-50%); transform-origin: top center; width: calc(100% + 64px); min-width: 0; max-width: calc(100vw - 16px); max-height: min(240px, calc(50dvh - 16px)); margin: 0; padding: 4px; background: var(--surface); color: var(--ink); overflow: auto; box-shadow: 0 8px 24px rgba(0, 0, 0, .22); transition: width 180ms ease, max-width 180ms ease, max-height 180ms ease; }
+#dlg.compact #dlgBody .contained-picker select { max-width: calc(100vw - 16px); }
+#dlg .contained-picker option { padding: 8px; overflow: hidden; text-overflow: ellipsis; }
+#dlg .contained-picker summary:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  #dlg.compact:has(.contained-picker), #dlg .contained-picker select, #dlg .contained-picker summary svg { transition: none; }
+}
 #editHelpDlg { min-width: 0; width: min(560px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto; }
 dialog[open] { animation: dialog-enter 160ms ease-out both; }
 dialog[open].closing { animation: dialog-exit 180ms ease-in both; }
