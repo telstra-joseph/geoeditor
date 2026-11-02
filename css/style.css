@@ -544,6 +544,7 @@ table.attrs tr.sel td.rn { background: #d8eaff; }
 .toast.warn { background: #b45309; }
 
 dialog { border: 1px solid var(--line); border-radius: 8px; padding: 18px 20px; min-width: 340px; box-shadow: 0 14px 40px rgba(15, 23, 42, .22); }
+dialog.toolbar-anchored { position: fixed; inset: auto; margin: 0; left: var(--dialog-left); top: var(--dialog-top); transform-origin: top right; }
 :root:not([data-modal-focus="true"]) dialog :focus { outline: none !important; box-shadow: none !important; }
 :root[data-modal-focus="true"] dialog :focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 2px; }
 #aboutDlg { min-width: 0; width: min(360px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); padding: 12px 16px 24px; overflow: auto; }

@@ -295,7 +295,7 @@
     button.title = state.undo.length ? `Undo ${state.undo[state.undo.length - 1].label}` : 'Undo last table edit';
   }
 
-  function askForm(title, fields, { message = '', okLabel = 'OK', destructive = false, compact = false } = {}) {
+  function askForm(title, fields, { message = '', okLabel = 'OK', destructive = false, compact = false, anchor = null } = {}) {
     return new Promise((resolve) => {
       const dlg = $('dlg');
       dlg.classList.toggle('compact', compact);
@@ -442,10 +442,40 @@
       });
       dlg.returnValue = 'cancel';
       dlg.showModal();
+      anchorDialog(dlg, anchor);
       const field = Object.values(inputs)[0];
       const first = field?.closest('details')?.querySelector('summary') || field?.querySelector('input:checked') || field;
       if (first) { first.focus(); if (first.select) first.select(); }
     });
+  }
+
+  function anchorDialog(dialog, anchor) {
+    const reset = () => {
+      dialog.classList.remove('toolbar-anchored');
+      dialog.style.removeProperty('--dialog-left');
+      dialog.style.removeProperty('--dialog-top');
+    };
+    reset();
+    if (!anchor) return;
+    const position = () => {
+      if (!window.matchMedia('(min-width: 1025px)').matches) { reset(); return; }
+      const bounds = anchor.getBoundingClientRect();
+      dialog.classList.add('toolbar-anchored');
+      const left = Math.max(8, Math.min(bounds.right - dialog.offsetWidth, window.innerWidth - dialog.offsetWidth - 8));
+      const top = Math.max(8, Math.min(bounds.bottom + 8, window.innerHeight - dialog.offsetHeight - 8));
+      dialog.style.setProperty('--dialog-left', `${left}px`);
+      dialog.style.setProperty('--dialog-top', `${top}px`);
+    };
+    position();
+    const observer = new ResizeObserver(position);
+    observer.observe(dialog);
+    observer.observe(anchor);
+    window.addEventListener('resize', position);
+    dialog.addEventListener('close', () => {
+      observer.disconnect();
+      window.removeEventListener('resize', position);
+      reset();
+    }, { once: true });
   }
 
   const confirmBox = async (title, message, okLabel = 'Delete', destructive = false) => !!(await askForm(title, [], { message, okLabel, destructive }));
@@ -2753,7 +2783,7 @@
       const options = [['save', saved ? 'Replace saved session' : 'Save current session', noLayers]];
       if (saved) options.push(['restore', 'Restore saved session'], ['clear', 'Delete saved session']);
       const result = await askForm('Session', [{ key: 'action', label: 'Session action', type: 'radio', value: noLayers ? 'restore' : 'save', options }], {
-        message: saved ? `Saved ${new Date(saved.savedAt).toLocaleString()}` : 'No saved session.', okLabel: 'Continue',
+        message: saved ? `Saved ${new Date(saved.savedAt).toLocaleString()}` : 'No saved session.', okLabel: 'Continue', anchor: $('btnSession'),
       });
       if (!result) return;
       if (result.action === 'save') {
@@ -4211,7 +4241,7 @@
     try {
       source = await askForm('New layer', [
         { key: 'source', label: 'New layer', hideLabel: true, type: 'radio', value: 'blank', options: [['blank', 'Blank layer'], ['upload', 'Upload layer']] },
-      ], { okLabel: 'Continue', compact: true });
+      ], { okLabel: 'Continue', compact: true, anchor: $('btnNewLayer') });
     } finally {
       sourceForm.removeEventListener('submit', uploadFromSource);
     }
@@ -4220,7 +4250,7 @@
       { key: 'name', label: 'Layer name', value: 'New layer', required: true },
       { key: 'geom', label: 'Geometry type', type: 'select', value: 'Polygon', options: [['Point', 'Points'], ['Line', 'Lines'], ['Polygon', 'Polygons'], ['Mixed', 'Mixed (KML / GeoJSON style)']] },
       { key: 'fields', label: 'Attribute fields', value: 'name, description', hint: 'Comma-separated text fields. You can add more later.' },
-    ], { okLabel: 'Create' });
+    ], { okLabel: 'Create', anchor: $('btnNewLayer') });
     if (!r) return;
     const fields = [...new Set(r.fields.split(',').map((s) => s.trim()).filter(Boolean))];
     const types = {};
@@ -4293,13 +4323,13 @@
     if (!state.layers.length) { toast('No layers to download.', 'warn'); return; }
     const scope = await askForm('Download', [
       { key: 'scope', label: 'Download', hideLabel: true, type: 'radio', value: state.active ? 'active' : 'all', options: [['active', 'Active layer'], ['all', 'All layers']] },
-    ], { okLabel: 'Continue', compact: true });
+    ], { okLabel: 'Continue', compact: true, anchor: $('btnDownload') });
     if (!scope) return;
     const layers = scope.scope === 'all' ? [...state.layers] : state.active ? [state.active] : [];
     if (!layers.length) { toast('Select a layer first.', 'warn'); return; }
     const format = await askForm('Download format', [
       { key: 'format', label: 'File type', type: 'select', value: $('fmt').value, options: [...$('fmt').options].map(option => [option.value, option.textContent]) },
-    ], { okLabel: 'Continue', compact: true });
+    ], { okLabel: 'Continue', compact: true, anchor: $('btnDownload') });
     if (!format) return;
     $('fmt').value = format.format;
     await downloadLayers(layers);

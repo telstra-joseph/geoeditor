@@ -1333,6 +1333,61 @@
           }, { width, height: 844 });
         }
       });
+      await test('Toolbar dialogs anchor beneath desktop buttons and stay centered on phones', () => withEditor(async (host, doc) => {
+        await host.__geoEditor.handleFiles([jsonFile(collection([point()]), 'toolbar-dialogs.geojson')]);
+        const dialog = doc.getElementById('dlg');
+        const settle = async () => {
+          doc.getAnimations().filter(animation => animation.effect.getComputedTiming().iterations !== Infinity).forEach(animation => animation.finish());
+          await new Promise(resolve => host.setTimeout(resolve, 40));
+        };
+        const waitOpen = async () => {
+          for (let attempt = 0; attempt < 100 && !dialog.open; attempt++) await new Promise(resolve => host.setTimeout(resolve, 10));
+          assert(dialog.open, 'Toolbar dialog did not open');
+          await settle();
+        };
+        const checkPosition = button => {
+          const bounds = dialog.getBoundingClientRect();
+          if (host.innerWidth > 1024) {
+            const trigger = button.getBoundingClientRect();
+            assert(dialog.classList.contains('toolbar-anchored') && Math.abs(bounds.top - trigger.bottom - 8) < 1 && Math.abs(bounds.right - trigger.right) < 1, 'Desktop dialog is not positioned beneath its toolbar button');
+          } else {
+            assert(!dialog.classList.contains('toolbar-anchored') && Math.abs(bounds.left + bounds.width / 2 - host.innerWidth / 2) < 1, 'Phone dialog retained desktop anchoring');
+          }
+          assert(bounds.left >= 8 && bounds.right <= host.innerWidth - 8 && bounds.top >= 8 && bounds.bottom <= host.innerHeight - 8, 'Toolbar dialog escapes the viewport');
+        };
+        const close = async value => {
+          dialog.querySelector(`button[value="${value}"]`).click();
+          await settle();
+        };
+        for (const width of [1440, 390]) {
+          host.frameElement.style.width = `${width}px`;
+          await settle();
+          for (const id of ['btnNewLayer', 'btnDownload', 'btnSession']) {
+            const button = doc.getElementById(id);
+            button.click();
+            await waitOpen();
+            checkPosition(button);
+            if (id !== 'btnSession') {
+              await close('ok');
+              await waitOpen();
+              checkPosition(button);
+            }
+            await close('cancel');
+            assert(!dialog.classList.contains('toolbar-anchored'), 'Closed toolbar dialog retained its anchor state');
+          }
+        }
+        host.frameElement.style.width = '1440px';
+        await settle();
+        doc.getElementById('btnNewLayer').click();
+        await waitOpen();
+        host.frameElement.style.width = '390px';
+        await settle();
+        checkPosition(doc.getElementById('btnNewLayer'));
+        host.frameElement.style.width = '1440px';
+        await settle();
+        checkPosition(doc.getElementById('btnNewLayer'));
+        await close('cancel');
+      }));
       await test('Map drawing controls follow the empty import prompt and cancel modes after deleting the last layer', () => withEditor(async (host, doc) => {
         const app = host.__geoEditor;
         const toolbars = [...doc.querySelectorAll('.leaflet-pm-toolbar')];
